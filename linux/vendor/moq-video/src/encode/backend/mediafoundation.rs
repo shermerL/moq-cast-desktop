@@ -37,12 +37,12 @@ use windows::Win32::Media::MediaFoundation::{
 	MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC,
 	MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoPrimaries_SMPTE170M,
 	MFVideoTransFunc_709, MFVideoTransferMatrix_BT601, MFVideoTransferMatrix_BT709, eAVEncCommonRateControlMode_CBR,
-	eAVEncH264VProfile_Base, eAVEncH264VProfile_High, eAVEncH265VProfile_Main_420_8,
+	eAVEncH264VProfile_High, eAVEncH265VProfile_Main_420_8,
 };
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface};
 
-use super::super::encoder::{Codec, Config, H264Profile};
+use super::super::encoder::{Codec, Config};
 use super::{Backend, Encoded};
 use crate::frame::{Surface, interleave_uv};
 use crate::mf::{ComGuard, mf_err, pack_2x32};
@@ -109,7 +109,7 @@ unsafe impl Send for MediaFoundation {}
 
 impl MediaFoundation {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
-		let format = OutputFormat::for_codec(config.codec, config.h264_profile);
+		let format = OutputFormat::for_codec(config.codec);
 		let com = ComGuard::new()?;
 		let transform = enumerate_encoder(format.subtype)?;
 
@@ -714,19 +714,14 @@ struct OutputFormat {
 }
 
 impl OutputFormat {
-	fn for_codec(codec: Codec, h264_profile: H264Profile) -> Self {
-		match (codec, h264_profile) {
-			(Codec::H264, H264Profile::Baseline) => Self {
-				subtype: MFVideoFormat_H264,
-				profile: eAVEncH264VProfile_Base.0 as u32,
-				label: "H.264",
-			},
-			(Codec::H264, _) => Self {
+	fn for_codec(codec: Codec) -> Self {
+		match codec {
+			Codec::H264 => Self {
 				subtype: MFVideoFormat_H264,
 				profile: eAVEncH264VProfile_High.0 as u32,
 				label: "H.264",
 			},
-			(Codec::H265, _) => Self {
+			Codec::H265 => Self {
 				subtype: MFVideoFormat_HEVC,
 				profile: eAVEncH265VProfile_Main_420_8.0 as u32,
 				label: "H.265",

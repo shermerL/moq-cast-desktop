@@ -34,13 +34,13 @@ use cudarc::driver::CudaContext;
 #[cfg(feature = "nvdec")]
 use moq_nvenc::sys::nvEncodeAPI::NV_ENC_INPUT_RESOURCE_TYPE;
 use moq_nvenc::sys::nvEncodeAPI::{
-	GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_H264_GUID, NV_ENC_CODEC_HEVC_GUID, NV_ENC_H264_PROFILE_BASELINE_GUID,
-	NV_ENC_PARAMS_RC_MODE, NV_ENC_PRESET_P4_GUID, NV_ENC_TUNING_INFO, NV_ENC_VUI_COLOR_PRIMARIES,
-	NV_ENC_VUI_MATRIX_COEFFS, NV_ENC_VUI_TRANSFER_CHARACTERISTIC, NV_ENC_VUI_VIDEO_FORMAT,
+	GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_H264_GUID, NV_ENC_CODEC_HEVC_GUID, NV_ENC_PARAMS_RC_MODE,
+	NV_ENC_PRESET_P4_GUID, NV_ENC_TUNING_INFO, NV_ENC_VUI_COLOR_PRIMARIES, NV_ENC_VUI_MATRIX_COEFFS,
+	NV_ENC_VUI_TRANSFER_CHARACTERISTIC, NV_ENC_VUI_VIDEO_FORMAT,
 };
 use moq_nvenc::{Encoder, EncoderInitParams, Session};
 
-use super::super::encoder::{Codec, Config, H264Profile};
+use super::super::encoder::{Codec, Config};
 use super::{Backend, Encoded};
 use crate::frame::{Surface, interleave_uv};
 use crate::{Color, Error, Frame};
@@ -137,9 +137,6 @@ impl Nvenc {
 			// so the assignments are written per-arm rather than shared.
 			match config.codec {
 				Codec::H264 => {
-					if config.h264_profile == H264Profile::Baseline {
-						cfg.profileGUID = NV_ENC_H264_PROFILE_BASELINE_GUID;
-					}
 					cfg.encodeCodecConfig.h264Config.set_repeatSPSPPS(1);
 					cfg.encodeCodecConfig.h264Config.idrPeriod = config.gop;
 

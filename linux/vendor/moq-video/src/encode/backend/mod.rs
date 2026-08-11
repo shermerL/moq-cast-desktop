@@ -211,11 +211,6 @@ pub(crate) mod test_util {
 		full_range: false,
 	};
 
-	/// The H.264 profile_idc an Annex-B stream declares in its SPS.
-	pub(crate) fn declared_h264_profile(annexb: &[u8]) -> Option<u8> {
-		Some(sps(annexb)?.profile_idc.into())
-	}
-
 	/// The color description an H.264 Annex-B stream carries in its SPS, or `None`
 	/// if it carries none and a decoder would have to guess.
 	///
@@ -223,18 +218,6 @@ pub(crate) mod test_util {
 	/// quietly drops the VUI (or a driver that ignores it) fails the test instead
 	/// of passing on our own bookkeeping.
 	pub(crate) fn declared_color(annexb: &[u8]) -> Option<Described> {
-		let sps = sps(annexb)?;
-		let signal = sps.vui_parameters.as_ref()?.video_signal_type.as_ref()?;
-		let description = signal.colour_description.as_ref()?;
-		Some(Described {
-			primaries: description.colour_primaries,
-			transfer: description.transfer_characteristics,
-			matrix: description.matrix_coefficients,
-			full_range: signal.video_full_range_flag,
-		})
-	}
-
-	fn sps(annexb: &[u8]) -> Option<SeqParameterSet> {
 		// Every 4-byte start code contains a 3-byte one at offset 1, so scanning
 		// for the short form finds both.
 		let starts: Vec<usize> = (0..annexb.len().saturating_sub(2))
@@ -242,7 +225,7 @@ pub(crate) mod test_util {
 			.map(|i| i + 3)
 			.collect();
 
-		starts.iter().enumerate().find_map(|(n, &start)| {
+		let sps = starts.iter().enumerate().find_map(|(n, &start)| {
 			// Bound the NAL at the next start code: a trailing slice would
 			// leave the SPS parser reading into the following NAL.
 			let end = starts.get(n + 1).map_or(annexb.len(), |&next| next - 3);
@@ -251,6 +234,15 @@ pub(crate) mod test_util {
 				UnitType::SeqParameterSet => SeqParameterSet::from_bits(nal.rbsp_bits()).ok(),
 				_ => None,
 			}
+		})?;
+
+		let signal = sps.vui_parameters.as_ref()?.video_signal_type.as_ref()?;
+		let description = signal.colour_description.as_ref()?;
+		Some(Described {
+			primaries: description.colour_primaries,
+			transfer: description.transfer_characteristics,
+			matrix: description.matrix_coefficients,
+			full_range: signal.video_full_range_flag,
 		})
 	}
 }

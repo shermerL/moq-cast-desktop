@@ -29,6 +29,6 @@ mod sink;
 pub mod rate;
 
 pub use encoded::Encoded;
-pub use encoder::{Codec, Config, Encoder, H264Profile, Kind};
+pub use encoder::{Codec, Config, Encoder, Kind};
 pub use producer::{Options, Producer, publish_capture};
 pub use sink::Sink;

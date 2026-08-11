@@ -20,7 +20,7 @@
 use bytes::Bytes;
 use moq_vaapi::encode::{Config as VaapiConfig, Encoder};
 
-use super::super::encoder::{Config, H264Profile};
+use super::super::encoder::Config;
 use super::{Backend, Encoded};
 use crate::frame::I420;
 use crate::{Error, Frame};
@@ -38,11 +38,6 @@ unsafe impl Send for Vaapi {}
 
 impl Vaapi {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
-		if config.h264_profile == H264Profile::Baseline {
-			return Err(Error::Codec(anyhow::anyhow!(
-				"VAAPI backend cannot select an H.264 profile"
-			)));
-		}
 		let bitrate = config.resolved_bitrate().min(u32::MAX as u64) as u32;
 		let vaapi = VaapiConfig::new(config.width, config.height, config.framerate, bitrate, config.gop);
 		let encoder = Encoder::new(vaapi).map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI encoder init: {e:?}")))?;
