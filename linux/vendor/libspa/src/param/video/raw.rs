@@ -389,9 +389,12 @@ impl Debug for VideoInfoRaw {
         #[cfg(not(feature = "v0_3_65"))]
         let interlace_mode = self.interlace_mode().as_raw();
 
-        f.debug_struct("VideoInfoRaw")
-            .field("format", &self.format())
-            .field("flags", &self.flags())
+        let mut debug = f.debug_struct("VideoInfoRaw");
+        debug.field("format", &self.format());
+        #[cfg(feature = "v0_3_65")]
+        debug.field("flags", &self.flags());
+
+        debug
             .field("modifier", &self.modifier())
             .field("size", &self.size())
             .field("framerate", &self.framerate())
