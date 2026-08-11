@@ -6,13 +6,13 @@
 use bytes::Bytes;
 use openh264::OpenH264API;
 use openh264::encoder::{
-	BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, RateControlMode, TransferCharacteristics, UsageType,
-	VuiConfig,
+	BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, Profile, RateControlMode, TransferCharacteristics,
+	UsageType, VuiConfig,
 };
 use openh264::formats::YUVSlices;
 use openh264_sys2::{ENCODER_OPTION_BITRATE, SBitrateInfo, SPATIAL_LAYER_ALL};
 
-use super::super::encoder::Config;
+use super::super::encoder::{Config, H264Profile};
 use super::{Backend, Encoded};
 use crate::{Color, Error, Frame};
 
@@ -51,7 +51,7 @@ impl Openh264 {
 		}
 		.full_range(!color.limited());
 
-		let cfg = EncoderConfig::new()
+		let mut cfg = EncoderConfig::new()
 			.bitrate(BitRate::from_bps(config.resolved_bitrate().min(u32::MAX as u64) as u32))
 			.max_frame_rate(FrameRate::from_hz(config.framerate as f32))
 			.rate_control_mode(RateControlMode::Bitrate)
@@ -59,6 +59,9 @@ impl Openh264 {
 			.usage_type(UsageType::CameraVideoRealTime)
 			.intra_frame_period(IntraFramePeriod::from_num_frames(config.gop))
 			.vui(vui);
+		if config.h264_profile == H264Profile::Baseline {
+			cfg = cfg.profile(Profile::Baseline);
+		}
 
 		let encoder = Encoder::with_api_config(OpenH264API::from_source(), cfg)
 			.map_err(|e| Error::Codec(anyhow::anyhow!("openh264 init: {e}")))?;

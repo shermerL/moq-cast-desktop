@@ -16,7 +16,7 @@ use crate::{Error, Frame, Size};
 
 use super::Encoded;
 use super::Sink;
-use super::encoder::{self, Codec};
+use super::encoder::{self, Codec, H264Profile};
 use super::rate::{Control, Policy};
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
@@ -167,6 +167,8 @@ pub struct Options {
 	pub bitrate: Option<u64>,
 	/// Output codec. Defaults to [`Codec::H264`].
 	pub codec: Codec,
+	/// H.264 profile request. Ignored for other codecs.
+	pub h264_profile: H264Profile,
 	/// Encoder implementation preference.
 	pub kind: encoder::Kind,
 	/// Largest encoded frame. The source orientation is preserved, so a
@@ -193,6 +195,7 @@ impl std::fmt::Debug for Options {
 		f.debug_struct("Options")
 			.field("bitrate", &self.bitrate)
 			.field("codec", &self.codec)
+			.field("h264_profile", &self.h264_profile)
 			.field("kind", &self.kind)
 			.field("max_size", &self.max_size)
 			.field("bandwidth", &self.bandwidth.is_some())
@@ -400,6 +403,7 @@ async fn capture_loop<E: CatalogExt>(
 		let mut encoder_config = encoder::Config::new(output_size.width, output_size.height, framerate);
 		encoder_config.bitrate = encode.bitrate;
 		encoder_config.codec = encode.codec;
+		encoder_config.h264_profile = encode.h264_profile;
 		encoder_config.kind = encode.kind.clone();
 		// Off macOS this opens the encoder on a dedicated thread; see `sink`.
 		let mut encoder = Sink::open(&encoder_config).await?;

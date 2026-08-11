@@ -37,10 +37,11 @@ use objc2_video_toolbox::{
 	kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
 	kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
 	kVTCompressionPropertyKey_TransferFunction, kVTCompressionPropertyKey_YCbCrMatrix,
-	kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
+	kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_Baseline_AutoLevel,
+	kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
 };
 
-use super::super::encoder::{Codec, Config};
+use super::super::encoder::{Codec, Config, H264Profile};
 use super::{Backend, Encoded};
 use crate::frame::Surface;
 use crate::{Color, Error, Frame};
@@ -115,9 +116,10 @@ impl VideoToolbox {
 			false,
 		)?;
 		let profile = unsafe {
-			match config.codec {
-				Codec::H265 => kVTProfileLevel_HEVC_Main_AutoLevel,
-				_ => kVTProfileLevel_H264_High_AutoLevel,
+			match (config.codec, config.h264_profile) {
+				(Codec::H264, H264Profile::Baseline) => kVTProfileLevel_H264_Baseline_AutoLevel,
+				(Codec::H264, _) => kVTProfileLevel_H264_High_AutoLevel,
+				(Codec::H265, _) => kVTProfileLevel_HEVC_Main_AutoLevel,
 			}
 		};
 		set_property(&session, unsafe { kVTCompressionPropertyKey_ProfileLevel }, profile)?;

@@ -27,6 +27,17 @@ pub enum Codec {
 	H265,
 }
 
+/// Requested H.264 encoding profile.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum H264Profile {
+	/// Let the selected backend choose its normal profile.
+	#[default]
+	Auto,
+	/// Emit the H.264 Baseline profile for broad decoder compatibility.
+	Baseline,
+}
+
 /// Which encoder implementation to use. `#[non_exhaustive]` so new selection
 /// strategies can be added without breaking external `match`es.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -64,6 +75,8 @@ pub struct Config {
 	pub gop: u32,
 	/// Output codec. Defaults to [`Codec::H264`].
 	pub codec: Codec,
+	/// H.264 profile request. Ignored for other codecs.
+	pub h264_profile: H264Profile,
 	pub kind: Kind,
 	/// The color space of the input frames, written into the bitstream's VUI so a
 	/// decoder doesn't have to guess. `None` uses [`Color::infer`], which is both
@@ -87,6 +100,7 @@ impl Config {
 			// ~2 seconds at the configured framerate.
 			gop: framerate.saturating_mul(2).max(1),
 			codec: Codec::default(),
+			h264_profile: H264Profile::default(),
 			kind: Kind::Auto,
 			color: None,
 		}
@@ -371,6 +385,23 @@ mod tests {
 			has_start_code,
 			"first packet is not Annex-B: {:02x?}",
 			&first[..first.len().min(8)]
+		);
+	}
+
+	#[test]
+	fn software_encoder_emits_requested_baseline_profile() {
+		let mut config = Config::new(320, 240, 30);
+		config.kind = Kind::Software;
+		config.h264_profile = H264Profile::Baseline;
+		let mut encoder = Encoder::new(&config).unwrap();
+		encoder.keyframe();
+
+		let encoded = encoder.encode(&gray_frame(320, 240, 0)).unwrap();
+		let first = encoded.first().expect("a keyframe");
+
+		assert_eq!(
+			super::backend::test_util::declared_h264_profile(&first.payload),
+			Some(66)
 		);
 	}
 
