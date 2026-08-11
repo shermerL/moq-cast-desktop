@@ -1,0 +1,16 @@
+[package]
+name = "moq-cast-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wayland", "wgpu", "x11"] }
+thiserror = "2"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
