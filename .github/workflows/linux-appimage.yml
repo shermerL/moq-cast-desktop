@@ -46,6 +46,7 @@ jobs:
             cmake \
             curl \
             desktop-file-utils \
+            file \
             git \
             libclang-dev \
             libgl1-mesa-dev \
@@ -74,9 +75,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/appimage-tools"
           curl -L -o "$RUNNER_TEMP/appimage-tools/linuxdeploy" \
             https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          curl -L -o "$RUNNER_TEMP/appimage-tools/appimagetool" \
-            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x "$RUNNER_TEMP/appimage-tools/linuxdeploy" "$RUNNER_TEMP/appimage-tools/appimagetool"
+          chmod +x "$RUNNER_TEMP/appimage-tools/linuxdeploy"
 
       - name: Test Linux implementation
         working-directory: linux
@@ -90,7 +89,6 @@ jobs:
           MOQCAST_INTENDED_TARGETS: ${{ matrix.intended_targets }}
         run: |
           LINUXDEPLOY="$RUNNER_TEMP/appimage-tools/linuxdeploy" \
-          APPIMAGETOOL="$RUNNER_TEMP/appimage-tools/appimagetool" \
           ./scripts/build-appimage.sh
 
       - name: Upload AppImage

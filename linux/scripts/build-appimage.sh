@@ -6,7 +6,6 @@ LINUX_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 REPO_DIR=$(CDPATH= cd -- "$LINUX_DIR/.." && pwd)
 OUTPUT_ROOT=${MOQCAST_PACKAGE_DIR:-"$LINUX_DIR/target/package"}
 LINUXDEPLOY=${LINUXDEPLOY:-linuxdeploy}
-APPIMAGETOOL=${APPIMAGETOOL:-appimagetool}
 PACKAGE_VARIANT=${MOQCAST_PACKAGE_VARIANT:-linux-x86_64}
 INTENDED_TARGETS=${MOQCAST_INTENDED_TARGETS:-unspecified}
 
@@ -15,7 +14,7 @@ if [[ $(uname -s) != Linux ]]; then
     exit 1
 fi
 
-for tool in cargo git pkg-config ldd install sha256sum "$LINUXDEPLOY" "$APPIMAGETOOL"; do
+for tool in cargo file git pkg-config ldd install sha256sum "$LINUXDEPLOY"; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "Required build tool is missing: $tool" >&2
         exit 1
@@ -98,14 +97,14 @@ mkdir -p "$APPDIR/usr/share/doc/moqcast"
     echo "intended_targets=$INTENDED_TARGETS"
 } >"$APPDIR/usr/share/doc/moqcast/build-info.txt"
 
-APPIMAGE_EXTRACT_AND_RUN=1 "$LINUXDEPLOY" \
+ldd "$APPDIR/usr/bin/moq-cast-desktop" >"$APPDIR/usr/share/doc/moqcast/linked-libraries.txt"
+ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 LDAI_OUTPUT="$APPIMAGE" "$LINUXDEPLOY" \
     --appdir "$APPDIR" \
     --executable "$APPDIR/usr/bin/moq-cast-desktop" \
     --desktop-file "$APPDIR/dev.moq.moqcast.desktop.desktop" \
-    --icon-file "$APPDIR/moqcast.svg"
+    --icon-file "$APPDIR/moqcast.svg" \
+    --output appimage
 
-ldd "$APPDIR/usr/bin/moq-cast-desktop" >"$APPDIR/usr/share/doc/moqcast/linked-libraries.txt"
-ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" "$APPDIR" "$APPIMAGE"
 chmod +x "$APPIMAGE"
 APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE" --version
 sha256sum "$APPIMAGE" >"$APPIMAGE.sha256"
