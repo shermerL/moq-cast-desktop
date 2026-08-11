@@ -28,6 +28,7 @@ fi
 VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$LINUX_DIR/Cargo.toml" | head -n 1)
 SOURCE_COMMIT=$(git -C "$REPO_DIR" rev-parse --short=12 HEAD)
 MOQ_REVISION=$(sed -n 's/.*moq-native.*rev = "\([^"]*\)".*/\1/p' "$LINUX_DIR/Cargo.toml")
+MOQ_VIDEO_REVISION=$(sed -n 's/^source_revision = `\([^`]*\)`/\1/p' "$LINUX_DIR/vendor/moq-video/VENDORED.md")
 BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 PACKAGE_ID="MoQCast-${VERSION}-${SOURCE_COMMIT}-x86_64"
 APPDIR="$OUTPUT_ROOT/${PACKAGE_ID}.AppDir"
@@ -54,11 +55,17 @@ install -Dm644 packaging/appimage/moqcast.svg \
     "$APPDIR/usr/share/icons/hicolor/scalable/apps/moqcast.svg"
 install -Dm644 assets/fonts/LICENSE-NOTO \
     "$APPDIR/usr/share/licenses/moqcast/Noto-Sans-CJK-OFL.txt"
+install -Dm644 vendor/moq-video/LICENSE-APACHE \
+    "$APPDIR/usr/share/licenses/moqcast/moq-video-LICENSE-APACHE.txt"
+install -Dm644 vendor/moq-video/LICENSE-MIT \
+    "$APPDIR/usr/share/licenses/moqcast/moq-video-LICENSE-MIT.txt"
 
 mkdir -p "$APPDIR/usr/share/doc/moqcast"
 {
     echo "source_commit=$SOURCE_COMMIT"
     echo "moq_revision=$MOQ_REVISION"
+    echo "moq_video_source=vendored"
+    echo "moq_video_revision=$MOQ_VIDEO_REVISION"
     echo "cargo_features=moq-native:aws-lc-rs,mdns,quinn;moq-video:nvenc,pipewire"
     echo "build_date=$BUILD_DATE"
     echo "target=x86_64-unknown-linux-gnu"

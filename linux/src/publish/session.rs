@@ -53,6 +53,7 @@ impl Publication {
             let mut encode = moq_video::encode::Options::default();
             encode.codec = moq_video::encode::Codec::H264;
             encode.kind = moq_video::encode::Kind::Auto;
+            encode.max_size = Some(moq_video::Size::new(1920, 1080));
             encode.bandwidth = self.bandwidth.clone();
             let result = moq_video::encode::publish_capture(
                 self.broadcast.clone(),

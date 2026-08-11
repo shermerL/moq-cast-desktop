@@ -3281,7 +3281,6 @@ dependencies = [
 [[package]]
 name = "moq-video"
 version = "0.0.14"
-source = "git+https://github.com/moq-dev/moq.git?rev=68cf64603f067f64bc02fe800464aa59710a258c#68cf64603f067f64bc02fe800464aa59710a258c"
 dependencies = [
  "anyhow",
  "ashpd",

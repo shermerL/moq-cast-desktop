@@ -1,0 +1,472 @@
+//! Hardware H.264 / H.265 backend via Apple VideoToolbox (`VTCompressionSession`).
+//!
+//! VideoToolbox emits AVCC/HVCC (length-prefixed NALs) with parameter sets
+//! (SPS/PPS, plus VPS for H.265) carried out-of-band in the sample's format
+//! description. We convert to Annex-B in-band so the output matches every other
+//! backend (`moq_mux` avc3 / hev1 mode): the encoded slice lengths become start
+//! codes, and on each keyframe we prepend the parameter sets pulled from the
+//! format description.
+//!
+//! Hand-written on the raw `objc2-video-toolbox` bindings; there's no
+//! higher-level crate we trust. The capture loop drives it inline and always
+//! sequentially, so the `!Send` CoreFoundation handles are wrapped in a `Send`
+//! type (safe to move between tokio workers between frames, never used
+//! concurrently).
+
+use std::ffi::{c_int, c_void};
+use std::ptr::{self, NonNull};
+use std::slice;
+
+use bytes::{BufMut, Bytes, BytesMut};
+use objc2_core_foundation::{
+	CFDictionary, CFNumber, CFNumberType, CFRetained, CFString, CFType, kCFBooleanFalse, kCFBooleanTrue,
+};
+use objc2_core_media::{
+	CMFormatDescription, CMSampleBuffer, CMTime, CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
+	CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, kCMTimeInvalid, kCMVideoCodecType_H264, kCMVideoCodecType_HEVC,
+};
+use objc2_core_video::CVImageBuffer;
+use objc2_core_video::{
+	kCVImageBufferColorPrimaries_ITU_R_709_2, kCVImageBufferColorPrimaries_SMPTE_C,
+	kCVImageBufferTransferFunction_ITU_R_709_2, kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+	kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+};
+use objc2_video_toolbox::{
+	VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty, kVTCompressionPropertyKey_AllowFrameReordering,
+	kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_ColorPrimaries,
+	kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
+	kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
+	kVTCompressionPropertyKey_TransferFunction, kVTCompressionPropertyKey_YCbCrMatrix,
+	kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
+};
+
+use super::super::encoder::{Codec, Config};
+use super::{Backend, Encoded};
+use crate::frame::Surface;
+use crate::{Color, Error, Frame};
+
+pub(crate) const NAME: &str = "videotoolbox";
+
+/// Where the C output callback drops finished frames, read back after each
+/// `encode_frame` + `complete_frames`. Lives behind a `Box` so its address is
+/// stable for the lifetime of the session that holds it as a refcon.
+struct Sink {
+	codec: Codec,
+	packets: Vec<Bytes>,
+	error: Option<i32>,
+}
+
+pub(crate) struct VideoToolbox {
+	session: CFRetained<VTCompressionSession>,
+	sink: Box<Sink>,
+	/// `{ ForceKeyFrame: true }`, built once and reused for forced IDRs.
+	force_keyframe: CFRetained<CFDictionary>,
+	framerate: i32,
+	frame_index: i64,
+}
+
+// The capture loop drives this inline (macOS skips the dedicated encode thread),
+// always sequentially. Core Foundation handles are safe to use from a different
+// thread as long as never concurrently, so `Send` (which just lets the encoder
+// move between tokio workers between frames) is sound.
+unsafe impl Send for VideoToolbox {}
+
+impl VideoToolbox {
+	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
+		// backend::open only routes codecs this backend advertises, so the match is
+		// exhaustive; a new Codec variant won't compile here until it's handled.
+		let codec_type = match config.codec {
+			Codec::H264 => kCMVideoCodecType_H264,
+			Codec::H265 => kCMVideoCodecType_HEVC,
+		};
+
+		let mut sink = Box::new(Sink {
+			codec: config.codec,
+			packets: Vec::new(),
+			error: None,
+		});
+		let refcon = (&mut *sink as *mut Sink).cast::<c_void>();
+
+		let mut session_ptr: *mut VTCompressionSession = ptr::null_mut();
+		let status = unsafe {
+			VTCompressionSession::create(
+				None,
+				config.width as i32,
+				config.height as i32,
+				codec_type,
+				None,
+				None,
+				None,
+				Some(output_callback),
+				refcon,
+				NonNull::new(&mut session_ptr).unwrap(),
+			)
+		};
+		let session = NonNull::new(session_ptr)
+			.filter(|_| status == 0)
+			.map(|p| unsafe { CFRetained::from_raw(p) })
+			.ok_or_else(|| Error::Codec(anyhow::anyhow!("VTCompressionSessionCreate failed: {status}")))?;
+
+		set_bool(&session, unsafe { kVTCompressionPropertyKey_RealTime }, true)?;
+		// Low latency: no frame reordering / B-frames.
+		set_bool(
+			&session,
+			unsafe { kVTCompressionPropertyKey_AllowFrameReordering },
+			false,
+		)?;
+		let profile = unsafe {
+			match config.codec {
+				Codec::H265 => kVTProfileLevel_HEVC_Main_AutoLevel,
+				_ => kVTProfileLevel_H264_High_AutoLevel,
+			}
+		};
+		set_property(&session, unsafe { kVTCompressionPropertyKey_ProfileLevel }, profile)?;
+		set_number(
+			&session,
+			unsafe { kVTCompressionPropertyKey_AverageBitRate },
+			clamp_i32(config.resolved_bitrate()),
+		)?;
+		set_number(
+			&session,
+			unsafe { kVTCompressionPropertyKey_MaxKeyFrameInterval },
+			config.gop as i32,
+		)?;
+		set_number(
+			&session,
+			unsafe { kVTCompressionPropertyKey_ExpectedFrameRate },
+			config.framerate as i32,
+		)?;
+
+		// State the color space in the SPS so a decoder doesn't fall back to
+		// guessing it from the frame height. BT.601 goes out as SMPTE C primaries
+		// and the 601 matrix (both code point 6) with the BT.709 transfer curve (1),
+		// since 601 and 709 differ in primaries and matrix, not in gamma. CoreVideo
+		// does have a 170M transfer constant, but it is deprecated, and Media
+		// Foundation has none, so 1 is what every backend emits.
+		let (primaries, transfer, matrix) = unsafe {
+			match config.resolved_color() {
+				Color::Bt601Limited | Color::Bt601Full => (
+					kCVImageBufferColorPrimaries_SMPTE_C,
+					kCVImageBufferTransferFunction_ITU_R_709_2,
+					kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+				),
+				Color::Bt709Limited | Color::Bt709Full => (
+					kCVImageBufferColorPrimaries_ITU_R_709_2,
+					kCVImageBufferTransferFunction_ITU_R_709_2,
+					kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+				),
+			}
+		};
+		set_property(&session, unsafe { kVTCompressionPropertyKey_ColorPrimaries }, primaries)?;
+		set_property(
+			&session,
+			unsafe { kVTCompressionPropertyKey_TransferFunction },
+			transfer,
+		)?;
+		set_property(&session, unsafe { kVTCompressionPropertyKey_YCbCrMatrix }, matrix)?;
+
+		let force_keyframe = force_keyframe_dict()?;
+
+		tracing::info!(
+			encoder = NAME,
+			codec = ?config.codec,
+			width = config.width,
+			height = config.height,
+			"opened video encoder"
+		);
+		Ok(Box::new(Self {
+			session,
+			sink,
+			force_keyframe,
+			framerate: config.framerate as i32,
+			frame_index: 0,
+		}))
+	}
+}
+
+impl Backend for VideoToolbox {
+	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
+		self.sink.packets.clear();
+		self.sink.error = None;
+
+		// Zero-copy when the capture handed us a surface; otherwise upload I420.
+		let pixel_buffer = match &frame.surface {
+			Surface::PixelBuffer(surface) => surface.buffer.clone(),
+			Surface::I420(i420) => crate::frame::macos::upload_i420(i420)?,
+		};
+		let image: &CVImageBuffer = &pixel_buffer;
+
+		// Presentation timestamps must strictly increase; the moq timestamp is
+		// attached downstream, so a monotonic frame index over the framerate is
+		// all VideoToolbox needs.
+		let pts = unsafe { CMTime::new(self.frame_index, self.framerate.max(1)) };
+		self.frame_index += 1;
+
+		let frame_properties = keyframe.then_some(&*self.force_keyframe);
+
+		let status = unsafe {
+			self.session.encode_frame(
+				image,
+				pts,
+				kCMTimeInvalid,
+				frame_properties,
+				ptr::null_mut(),
+				ptr::null_mut(),
+			)
+		};
+		if status != 0 {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"VTCompressionSessionEncodeFrame failed: {status}"
+			)));
+		}
+
+		// Force this frame out; with no reordering there's nothing else pending.
+		let status = unsafe { self.session.complete_frames(kCMTimeInvalid) };
+		if status != 0 {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"VTCompressionSessionCompleteFrames failed: {status}"
+			)));
+		}
+
+		if let Some(status) = self.sink.error.take() {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"VideoToolbox encode callback failed: {status}"
+			)));
+		}
+		// `complete_frames` above forces this frame out before returning, so every
+		// packet collected here came from it and carries its timestamp.
+		Ok(std::mem::take(&mut self.sink.packets)
+			.into_iter()
+			.map(|payload| Encoded::new(payload, frame.timestamp))
+			.collect())
+	}
+
+	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+		// complete_frames runs per-encode, so nothing is ever buffered.
+		Ok(Vec::new())
+	}
+
+	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
+		// complete_frames runs per-encode, so nothing is buffered at shutdown.
+		Ok(Vec::new())
+	}
+
+	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		// AverageBitRate is settable on a live session and takes effect without
+		// an IDR, which is exactly what the rate control loop wants.
+		set_number(
+			&self.session,
+			unsafe { kVTCompressionPropertyKey_AverageBitRate },
+			clamp_i32(bitrate),
+		)
+	}
+
+	fn name(&self) -> &str {
+		NAME
+	}
+}
+
+/// C callback VideoToolbox invokes (synchronously, from `complete_frames`) for
+/// each finished frame. Converts the AVCC sample to Annex-B and appends it.
+unsafe extern "C-unwind" fn output_callback(
+	refcon: *mut c_void,
+	_source_frame_refcon: *mut c_void,
+	status: i32,
+	_flags: VTEncodeInfoFlags,
+	sample_buffer: *mut CMSampleBuffer,
+) {
+	let sink = unsafe { &mut *(refcon as *mut Sink) };
+	if status != 0 {
+		sink.error = Some(status);
+		return;
+	}
+	let Some(sample) = (unsafe { sample_buffer.as_ref() }) else {
+		return; // dropped frame
+	};
+	match annexb_from_sample(sample, sink.codec) {
+		Ok(Some(packet)) => sink.packets.push(packet),
+		Ok(None) => {}
+		Err(status) => sink.error = Some(status),
+	}
+}
+
+/// Convert one AVCC/HVCC `CMSampleBuffer` into a single Annex-B access unit. On a
+/// keyframe, prepend the parameter sets (SPS/PPS for H.264; VPS/SPS/PPS for
+/// H.265) from the format description so the stream is self-contained (avc3 / hev1).
+fn annexb_from_sample(sample: &CMSampleBuffer, codec: Codec) -> Result<Option<Bytes>, i32> {
+	let format = unsafe { sample.format_description() }.ok_or(-1)?;
+
+	// One call with null pointers just reports the count and NAL length size.
+	let mut count: usize = 0;
+	let mut nal_length_size: c_int = 4;
+	let status = unsafe {
+		get_param_set(
+			&format,
+			0,
+			ptr::null_mut(),
+			ptr::null_mut(),
+			&mut count,
+			&mut nal_length_size,
+			codec,
+		)
+	};
+	if status != 0 {
+		return Err(status);
+	}
+
+	let block = unsafe { sample.data_buffer() }.ok_or(-1)?;
+	let mut total: usize = 0;
+	let mut length_at_offset: usize = 0;
+	let mut data_ptr: *mut i8 = ptr::null_mut();
+	let status = unsafe { block.data_pointer(0, &mut length_at_offset, &mut total, &mut data_ptr) };
+	if status != 0 {
+		return Err(status);
+	}
+	if total == 0 {
+		return Ok(None);
+	}
+
+	// `data_pointer` only guarantees `length_at_offset` contiguous bytes at
+	// `data_ptr`; a non-contiguous block buffer would make a `total`-length slice
+	// read past the mapped region. VideoToolbox output is contiguous in practice,
+	// but copy the whole access unit flat if it ever isn't.
+	let owned;
+	let avcc: &[u8] = if !data_ptr.is_null() && length_at_offset >= total {
+		unsafe { slice::from_raw_parts(data_ptr as *const u8, total) }
+	} else {
+		let mut buf = vec![0u8; total];
+		let dst = NonNull::new(buf.as_mut_ptr().cast::<c_void>()).ok_or(-1)?;
+		let status = unsafe { block.copy_data_bytes(0, total, dst) };
+		if status != 0 {
+			return Err(status);
+		}
+		owned = buf;
+		&owned
+	};
+
+	let slices = split_avcc(avcc, nal_length_size as usize);
+	let is_keyframe = slices.iter().any(|nal| is_keyframe_nal(nal, codec));
+
+	let mut out = BytesMut::with_capacity(total + 64);
+	if is_keyframe {
+		for i in 0..count {
+			let mut ptr: *const u8 = ptr::null();
+			let mut size: usize = 0;
+			let status =
+				unsafe { get_param_set(&format, i, &mut ptr, &mut size, ptr::null_mut(), ptr::null_mut(), codec) };
+			if status != 0 {
+				return Err(status);
+			}
+			if !ptr.is_null() && size > 0 {
+				append_annexb(&mut out, unsafe { slice::from_raw_parts(ptr, size) });
+			}
+		}
+	}
+	for nal in slices {
+		append_annexb(&mut out, nal);
+	}
+
+	Ok(Some(out.freeze()))
+}
+
+/// Dispatch to the codec-specific VideoToolbox parameter-set getter. Both have
+/// identical signatures; only the codec differs.
+#[allow(clippy::too_many_arguments)]
+unsafe fn get_param_set(
+	format: &CMFormatDescription,
+	index: usize,
+	ptr_out: *mut *const u8,
+	size_out: *mut usize,
+	count_out: *mut usize,
+	nal_len_out: *mut c_int,
+	codec: Codec,
+) -> i32 {
+	match codec {
+		Codec::H265 => unsafe {
+			CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(format, index, ptr_out, size_out, count_out, nal_len_out)
+		},
+		_ => unsafe {
+			CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format, index, ptr_out, size_out, count_out, nal_len_out)
+		},
+	}
+}
+
+/// Whether a NAL is a keyframe slice: an H.264 IDR (type 5), or an H.265 IRAP
+/// picture (BLA/IDR/CRA, types 16..=23).
+fn is_keyframe_nal(nal: &[u8], codec: Codec) -> bool {
+	let Some(&b) = nal.first() else {
+		return false;
+	};
+	match codec {
+		Codec::H265 => {
+			let nal_type = (b >> 1) & 0x3f;
+			(16..=23).contains(&nal_type)
+		}
+		_ => b & 0x1f == 5,
+	}
+}
+
+fn append_annexb(out: &mut BytesMut, nal: &[u8]) {
+	out.put_slice(&[0, 0, 0, 1]);
+	out.put_slice(nal);
+}
+
+/// Split a length-prefixed AVCC buffer into its NAL unit slices.
+fn split_avcc(mut data: &[u8], length_size: usize) -> Vec<&[u8]> {
+	let mut out = Vec::new();
+	while data.len() > length_size {
+		let mut len = 0usize;
+		for &b in &data[..length_size] {
+			len = (len << 8) | b as usize;
+		}
+		data = &data[length_size..];
+		if len > data.len() {
+			break; // truncated; bail rather than read out of bounds
+		}
+		let (nal, rest) = data.split_at(len);
+		out.push(nal);
+		data = rest;
+	}
+	out
+}
+
+fn force_keyframe_dict() -> Result<CFRetained<CFDictionary>, Error> {
+	let key = (unsafe { kVTEncodeFrameOptionKey_ForceKeyFrame } as *const CFString).cast::<c_void>();
+	let value = unsafe { kCFBooleanTrue }.unwrap() as *const _ as *const c_void;
+	let mut keys: [*const c_void; 1] = [key];
+	let mut values: [*const c_void; 1] = [value];
+	unsafe {
+		CFDictionary::new(
+			None,
+			keys.as_mut_ptr(),
+			values.as_mut_ptr(),
+			1,
+			&objc2_core_foundation::kCFTypeDictionaryKeyCallBacks,
+			&objc2_core_foundation::kCFTypeDictionaryValueCallBacks,
+		)
+	}
+	.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build force-keyframe dictionary")))
+}
+
+fn set_property(session: &VTCompressionSession, key: &CFString, value: &CFType) -> Result<(), Error> {
+	let status = unsafe { VTSessionSetProperty(session, key, Some(value)) };
+	if status != 0 {
+		return Err(Error::Codec(anyhow::anyhow!("VTSessionSetProperty failed: {status}")));
+	}
+	Ok(())
+}
+
+fn set_bool(session: &VTCompressionSession, key: &CFString, value: bool) -> Result<(), Error> {
+	let boolean = unsafe { if value { kCFBooleanTrue } else { kCFBooleanFalse } }.unwrap();
+	set_property(session, key, boolean.as_ref())
+}
+
+fn set_number(session: &VTCompressionSession, key: &CFString, value: i32) -> Result<(), Error> {
+	let number = unsafe { CFNumber::new(None, CFNumberType::SInt32Type, &value as *const i32 as *const c_void) }
+		.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build CFNumber")))?;
+	set_property(session, key, number.as_ref())
+}
+
+fn clamp_i32(value: u64) -> i32 {
+	value.min(i32::MAX as u64) as i32
+}
