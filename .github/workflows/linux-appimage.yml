@@ -1,6 +1,9 @@
 name: Linux AppImage
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -9,19 +12,41 @@ permissions:
 jobs:
   appimage:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: linux-x86_64-ubuntu22.04-glibc2.35
+            image: ubuntu:22.04
+            intended_targets: ubuntu-22.04,mint-21
+          - variant: linux-x86_64-ubuntu24.04-glibc2.39
+            image: ubuntu:24.04
+            intended_targets: ubuntu-24.04,ubuntu-26.04,mint-22
+          - variant: linux-x86_64-debian12-glibc2.36
+            image: debian:12
+            intended_targets: debian-12
+          - variant: linux-x86_64-debian13-glibc2.41
+            image: debian:13
+            intended_targets: debian-13
+    container:
+      image: ${{ matrix.image }}
+    env:
+      DEBIAN_FRONTEND: noninteractive
     steps:
       - uses: actions/checkout@v4
 
       - name: Install native build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          apt-get update
+          apt-get install -y \
             build-essential \
+            ca-certificates \
             clang \
             cmake \
             curl \
             desktop-file-utils \
+            git \
             libclang-dev \
             libgl1-mesa-dev \
             libpipewire-0.3-dev \
@@ -38,7 +63,11 @@ jobs:
             pkg-config
 
       - name: Install Rust toolchain
-        run: rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf -o "$RUNNER_TEMP/rustup-init.sh" https://sh.rustup.rs
+          sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
 
       - name: Download AppImage tooling
         run: |
@@ -58,12 +87,14 @@ jobs:
         env:
           LINUXDEPLOY: ${{ runner.temp }}/appimage-tools/linuxdeploy
           APPIMAGETOOL: ${{ runner.temp }}/appimage-tools/appimagetool
+          MOQCAST_PACKAGE_VARIANT: ${{ matrix.variant }}
+          MOQCAST_INTENDED_TARGETS: ${{ matrix.intended_targets }}
         run: ./scripts/build-appimage.sh
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
         with:
-          name: moqcast-linux-appimage
+          name: moqcast-${{ matrix.variant }}
           path: |
             linux/target/package/*.AppImage
             linux/target/package/*.AppImage.sha256

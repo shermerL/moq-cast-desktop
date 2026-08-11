@@ -7,6 +7,8 @@ REPO_DIR=$(CDPATH= cd -- "$LINUX_DIR/.." && pwd)
 OUTPUT_ROOT=${MOQCAST_PACKAGE_DIR:-"$LINUX_DIR/target/package"}
 LINUXDEPLOY=${LINUXDEPLOY:-linuxdeploy}
 APPIMAGETOOL=${APPIMAGETOOL:-appimagetool}
+PACKAGE_VARIANT=${MOQCAST_PACKAGE_VARIANT:-linux-x86_64}
+INTENDED_TARGETS=${MOQCAST_INTENDED_TARGETS:-unspecified}
 
 if [[ $(uname -s) != Linux ]]; then
     echo "AppImage must be built on Linux." >&2
@@ -25,12 +27,21 @@ if ! pkg-config --exists libpipewire-0.3; then
     exit 1
 fi
 
+if [[ ! $PACKAGE_VARIANT =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+    echo "Invalid package variant: $PACKAGE_VARIANT" >&2
+    exit 1
+fi
+
 VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$LINUX_DIR/Cargo.toml" | head -n 1)
 SOURCE_COMMIT=$(git -C "$REPO_DIR" rev-parse --short=12 HEAD)
 MOQ_REVISION=$(sed -n 's/.*moq-native.*rev = "\([^"]*\)".*/\1/p' "$LINUX_DIR/Cargo.toml")
 MOQ_VIDEO_REVISION=$(sed -n 's/^source_revision = `\([^`]*\)`/\1/p' "$LINUX_DIR/vendor/moq-video/VENDORED.md")
 BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-PACKAGE_ID="MoQCast-${VERSION}-${SOURCE_COMMIT}-x86_64"
+BUILD_DISTRO_ID=$(sed -n 's/^ID="\{0,1\}\([^" ]*\)"\{0,1\}$/\1/p' /etc/os-release | head -n 1)
+BUILD_DISTRO_VERSION=$(sed -n 's/^VERSION_ID="\{0,1\}\([^" ]*\)"\{0,1\}$/\1/p' /etc/os-release | head -n 1)
+GLIBC_VERSION=$(ldd --version | sed -n '1s/.* \([0-9][0-9.]*\)$/\1/p')
+PIPEWIRE_VERSION=$(pkg-config --modversion libpipewire-0.3)
+PACKAGE_ID="MoQCast-${VERSION}-${PACKAGE_VARIANT}"
 APPDIR="$OUTPUT_ROOT/${PACKAGE_ID}.AppDir"
 APPIMAGE="$OUTPUT_ROOT/${PACKAGE_ID}.AppImage"
 
@@ -69,7 +80,11 @@ mkdir -p "$APPDIR/usr/share/doc/moqcast"
     echo "cargo_features=moq-native:aws-lc-rs,mdns,quinn;moq-video:nvenc,pipewire"
     echo "build_date=$BUILD_DATE"
     echo "target=x86_64-unknown-linux-gnu"
-    echo "compatibility_baseline=ubuntu-24.04,glibc-2.39,pipewire-1.0"
+    echo "package_variant=$PACKAGE_VARIANT"
+    echo "build_distribution=$BUILD_DISTRO_ID-$BUILD_DISTRO_VERSION"
+    echo "glibc_version=$GLIBC_VERSION"
+    echo "pipewire_build_version=$PIPEWIRE_VERSION"
+    echo "intended_targets=$INTENDED_TARGETS"
 } >"$APPDIR/usr/share/doc/moqcast/build-info.txt"
 
 APPIMAGE_EXTRACT_AND_RUN=1 "$LINUXDEPLOY" \
