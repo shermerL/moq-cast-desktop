@@ -70,6 +70,17 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           "$HOME/.cargo/bin/rustup" toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
 
+      - name: Cache Cargo release build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            linux/target/release
+          key: linux-cargo-${{ matrix.variant }}-rust1.95.0-${{ hashFiles('linux/Cargo.lock') }}
+          restore-keys: |
+            linux-cargo-${{ matrix.variant }}-rust1.95.0-
+
       - name: Download AppImage tooling
         run: |
           mkdir -p "$RUNNER_TEMP/appimage-tools"
