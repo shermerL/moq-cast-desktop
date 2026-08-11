@@ -40,6 +40,49 @@ fn duplicate_publish_and_stop_are_rejected() {
 }
 
 #[test]
+fn a_failed_publish_preparation_returns_to_idle_and_can_retry() {
+    let mut snapshot = AppSnapshot {
+        peer: PeerState::Connected {
+            peer_id: "android-living-room".into(),
+        },
+        ..Default::default()
+    };
+
+    snapshot.begin_publish().unwrap();
+    snapshot
+        .fail_publish("screen capture request denied")
+        .unwrap();
+    assert_eq!(snapshot.publish, PublishState::Idle);
+    assert_eq!(
+        snapshot.last_error.as_deref(),
+        Some("screen capture request denied")
+    );
+
+    snapshot.begin_publish().unwrap();
+    assert_eq!(snapshot.publish, PublishState::Preparing);
+}
+
+#[test]
+fn an_active_publish_failure_returns_to_idle_without_disconnecting() {
+    let mut snapshot = AppSnapshot {
+        peer: PeerState::Connected {
+            peer_id: "android-living-room".into(),
+        },
+        publish: PublishState::Publishing,
+        ..Default::default()
+    };
+
+    snapshot.fail_publish("pipewire stream ended").unwrap();
+
+    assert_eq!(snapshot.publish, PublishState::Idle);
+    assert!(matches!(snapshot.peer, PeerState::Connected { .. }));
+    assert_eq!(
+        snapshot.last_error.as_deref(),
+        Some("pipewire stream ended")
+    );
+}
+
+#[test]
 fn disconnect_resets_publish_before_peer_state() {
     let mut snapshot = AppSnapshot {
         peer: PeerState::Connected {

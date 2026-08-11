@@ -27,6 +27,18 @@ pub(in crate::app) fn show(
                     .color(MUTED),
             );
         }
+        if connected {
+            ui.add_space(16.0);
+            let status = match snapshot.publish {
+                PublishState::Idle => None,
+                PublishState::Preparing => Some(locale.preparing_share()),
+                PublishState::Publishing => Some(locale.sharing_screen()),
+                PublishState::Stopping => Some(locale.stopping_share()),
+            };
+            if let Some(status) = status {
+                ui.label(RichText::new(status).size(15.0).strong());
+            }
+        }
         ui.add_space(28.0);
     });
 
@@ -41,7 +53,12 @@ pub(in crate::app) fn show(
             .clicked()
             .then_some(UserCommand::StartScreenShare),
         PublishState::Preparing | PublishState::Stopping => {
-            ui.add_enabled(false, egui::Button::new(locale.choose_screen()));
+            let label = if snapshot.publish == PublishState::Preparing {
+                locale.preparing_share()
+            } else {
+                locale.stopping_share()
+            };
+            ui.add_enabled(false, egui::Button::new(label));
             None
         }
     };

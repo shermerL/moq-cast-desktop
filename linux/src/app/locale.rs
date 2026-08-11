@@ -161,6 +161,27 @@ impl Locale {
         }
     }
 
+    pub(super) fn preparing_share(self) -> &'static str {
+        match self {
+            Self::Chinese => "正在等待系统选择屏幕…",
+            Self::English => "Waiting for the system screen picker...",
+        }
+    }
+
+    pub(super) fn sharing_screen(self) -> &'static str {
+        match self {
+            Self::Chinese => "正在共享屏幕",
+            Self::English => "Sharing your screen",
+        }
+    }
+
+    pub(super) fn stopping_share(self) -> &'static str {
+        match self {
+            Self::Chinese => "正在停止共享…",
+            Self::English => "Stopping screen share...",
+        }
+    }
+
     pub(super) fn stop_sharing(self) -> &'static str {
         match self {
             Self::Chinese => "停止共享",

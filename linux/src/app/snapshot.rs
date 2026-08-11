@@ -226,6 +226,25 @@ impl AppSnapshot {
         Ok(())
     }
 
+    /// Return a failed preparation or active publication to idle.
+    pub fn fail_publish(&mut self, error: impl Into<String>) -> Result<(), StateError> {
+        if self.publish == PublishState::Idle {
+            return Err(StateError::UnexpectedCompletion);
+        }
+        self.publish = PublishState::Idle;
+        self.last_error = Some(error.into());
+        Ok(())
+    }
+
+    /// Return a completed publication to idle without changing the peer.
+    pub fn end_publish(&mut self) -> Result<(), StateError> {
+        if self.publish == PublishState::Idle {
+            return Err(StateError::UnexpectedCompletion);
+        }
+        self.publish = PublishState::Idle;
+        Ok(())
+    }
+
     /// Begin stopping an active screen publication.
     pub fn begin_stop_publish(&mut self) -> Result<(), StateError> {
         match self.publish {

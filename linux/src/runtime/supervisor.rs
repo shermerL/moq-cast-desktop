@@ -7,6 +7,7 @@ use tokio::task::JoinHandle;
 use crate::app::{AppSnapshot, DiscoveredPeer, PeerState, UserCommand};
 use crate::network::discovery::{PeerRecord, PeerRegistry};
 use crate::network::{peer, server, service};
+use crate::publish::session::Publication;
 
 const EVENT_CAPACITY: usize = 64;
 
@@ -36,6 +37,10 @@ enum OperationEvent {
         generation: u64,
         error: Option<String>,
     },
+    PublishEnded {
+        generation: u64,
+        result: Result<(), String>,
+    },
 }
 
 #[derive(Clone)]
@@ -60,6 +65,13 @@ impl PeerSession {
                 .err()
                 .map(|error| error.to_string()),
             Self::Inbound(session) => Some(session.closed().await.to_string()),
+        }
+    }
+
+    fn send_bandwidth(&self) -> Option<moq_net::bandwidth::Consumer> {
+        match self {
+            Self::Outbound(connection) => Some(connection.send_bandwidth()),
+            Self::Inbound(session) => session.send_bandwidth(),
         }
     }
 }
@@ -108,11 +120,33 @@ impl PeerResources {
     }
 }
 
+#[derive(Default)]
+struct PublishResources {
+    task: Option<JoinHandle<()>>,
+    generation: u64,
+}
+
+impl PublishResources {
+    fn advance(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
+    }
+
+    async fn stop(&mut self) {
+        self.advance();
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
 struct Supervisor {
     state: AppSnapshot,
     origin: moq_net::origin::Producer,
     discovery: DiscoveryResources,
     peer: PeerResources,
+    publish: PublishResources,
     service_tx: mpsc::Sender<service::Event>,
     service_rx: mpsc::Receiver<service::Event>,
     operation_tx: mpsc::Sender<OperationEvent>,
@@ -128,6 +162,7 @@ impl Supervisor {
             origin: moq_net::Origin::random().produce(),
             discovery: DiscoveryResources::default(),
             peer: PeerResources::default(),
+            publish: PublishResources::default(),
             service_tx,
             service_rx,
             operation_tx,
@@ -147,9 +182,9 @@ impl Supervisor {
                 event = self.operation_rx.recv() => Input::Operation(event),
             };
             let action = match input {
-                Input::Command(Some(command)) => self.handle_command(command),
+                Input::Command(Some(command)) => self.handle_command(command).await,
                 Input::Service(Some(event)) => self.handle_service_event(event).await,
-                Input::Operation(Some(event)) => self.handle_operation_event(event),
+                Input::Operation(Some(event)) => self.handle_operation_event(event).await,
                 Input::Command(None) | Input::Service(None) | Input::Operation(None) => {
                     LoopAction::Shutdown
                 }
@@ -163,12 +198,13 @@ impl Supervisor {
             }
         }
 
+        self.publish.stop().await;
         self.peer.close();
         self.discovery.stop();
         tracing::info!("desktop runtime stopped");
     }
 
-    fn handle_command(&mut self, command: UserCommand) -> LoopAction {
+    async fn handle_command(&mut self, command: UserCommand) -> LoopAction {
         match command {
             UserCommand::StartDiscovery => self.start_discovery(),
             UserCommand::StopDiscovery => {
@@ -177,11 +213,9 @@ impl Supervisor {
                 LoopAction::Changed
             }
             UserCommand::ConnectPeer { peer_id } => self.connect(peer_id),
-            UserCommand::Disconnect => self.disconnect(),
-            UserCommand::StartScreenShare | UserCommand::StopScreenShare => {
-                self.state.last_error = Some("Screen publishing will be enabled in L3.".into());
-                LoopAction::Changed
-            }
+            UserCommand::Disconnect => self.disconnect().await,
+            UserCommand::StartScreenShare => self.start_publish(),
+            UserCommand::StopScreenShare => self.stop_publish().await,
             UserCommand::Shutdown => LoopAction::Shutdown,
         }
     }
@@ -248,15 +282,63 @@ impl Supervisor {
         LoopAction::Changed
     }
 
-    fn disconnect(&mut self) -> LoopAction {
+    async fn disconnect(&mut self) -> LoopAction {
         if let Err(error) = self.state.begin_disconnect() {
             self.state.last_error = Some(error.to_string());
             return LoopAction::Changed;
         }
+        self.publish.stop().await;
         self.peer.close();
         self.state
             .finish_disconnect()
             .expect("disconnect was just started");
+        LoopAction::Changed
+    }
+
+    fn start_publish(&mut self) -> LoopAction {
+        if let Err(error) = self.state.begin_publish() {
+            self.state.last_error = Some(error.to_string());
+            return LoopAction::Changed;
+        }
+
+        let bandwidth = self
+            .peer
+            .session
+            .as_ref()
+            .and_then(PeerSession::send_bandwidth);
+        let publication = match Publication::prepare(&self.origin, bandwidth) {
+            Ok(publication) => publication,
+            Err(error) => {
+                self.state
+                    .fail_publish(error.to_string())
+                    .expect("publication preparation was active");
+                return LoopAction::Changed;
+            }
+        };
+
+        let generation = self.publish.advance();
+        let events = self.operation_tx.clone();
+        self.publish.task = Some(tokio::spawn(async move {
+            let result = publication.run().await.map_err(|error| error.to_string());
+            let _ = events
+                .send(OperationEvent::PublishEnded { generation, result })
+                .await;
+        }));
+        self.state
+            .finish_publish()
+            .expect("publication preparation was active");
+        LoopAction::Changed
+    }
+
+    async fn stop_publish(&mut self) -> LoopAction {
+        if let Err(error) = self.state.begin_stop_publish() {
+            self.state.last_error = Some(error.to_string());
+            return LoopAction::Changed;
+        }
+        self.publish.stop().await;
+        self.state
+            .finish_stop_publish()
+            .expect("publication was stopping");
         LoopAction::Changed
     }
 
@@ -357,7 +439,7 @@ impl Supervisor {
         LoopAction::Changed
     }
 
-    fn handle_operation_event(&mut self, event: OperationEvent) -> LoopAction {
+    async fn handle_operation_event(&mut self, event: OperationEvent) -> LoopAction {
         match event {
             OperationEvent::ServicesStarted { generation, result } => {
                 if generation != self.discovery.generation || !self.state.discovery.is_active() {
@@ -404,9 +486,27 @@ impl Supervisor {
                 if generation != self.peer.generation {
                     return LoopAction::Unchanged;
                 }
+                self.publish.stop().await;
                 self.state.disconnect();
                 self.state.last_error = error;
                 self.peer.session = None;
+                LoopAction::Changed
+            }
+            OperationEvent::PublishEnded { generation, result } => {
+                if generation != self.publish.generation {
+                    return LoopAction::Unchanged;
+                }
+                self.publish.task = None;
+                match result {
+                    Ok(()) => {
+                        self.state.end_publish().expect("current publication ended");
+                    }
+                    Err(error) => {
+                        self.state
+                            .fail_publish(error)
+                            .expect("current publication failed");
+                    }
+                }
                 LoopAction::Changed
             }
         }

@@ -2,4 +2,5 @@
 
 pub mod app;
 mod network;
+mod publish;
 pub mod runtime;

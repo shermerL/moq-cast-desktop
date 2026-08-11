@@ -17,6 +17,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+moq-mux = { git = "https://github.com/moq-dev/moq.git", rev = "68cf64603f067f64bc02fe800464aa59710a258c" }
+moq-video = { git = "https://github.com/moq-dev/moq.git", rev = "68cf64603f067f64bc02fe800464aa59710a258c", default-features = false, features = ["nvenc", "pipewire"] }
+
 [dev-dependencies]
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 tokio = { version = "1.53.1", features = ["macros"] }
