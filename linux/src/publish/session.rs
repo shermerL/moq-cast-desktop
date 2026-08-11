@@ -46,17 +46,14 @@ impl Publication {
     pub(crate) async fn run(self) -> anyhow::Result<()> {
         #[cfg(target_os = "linux")]
         {
-            let capture = moq_video::capture::Config {
-                source: moq_video::capture::Source::Display(None),
-                framerate: Some(30),
-                ..Default::default()
-            };
-            let encode = moq_video::encode::Options {
-                codec: moq_video::encode::Codec::H264,
-                kind: moq_video::encode::Kind::Auto,
-                bandwidth: self.bandwidth.clone(),
-                ..Default::default()
-            };
+            let mut capture = moq_video::capture::Config::default();
+            capture.source = moq_video::capture::Source::Display(None);
+            capture.framerate = Some(30);
+
+            let mut encode = moq_video::encode::Options::default();
+            encode.codec = moq_video::encode::Codec::H264;
+            encode.kind = moq_video::encode::Kind::Auto;
+            encode.bandwidth = self.bandwidth.clone();
             let result = moq_video::encode::publish_capture(
                 self.broadcast.clone(),
                 self.catalog.clone(),
