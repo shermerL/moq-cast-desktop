@@ -23,6 +23,8 @@ MOQCAST_PACKAGE_DIR=/tmp/moqcast-package-2 ./scripts/build-appimage.sh
 
 AppImage 包含应用和普通动态库，但不包含桌面会话服务、portal backend、PipeWire daemon 或 GPU 驱动。真机仍需安装并运行：
 
+界面内置 Noto Sans SC Regular 作为中文 fallback，字体使用 SIL Open Font License 1.1；许可证安装在 AppImage 的 `usr/share/licenses/moqcast/`。
+
 - `xdg-desktop-portal`
 - 当前桌面环境对应的 portal backend
 - PipeWire

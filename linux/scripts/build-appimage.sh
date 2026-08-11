@@ -52,6 +52,8 @@ install -Dm644 packaging/appimage/dev.moq.moqcast.desktop.desktop \
     "$APPDIR/usr/share/applications/dev.moq.moqcast.desktop.desktop"
 install -Dm644 packaging/appimage/moqcast.svg \
     "$APPDIR/usr/share/icons/hicolor/scalable/apps/moqcast.svg"
+install -Dm644 assets/fonts/LICENSE-NOTO \
+    "$APPDIR/usr/share/licenses/moqcast/Noto-Sans-CJK-OFL.txt"
 
 mkdir -p "$APPDIR/usr/share/doc/moqcast"
 {

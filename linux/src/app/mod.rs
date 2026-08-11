@@ -48,6 +48,7 @@ pub struct MoqCastApp {
 impl MoqCastApp {
     /// Create the UI and its owned background runtime.
     pub fn new(creation_context: &eframe::CreationContext<'_>) -> Result<Self, RuntimeStartError> {
+        configure_fonts(&creation_context.egui_ctx);
         configure_style(&creation_context.egui_ctx);
         let locale = creation_context
             .storage
@@ -190,6 +191,25 @@ fn nav_button(ui: &mut egui::Ui, page: &mut Page, target: Page, label: &str, ena
     ui.add_space(4.0);
 }
 
+fn configure_fonts(context: &egui::Context) {
+    use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
+
+    context.add_font(FontInsert::new(
+        "Noto Sans SC",
+        egui::FontData::from_static(include_bytes!("../../assets/fonts/NotoSansSC-Regular.otf")),
+        vec![
+            InsertFontFamily {
+                family: egui::FontFamily::Proportional,
+                priority: FontPriority::Lowest,
+            },
+            InsertFontFamily {
+                family: egui::FontFamily::Monospace,
+                priority: FontPriority::Lowest,
+            },
+        ],
+    ));
+}
+
 fn configure_style(context: &egui::Context) {
     let mut style = (*context.style_of(egui::Theme::Light)).clone();
     style.visuals = egui::Visuals::light();
@@ -215,4 +235,24 @@ pub(super) fn heading(ui: &mut egui::Ui, title: &str, description: &str) {
         ui.label(RichText::new(description).size(14.0).color(MUTED));
     }
     ui.add_space(22.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_fonts_cover_simplified_chinese() {
+        let context = egui::Context::default();
+        configure_fonts(&context);
+
+        let mut output = context.run_ui(Default::default(), |ui| {
+            ui.fonts_mut(|fonts| {
+                assert!(
+                    fonts.has_glyphs(&egui::FontId::proportional(14.0), "附近设备屏幕共享设置")
+                );
+            });
+        });
+        output.textures_delta.clear();
+    }
 }
