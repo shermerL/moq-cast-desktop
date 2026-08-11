@@ -1,0 +1,71 @@
+name: Linux AppImage
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  appimage:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            cmake \
+            curl \
+            desktop-file-utils \
+            libclang-dev \
+            libgl1-mesa-dev \
+            libpipewire-0.3-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxrandr-dev \
+            nasm \
+            patchelf \
+            pkg-config
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
+
+      - name: Download AppImage tooling
+        run: |
+          mkdir -p "$RUNNER_TEMP/appimage-tools"
+          curl -L -o "$RUNNER_TEMP/appimage-tools/linuxdeploy" \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -L -o "$RUNNER_TEMP/appimage-tools/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/appimage-tools/linuxdeploy" "$RUNNER_TEMP/appimage-tools/appimagetool"
+
+      - name: Test Linux implementation
+        working-directory: linux
+        run: cargo test --locked
+
+      - name: Build AppImage
+        working-directory: linux
+        env:
+          LINUXDEPLOY: ${{ runner.temp }}/appimage-tools/linuxdeploy
+          APPIMAGETOOL: ${{ runner.temp }}/appimage-tools/appimagetool
+        run: ./scripts/build-appimage.sh
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: moqcast-linux-appimage
+          path: |
+            linux/target/package/*.AppImage
+            linux/target/package/*.AppImage.sha256
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MoQCast
+Comment=Share a Linux display with nearby MoQCast devices
+Exec=moq-cast-desktop
+Icon=moqcast
+Terminal=false
+Categories=AudioVideo;Network;
+StartupWMClass=dev.moq.moqcast.desktop
