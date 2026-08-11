@@ -1,6 +1,6 @@
 # Linux AppImage 打包
 
-首个真机测试包使用 AppImage。构建机要求 x86_64 Ubuntu 22.04 或相同的 glibc 2.34 基线，并安装 Rust 1.95、PipeWire 开发文件、libclang、X11/Wayland 开发文件、`linuxdeploy` 和 `appimagetool`。
+首个真机测试包使用 AppImage。构建机要求 x86_64 Ubuntu 24.04 或相同的 glibc 2.39、PipeWire 1.0 基线，并安装 Rust 1.95、PipeWire 开发文件、libclang、X11/Wayland 开发文件、`linuxdeploy` 和 `appimagetool`。
 
 构建命令：
 
@@ -28,4 +28,4 @@ AppImage 包含应用和普通动态库，但不包含桌面会话服务、porta
 - PipeWire
 - 可用的 Vulkan 或 OpenGL 图形驱动
 
-第一次验收优先使用 GNOME Wayland 的 Ubuntu 22.04。运行时先检查 `--version`，再启动 UI 完成 mDNS、连接、系统选屏和 Android 播放测试。
+第一次验收优先使用 GNOME Wayland 的 Ubuntu 24.04。运行时先检查 `--version`，再启动 UI 完成 mDNS、连接、系统选屏和 Android 播放测试。

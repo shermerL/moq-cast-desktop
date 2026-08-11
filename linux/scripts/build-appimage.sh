@@ -60,7 +60,7 @@ mkdir -p "$APPDIR/usr/share/doc/moqcast"
     echo "cargo_features=moq-native:aws-lc-rs,mdns,quinn;moq-video:nvenc,pipewire"
     echo "build_date=$BUILD_DATE"
     echo "target=x86_64-unknown-linux-gnu"
-    echo "compatibility_baseline=glibc-2.34,linux-5.15"
+    echo "compatibility_baseline=ubuntu-24.04,glibc-2.39,pipewire-1.0"
 } >"$APPDIR/usr/share/doc/moqcast/build-info.txt"
 
 APPIMAGE_EXTRACT_AND_RUN=1 "$LINUXDEPLOY" \
