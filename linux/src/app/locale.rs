@@ -100,8 +100,29 @@ impl Locale {
 
     pub(super) fn connect(self) -> &'static str {
         match self {
-            Self::Chinese => "连接",
-            Self::English => "Connect",
+            Self::Chinese => "连接并共享",
+            Self::English => "Connect and share",
+        }
+    }
+
+    pub(super) fn connecting(self) -> &'static str {
+        match self {
+            Self::Chinese => "正在连接…",
+            Self::English => "Connecting...",
+        }
+    }
+
+    pub(super) fn disconnect(self) -> &'static str {
+        match self {
+            Self::Chinese => "断开连接",
+            Self::English => "Disconnect",
+        }
+    }
+
+    pub(super) fn fingerprint_pinning(self) -> &'static str {
+        match self {
+            Self::Chinese => "TLS 使用广播指纹固定",
+            Self::English => "TLS pinned to the advertised fingerprint",
         }
     }
 

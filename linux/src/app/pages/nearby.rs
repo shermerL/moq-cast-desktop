@@ -1,8 +1,10 @@
 //! Nearby peer discovery page.
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, RichText};
 
-use super::super::{AppSnapshot, DiscoveryState, Locale, UserCommand, heading, section_frame};
+use super::super::{
+    AppSnapshot, DiscoveryState, Locale, MUTED, TEAL, UserCommand, heading, section_frame,
+};
 
 pub(in crate::app) fn show(
     ui: &mut egui::Ui,
@@ -11,16 +13,16 @@ pub(in crate::app) fn show(
 ) -> Option<UserCommand> {
     heading(ui, locale.nearby(), locale.nearby_description());
 
-    let scanning = snapshot.discovery == DiscoveryState::Scanning;
+    let discovery_active = snapshot.discovery.is_active();
     let mut command = if ui
-        .button(if scanning {
+        .button(if discovery_active {
             locale.stop_scan()
         } else {
             locale.start_scan()
         })
         .clicked()
     {
-        Some(if scanning {
+        Some(if discovery_active {
             UserCommand::StopDiscovery
         } else {
             UserCommand::StartDiscovery
@@ -35,7 +37,7 @@ pub(in crate::app) fn show(
         if snapshot.peers.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(64.0);
-                if scanning {
+                if snapshot.discovery == DiscoveryState::Scanning {
                     ui.spinner();
                     ui.label(RichText::new(locale.scanning()).size(15.0));
                 } else {
@@ -44,7 +46,7 @@ pub(in crate::app) fn show(
                 ui.label(
                     RichText::new(locale.no_devices_hint())
                         .size(13.0)
-                        .color(Color32::from_rgb(99, 116, 112)),
+                        .color(MUTED),
                 );
             });
             return;
@@ -55,16 +57,43 @@ pub(in crate::app) fn show(
                 ui.vertical(|ui| {
                     ui.label(RichText::new(&peer.name).size(16.0).strong());
                     ui.label(
-                        RichText::new(&peer.id)
+                        RichText::new(peer.endpoints.join(", "))
                             .size(12.0)
-                            .color(Color32::from_rgb(99, 116, 112)),
+                            .color(MUTED),
                     );
+                    if peer.fingerprint_pinned {
+                        ui.label(
+                            RichText::new(locale.fingerprint_pinning())
+                                .size(12.0)
+                                .color(TEAL),
+                        );
+                    }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(locale.connect()).clicked() {
-                        command = Some(UserCommand::ConnectPeer {
-                            peer_id: peer.id.clone(),
-                        });
+                    match &snapshot.peer {
+                        super::super::PeerState::Connecting { peer_id } if peer_id == &peer.id => {
+                            ui.add_enabled(false, egui::Button::new(locale.connecting()));
+                        }
+                        super::super::PeerState::Connected { peer_id } if peer_id == &peer.id => {
+                            if ui.button(locale.disconnect()).clicked() {
+                                command = Some(UserCommand::Disconnect);
+                            }
+                        }
+                        state => {
+                            let available = matches!(
+                                state,
+                                super::super::PeerState::Disconnected
+                                    | super::super::PeerState::Failed { .. }
+                            );
+                            if ui
+                                .add_enabled(available, egui::Button::new(locale.connect()))
+                                .clicked()
+                            {
+                                command = Some(UserCommand::ConnectPeer {
+                                    peer_id: peer.id.clone(),
+                                });
+                            }
+                        }
                     }
                 });
             });

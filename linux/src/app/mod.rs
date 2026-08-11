@@ -42,6 +42,7 @@ pub struct MoqCastApp {
     locale: Locale,
     runtime: RuntimeHandle,
     command_error: Option<String>,
+    connected_peer: Option<String>,
 }
 
 impl MoqCastApp {
@@ -59,6 +60,7 @@ impl MoqCastApp {
             locale,
             runtime: RuntimeHandle::start()?,
             command_error: None,
+            connected_peer: None,
         })
     }
 
@@ -70,7 +72,7 @@ impl MoqCastApp {
             .map(|error| error.to_string());
     }
 
-    fn navigation(&mut self, ui: &mut egui::Ui) {
+    fn navigation(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
         egui::Panel::left("navigation")
             .exact_size(224.0)
             .frame(
@@ -85,14 +87,21 @@ impl MoqCastApp {
                 ui.label(RichText::new(self.locale.desktop()).size(12.0).color(MUTED));
                 ui.add_space(34.0);
 
-                nav_button(ui, &mut self.page, Page::Nearby, self.locale.nearby());
+                nav_button(ui, &mut self.page, Page::Nearby, self.locale.nearby(), true);
                 nav_button(
                     ui,
                     &mut self.page,
                     Page::ScreenShare,
                     self.locale.screen_share(),
+                    matches!(snapshot.peer, PeerState::Connected { .. }),
                 );
-                nav_button(ui, &mut self.page, Page::Settings, self.locale.settings());
+                nav_button(
+                    ui,
+                    &mut self.page,
+                    Page::Settings,
+                    self.locale.settings(),
+                    true,
+                );
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     ui.label(RichText::new("MoQ / QUIC").size(11.0).color(MUTED));
@@ -104,8 +113,22 @@ impl MoqCastApp {
 impl eframe::App for MoqCastApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
-        self.navigation(ui);
         let snapshot = self.runtime.snapshot();
+        let connected_peer = match &snapshot.peer {
+            PeerState::Connected { peer_id } => Some(peer_id.as_str()),
+            _ => None,
+        };
+        if connected_peer != self.connected_peer.as_deref() {
+            self.page = if connected_peer.is_some() {
+                Page::ScreenShare
+            } else if self.page == Page::ScreenShare {
+                Page::Nearby
+            } else {
+                self.page
+            };
+            self.connected_peer = connected_peer.map(str::to_owned);
+        }
+        self.navigation(ui, &snapshot);
 
         egui::CentralPanel::default()
             .frame(Frame::new().fill(BACKGROUND).inner_margin(Margin::same(32)))
@@ -143,10 +166,10 @@ impl eframe::App for MoqCastApp {
     }
 }
 
-fn nav_button(ui: &mut egui::Ui, page: &mut Page, target: Page, label: &str) {
+fn nav_button(ui: &mut egui::Ui, page: &mut Page, target: Page, label: &str, enabled: bool) {
     let active = *page == target;
-    let response = ui.add_sized(
-        [184.0, 42.0],
+    let response = ui.add_enabled(
+        enabled,
         egui::Button::new(
             RichText::new(label)
                 .size(15.0)
@@ -158,7 +181,8 @@ fn nav_button(ui: &mut egui::Ui, page: &mut Page, target: Page, label: &str) {
             Color32::TRANSPARENT
         })
         .stroke(Stroke::NONE)
-        .corner_radius(CornerRadius::same(7)),
+        .corner_radius(CornerRadius::same(7))
+        .min_size(egui::vec2(184.0, 42.0)),
     );
     if response.clicked() {
         *page = target;

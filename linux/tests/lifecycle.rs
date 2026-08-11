@@ -2,7 +2,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use moq_cast_desktop::app::{
-    AppSnapshot, DiscoveryState, PeerState, PublishState, StateError, UserCommand,
+    AppSnapshot, DiscoveredPeer, DiscoveryState, PeerState, PublishState, StateError, UserCommand,
 };
 use moq_cast_desktop::runtime::RuntimeHandle;
 
@@ -71,4 +71,67 @@ fn runtime_publishes_discovery_state_and_shuts_down() {
 
     drop(runtime);
     drop(RuntimeHandle::start().unwrap());
+}
+
+#[test]
+fn discovery_empty_found_and_lost_do_not_change_the_peer_session() {
+    let mut snapshot = AppSnapshot::default();
+    snapshot.start_discovery();
+    snapshot.finish_initial_scan();
+    assert_eq!(snapshot.discovery, DiscoveryState::Empty);
+
+    snapshot.replace_peers(vec![DiscoveredPeer {
+        id: "android-living-room".into(),
+        name: "Android living room".into(),
+        endpoints: vec!["192.0.2.10:4443".into(), "[2001:db8::10]:4443".into()],
+        fingerprint_pinned: true,
+    }]);
+    assert_eq!(snapshot.discovery, DiscoveryState::Ready);
+    assert_eq!(snapshot.peer, PeerState::Disconnected);
+
+    snapshot.replace_peers(Vec::new());
+    assert_eq!(snapshot.discovery, DiscoveryState::Empty);
+    assert_eq!(snapshot.peer, PeerState::Disconnected);
+}
+
+#[test]
+fn stopping_or_failing_discovery_clears_stale_peers() {
+    let peer = DiscoveredPeer {
+        id: "android-living-room".into(),
+        name: "Android living room".into(),
+        endpoints: vec!["192.0.2.10:4443".into()],
+        fingerprint_pinned: true,
+    };
+    let mut snapshot = AppSnapshot::default();
+    snapshot.start_discovery();
+    snapshot.replace_peers(vec![peer.clone()]);
+
+    snapshot.stop_discovery();
+    assert_eq!(snapshot.discovery, DiscoveryState::Idle);
+    assert!(snapshot.peers.is_empty());
+
+    snapshot.start_discovery();
+    snapshot.replace_peers(vec![peer]);
+    snapshot.fail_discovery("listener stopped");
+    assert_eq!(snapshot.discovery, DiscoveryState::Error);
+    assert!(snapshot.peers.is_empty());
+}
+
+#[test]
+fn a_failed_connection_can_be_retried_and_disconnected() {
+    let mut snapshot = AppSnapshot::default();
+    snapshot.begin_connect("android-living-room").unwrap();
+    snapshot.fail_connect("fingerprint mismatch").unwrap();
+    assert_eq!(
+        snapshot.peer,
+        PeerState::Failed {
+            peer_id: "android-living-room".into(),
+        }
+    );
+
+    snapshot.begin_connect("android-living-room").unwrap();
+    snapshot.finish_connect().unwrap();
+    snapshot.begin_disconnect().unwrap();
+    snapshot.finish_disconnect().unwrap();
+    assert_eq!(snapshot.peer, PeerState::Disconnected);
 }
