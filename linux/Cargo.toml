@@ -6,7 +6,10 @@ rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 
 [workspace]
-exclude = ["vendor/moq-video"]
+exclude = ["vendor/libspa", "vendor/moq-video"]
+
+[patch.crates-io]
+libspa = { path = "vendor/libspa" }
 
 [dependencies]
 anyhow = "1"

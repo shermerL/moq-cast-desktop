@@ -85,11 +85,13 @@ jobs:
       - name: Build AppImage
         working-directory: linux
         env:
-          LINUXDEPLOY: ${{ runner.temp }}/appimage-tools/linuxdeploy
-          APPIMAGETOOL: ${{ runner.temp }}/appimage-tools/appimagetool
+          MOQCAST_SOURCE_COMMIT: ${{ github.sha }}
           MOQCAST_PACKAGE_VARIANT: ${{ matrix.variant }}
           MOQCAST_INTENDED_TARGETS: ${{ matrix.intended_targets }}
-        run: ./scripts/build-appimage.sh
+        run: |
+          LINUXDEPLOY="$RUNNER_TEMP/appimage-tools/linuxdeploy" \
+          APPIMAGETOOL="$RUNNER_TEMP/appimage-tools/appimagetool" \
+          ./scripts/build-appimage.sh
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4

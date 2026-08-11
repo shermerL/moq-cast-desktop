@@ -33,7 +33,15 @@ if [[ ! $PACKAGE_VARIANT =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
 fi
 
 VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$LINUX_DIR/Cargo.toml" | head -n 1)
-SOURCE_COMMIT=$(git -C "$REPO_DIR" rev-parse --short=12 HEAD)
+SOURCE_COMMIT=${MOQCAST_SOURCE_COMMIT:-}
+if [[ -z $SOURCE_COMMIT ]]; then
+    SOURCE_COMMIT=$(git -C "$REPO_DIR" rev-parse --short=12 HEAD)
+fi
+if [[ ! $SOURCE_COMMIT =~ ^[0-9a-fA-F]{7,64}$ ]]; then
+    echo "Invalid source commit: $SOURCE_COMMIT" >&2
+    exit 1
+fi
+SOURCE_COMMIT=${SOURCE_COMMIT:0:12}
 MOQ_REVISION=$(sed -n 's/.*moq-native.*rev = "\([^"]*\)".*/\1/p' "$LINUX_DIR/Cargo.toml")
 MOQ_VIDEO_REVISION=$(sed -n 's/^source_revision = `\([^`]*\)`/\1/p' "$LINUX_DIR/vendor/moq-video/VENDORED.md")
 BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -70,6 +78,8 @@ install -Dm644 vendor/moq-video/LICENSE-APACHE \
     "$APPDIR/usr/share/licenses/moqcast/moq-video-LICENSE-APACHE.txt"
 install -Dm644 vendor/moq-video/LICENSE-MIT \
     "$APPDIR/usr/share/licenses/moqcast/moq-video-LICENSE-MIT.txt"
+install -Dm644 vendor/libspa/LICENSE \
+    "$APPDIR/usr/share/licenses/moqcast/libspa-LICENSE.txt"
 
 mkdir -p "$APPDIR/usr/share/doc/moqcast"
 {
@@ -77,6 +87,7 @@ mkdir -p "$APPDIR/usr/share/doc/moqcast"
     echo "moq_revision=$MOQ_REVISION"
     echo "moq_video_source=vendored"
     echo "moq_video_revision=$MOQ_VIDEO_REVISION"
+    echo "libspa_source=vendored-0.10.0"
     echo "cargo_features=moq-native:aws-lc-rs,mdns,quinn;moq-video:nvenc,pipewire"
     echo "build_date=$BUILD_DATE"
     echo "target=x86_64-unknown-linux-gnu"
