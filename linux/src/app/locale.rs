@@ -28,13 +28,6 @@ impl Locale {
         }
     }
 
-    pub(super) fn desktop(self) -> &'static str {
-        match self {
-            Self::Chinese => "桌面端",
-            Self::English => "Desktop",
-        }
-    }
-
     pub(super) fn nearby(self) -> &'static str {
         match self {
             Self::Chinese => "附近设备",
@@ -58,8 +51,8 @@ impl Locale {
 
     pub(super) fn settings_description(self) -> &'static str {
         match self {
-            Self::Chinese => "语言与应用信息。网络安全设置由运行时管理。",
-            Self::English => "Language and app information. Network security is runtime-managed.",
+            Self::Chinese => "设置应用使用的语言。",
+            Self::English => "Choose the language used by the app.",
         }
     }
 
@@ -245,6 +238,13 @@ impl Locale {
         }
     }
 
+    pub(super) fn share_local_screen(self) -> &'static str {
+        match self {
+            Self::Chinese => "共享本机屏幕",
+            Self::English => "Share this screen",
+        }
+    }
+
     pub(super) fn preparing_share(self) -> &'static str {
         match self {
             Self::Chinese => "正在等待系统选择屏幕…",
@@ -287,6 +287,27 @@ impl Locale {
         }
     }
 
+    pub(super) fn viewing_screen(self) -> &'static str {
+        match self {
+            Self::Chinese => "正在观看远端屏幕",
+            Self::English => "Watching a remote screen",
+        }
+    }
+
+    pub(super) fn stopping_view(self) -> &'static str {
+        match self {
+            Self::Chinese => "正在停止观看…",
+            Self::English => "Stopping remote screen...",
+        }
+    }
+
+    pub(super) fn media_keeps_mesh(self) -> &'static str {
+        match self {
+            Self::Chinese => "停止媒体不会断开 mesh。",
+            Self::English => "Stopping media keeps the mesh connected.",
+        }
+    }
+
     pub(super) fn enter_fullscreen(self) -> &'static str {
         match self {
             Self::Chinese => "进入全屏",
@@ -322,6 +343,34 @@ impl Locale {
         }
     }
 
+    pub(super) fn device_details(self) -> &'static str {
+        match self {
+            Self::Chinese => "设备详情",
+            Self::English => "Device details",
+        }
+    }
+
+    pub(super) fn select_device(self) -> &'static str {
+        match self {
+            Self::Chinese => "选择一个在线设备查看状态和可用操作。",
+            Self::English => "Select an online device to see its status and available actions.",
+        }
+    }
+
+    pub(super) fn peer_identifier(self) -> &'static str {
+        match self {
+            Self::Chinese => "设备标识",
+            Self::English => "Peer ID",
+        }
+    }
+
+    pub(super) fn network_endpoints(self) -> &'static str {
+        match self {
+            Self::Chinese => "网络地址",
+            Self::English => "Network endpoints",
+        }
+    }
+
     pub(super) fn mesh_status_hint(self) -> &'static str {
         match self {
             Self::Chinese => "设备行只显示精确出站状态；入站连接无法安全归属到具体设备。",
@@ -351,34 +400,6 @@ impl Locale {
         match self {
             Self::Chinese => "语言",
             Self::English => "Language",
-        }
-    }
-
-    pub(super) fn about(self) -> &'static str {
-        match self {
-            Self::Chinese => "关于",
-            Self::English => "About",
-        }
-    }
-
-    pub(super) fn about_description(self) -> &'static str {
-        match self {
-            Self::Chinese => "基于 mDNS 与 MoQ / QUIC 的局域网 screen-only mesh。",
-            Self::English => "A screen-only LAN mesh built on mDNS and MoQ / QUIC.",
-        }
-    }
-
-    pub(super) fn app_version(self) -> &'static str {
-        match self {
-            Self::Chinese => "应用版本",
-            Self::English => "App version",
-        }
-    }
-
-    pub(super) fn protocol(self) -> &'static str {
-        match self {
-            Self::Chinese => "传输协议",
-            Self::English => "Transport",
         }
     }
 }

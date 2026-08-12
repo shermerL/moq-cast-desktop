@@ -21,59 +21,35 @@ pub(super) fn surface() -> Frame {
         .fill(SURFACE)
         .stroke(Stroke::new(1.0, BORDER))
         .corner_radius(RADIUS)
-        .inner_margin(Margin::same(20))
+        .inner_margin(Margin::same(16))
 }
 
-pub(super) fn muted_surface() -> Frame {
-    Frame::new()
-        .fill(SURFACE_MUTED)
-        .stroke(Stroke::new(1.0, BORDER))
-        .corner_radius(RADIUS)
-        .inner_margin(Margin::same(20))
+pub(super) fn page_header(ui: &mut egui::Ui, title: &str, description: &str) {
+    ui.label(RichText::new(title).size(24.0).strong().color(TEXT));
+    if !description.is_empty() {
+        ui.label(RichText::new(description).size(13.0).color(MUTED));
+    }
+    ui.add_space(18.0);
 }
 
-pub(super) fn page_header(
-    ui: &mut egui::Ui,
-    title: &str,
-    description: &str,
-    locale: Locale,
-    snapshot: &AppSnapshot,
-) {
-    ui.horizontal_wrapped(|ui| {
-        ui.vertical(|ui| {
-            ui.label(RichText::new(title).size(28.0).strong().color(TEXT));
-            if !description.is_empty() {
-                ui.label(RichText::new(description).size(14.0).color(MUTED));
-            }
-        });
-        ui.add_space(16.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let outbound = snapshot
-                .peers
-                .values()
-                .filter(|peer| {
-                    peer.dial_role == DialRole::Outbound
-                        && peer.transport == TransportState::Connected
-                })
-                .count();
-            let summary = format!(
-                "{}: {outbound}  ·  {}: {}",
-                locale.outbound_sessions(),
-                locale.inbound_sessions(),
-                snapshot.inbound_session_count
-            );
-            status_badge(
-                ui,
-                &summary,
-                if snapshot.has_mesh_session() {
-                    BadgeTone::Success
-                } else {
-                    BadgeTone::Neutral
-                },
-            );
-        });
-    });
-    ui.add_space(22.0);
+pub(super) fn mesh_summary(ui: &mut egui::Ui, locale: Locale, snapshot: &AppSnapshot) {
+    let outbound = snapshot
+        .peers
+        .values()
+        .filter(|peer| {
+            peer.dial_role == DialRole::Outbound && peer.transport == TransportState::Connected
+        })
+        .count();
+    ui.label(
+        RichText::new(format!(
+            "{} {outbound}  ·  {} {}",
+            locale.outbound_sessions(),
+            locale.inbound_sessions(),
+            snapshot.inbound_session_count
+        ))
+        .size(11.0)
+        .color(MUTED),
+    );
 }
 
 pub(super) fn status_badge(ui: &mut egui::Ui, label: &str, tone: BadgeTone) -> Response {
@@ -105,7 +81,7 @@ pub(super) fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> R
             .fill(BRAND)
             .stroke(Stroke::new(1.0, BRAND_DARK))
             .corner_radius(RADIUS)
-            .min_size(egui::vec2(132.0, 40.0)),
+            .min_size(egui::vec2(112.0, 36.0)),
     )
 }
 
@@ -116,7 +92,7 @@ pub(super) fn secondary_button(ui: &mut egui::Ui, label: &str, enabled: bool) ->
             .fill(SURFACE)
             .stroke(Stroke::new(1.0, BORDER))
             .corner_radius(RADIUS)
-            .min_size(egui::vec2(120.0, 40.0)),
+            .min_size(egui::vec2(108.0, 36.0)),
     )
 }
 
@@ -127,21 +103,35 @@ pub(super) fn danger_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> Re
             .fill(ERROR_SOFT)
             .stroke(Stroke::new(1.0, Color32::from_rgb(239, 184, 181)))
             .corner_radius(RADIUS)
-            .min_size(egui::vec2(120.0, 40.0)),
+            .min_size(egui::vec2(108.0, 36.0)),
     )
 }
 
 pub(super) fn empty_state(ui: &mut egui::Ui, title: &str, description: &str, busy: bool) {
-    muted_surface().show(ui, |ui| {
-        ui.set_min_height(220.0);
-        ui.vertical_centered(|ui| {
-            ui.add_space(50.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 144.0),
+        egui::Layout::top_down(egui::Align::Center),
+        |ui| {
+            ui.add_space(24.0);
             if busy {
                 ui.spinner();
             }
-            ui.label(RichText::new(title).size(18.0).strong().color(TEXT));
+            ui.label(RichText::new(title).size(17.0).strong().color(TEXT));
             ui.label(RichText::new(description).size(13.0).color(MUTED));
-        });
+        },
+    );
+}
+
+pub(super) fn status_line(ui: &mut egui::Ui, label: &str, tone: BadgeTone) {
+    let color = match tone {
+        BadgeTone::Neutral => MUTED,
+        BadgeTone::Info => Color32::from_rgb(65, 105, 135),
+        BadgeTone::Success => BRAND,
+        BadgeTone::Error => ERROR,
+    };
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("●").size(9.0).color(color));
+        ui.label(RichText::new(label).size(12.0).color(TEXT));
     });
 }
 

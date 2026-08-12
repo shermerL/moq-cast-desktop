@@ -2,10 +2,10 @@
 
 use eframe::egui::{self, Color32, CornerRadius, Stroke};
 
-pub(super) const PAGE: Color32 = Color32::from_rgb(238, 242, 240);
+pub(super) const PAGE: Color32 = Color32::from_rgb(247, 248, 249);
 pub(super) const SURFACE: Color32 = Color32::WHITE;
-pub(super) const SURFACE_MUTED: Color32 = Color32::from_rgb(244, 247, 245);
-pub(super) const BORDER: Color32 = Color32::from_rgb(215, 225, 221);
+pub(super) const SURFACE_MUTED: Color32 = Color32::from_rgb(245, 246, 247);
+pub(super) const BORDER: Color32 = Color32::from_rgb(225, 228, 231);
 pub(super) const BRAND: Color32 = Color32::from_rgb(12, 124, 104);
 pub(super) const BRAND_DARK: Color32 = Color32::from_rgb(7, 91, 80);
 pub(super) const BRAND_SOFT: Color32 = Color32::from_rgb(220, 239, 233);
@@ -48,7 +48,7 @@ pub(super) fn configure(context: &egui::Context) {
     visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
     style.visuals = visuals;
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(14.0, 9.0);
-    style.spacing.interact_size.y = 40.0;
+    style.spacing.button_padding = egui::vec2(12.0, 7.0);
+    style.spacing.interact_size.y = 36.0;
     context.set_style_of(egui::Theme::Light, style);
 }

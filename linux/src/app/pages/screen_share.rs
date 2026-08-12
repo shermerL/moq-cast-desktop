@@ -45,9 +45,9 @@ pub(in crate::app) fn show(
         }
         MediaState::Publishing | MediaState::StoppingPublish => {
             components::surface().show(ui, |ui| {
-                ui.set_min_height(300.0);
+                ui.set_min_height(210.0);
                 ui.vertical_centered(|ui| {
-                    ui.add_space(78.0);
+                    ui.add_space(34.0);
                     status_badge(ui, locale.sharing_screen(), BadgeTone::Success);
                     ui.add_space(12.0);
                     ui.label(
@@ -67,10 +67,10 @@ pub(in crate::app) fn show(
             });
         }
         MediaState::PreparingPublish => {
-            components::muted_surface().show(ui, |ui| {
-                ui.set_min_height(300.0);
+            components::surface().show(ui, |ui| {
+                ui.set_min_height(210.0);
                 ui.vertical_centered(|ui| {
-                    ui.add_space(90.0);
+                    ui.add_space(44.0);
                     ui.spinner();
                     ui.label(
                         RichText::new(locale.preparing_share())
@@ -83,10 +83,10 @@ pub(in crate::app) fn show(
             });
         }
         MediaState::Idle => {
-            components::muted_surface().show(ui, |ui| {
-                ui.set_min_height(300.0);
+            components::surface().show(ui, |ui| {
+                ui.set_min_height(210.0);
                 ui.vertical_centered(|ui| {
-                    ui.add_space(76.0);
+                    ui.add_space(38.0);
                     ui.label(
                         RichText::new(locale.media_idle())
                             .size(19.0)

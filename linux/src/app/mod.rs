@@ -20,6 +20,68 @@ use eframe::egui::{self, Color32, Frame, Margin, RichText, Stroke};
 use crate::runtime::{RuntimeHandle, RuntimeStartError};
 
 const STORAGE_LOCALE: &str = "moqcast.locale";
+const CONTENT_MAX_WIDTH: f32 = 1040.0;
+const DEVICE_WORKSPACE_SPLIT_WIDTH: f32 = 900.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeviceWorkspaceLayout {
+    Split,
+    Single,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ShellLayout {
+    content_width: f32,
+    page_padding: f32,
+    compact_app_bar: bool,
+    device_workspace: DeviceWorkspaceLayout,
+}
+
+fn shell_layout(window_width: f32) -> ShellLayout {
+    let compact_app_bar = window_width < 820.0;
+    let page_padding = if compact_app_bar { 24.0 } else { 32.0 };
+    ShellLayout {
+        content_width: (window_width - page_padding * 2.0).clamp(1.0, CONTENT_MAX_WIDTH),
+        page_padding,
+        compact_app_bar,
+        device_workspace: if window_width >= DEVICE_WORKSPACE_SPLIT_WIDTH {
+            DeviceWorkspaceLayout::Split
+        } else {
+            DeviceWorkspaceLayout::Single
+        },
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MediaStopAction {
+    Publish,
+    View,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShellControls {
+    navigation_visible: bool,
+    stop: Option<MediaStopAction>,
+    stop_enabled: bool,
+}
+
+fn shell_controls(media: &MediaState) -> ShellControls {
+    let (stop, stop_enabled) = match media {
+        MediaState::Idle => (None, false),
+        MediaState::PreparingPublish => (Some(MediaStopAction::Publish), false),
+        MediaState::Publishing => (Some(MediaStopAction::Publish), true),
+        MediaState::StoppingPublish => (Some(MediaStopAction::Publish), false),
+        MediaState::PreparingView { .. } | MediaState::Viewing { .. } => {
+            (Some(MediaStopAction::View), true)
+        }
+        MediaState::StoppingView { .. } => (Some(MediaStopAction::View), false),
+    };
+    ShellControls {
+        navigation_visible: true,
+        stop,
+        stop_enabled,
+    }
+}
 
 /// A top-level page in the desktop application.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -36,6 +98,7 @@ pub enum Page {
 /// The native MoQCast desktop application.
 pub struct MoqCastApp {
     page: Page,
+    selected_peer: Option<String>,
     locale: Locale,
     runtime: RuntimeHandle,
     command_error: Option<String>,
@@ -57,6 +120,7 @@ impl MoqCastApp {
 
         Ok(Self {
             page: Page::default(),
+            selected_peer: None,
             locale,
             runtime: RuntimeHandle::start()?,
             command_error: None,
@@ -74,61 +138,107 @@ impl MoqCastApp {
             .map(|error| error.to_string());
     }
 
-    fn navigation(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
-        let compact = ui.available_width() < 760.0;
-        let width = if compact { 156.0 } else { 220.0 };
-        egui::Panel::left("navigation")
-            .exact_size(width)
+    fn app_bar(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AppSnapshot,
+        compact: bool,
+        controls: ShellControls,
+    ) {
+        egui::Panel::top("app-bar")
+            .exact_size(if compact { 104.0 } else { 64.0 })
             .frame(
                 Frame::new()
                     .fill(theme::SURFACE)
                     .stroke(Stroke::new(1.0, theme::BORDER))
-                    .inner_margin(Margin::same(if compact { 12 } else { 20 })),
+                    .inner_margin(Margin::symmetric(24, 10)),
             )
             .show(ui, |ui| {
-                ui.add_space(8.0);
-                ui.label(
-                    RichText::new("MoQCast")
-                        .size(if compact { 21.0 } else { 26.0 })
-                        .strong()
-                        .color(theme::BRAND),
-                );
-                if !compact {
+                ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new(self.locale.desktop())
-                            .size(12.0)
+                        RichText::new("MoQCast")
+                            .size(20.0)
+                            .strong()
+                            .color(theme::TEXT),
+                    );
+                    if !compact && controls.navigation_visible {
+                        ui.add_space(18.0);
+                        view_switcher(ui, &mut self.page, self.locale);
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        components::mesh_summary(ui, self.locale, snapshot);
+                    });
+                });
+                if compact && controls.navigation_visible {
+                    ui.add_space(6.0);
+                    view_switcher(ui, &mut self.page, self.locale);
+                }
+            });
+    }
+
+    fn active_media_bar(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AppSnapshot,
+        controls: ShellControls,
+    ) {
+        let Some(stop) = controls.stop else {
+            return;
+        };
+        let (status, tone, stop_label, command) = match stop {
+            MediaStopAction::Publish => (
+                match snapshot.media {
+                    MediaState::PreparingPublish => self.locale.preparing_share(),
+                    MediaState::StoppingPublish => self.locale.stopping_share(),
+                    _ => self.locale.sharing_screen(),
+                },
+                if snapshot.media == MediaState::Publishing {
+                    components::BadgeTone::Success
+                } else {
+                    components::BadgeTone::Info
+                },
+                self.locale.stop_sharing(),
+                UserCommand::StopScreenShare,
+            ),
+            MediaStopAction::View => (
+                match snapshot.media {
+                    MediaState::PreparingView { .. } => self.locale.preparing_view(),
+                    MediaState::StoppingView { .. } => self.locale.stopping_view(),
+                    _ => self.locale.viewing_screen(),
+                },
+                if matches!(snapshot.media, MediaState::Viewing { .. }) {
+                    components::BadgeTone::Success
+                } else {
+                    components::BadgeTone::Info
+                },
+                self.locale.stop_watching(),
+                UserCommand::StopWatching,
+            ),
+        };
+
+        egui::Panel::top("active-media")
+            .exact_size(52.0)
+            .frame(
+                Frame::new()
+                    .fill(theme::SURFACE)
+                    .stroke(Stroke::new(1.0, theme::BORDER))
+                    .inner_margin(Margin::symmetric(24, 8)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    components::status_line(ui, status, tone);
+                    ui.label(
+                        RichText::new(self.locale.media_keeps_mesh())
+                            .size(11.0)
                             .color(theme::MUTED),
                     );
-                }
-                ui.add_space(if compact { 24.0 } else { 34.0 });
-
-                nav_button(
-                    ui,
-                    &mut self.page,
-                    Page::Nearby,
-                    self.locale.nearby(),
-                    true,
-                    width - if compact { 24.0 } else { 40.0 },
-                );
-                nav_button(
-                    ui,
-                    &mut self.page,
-                    Page::ScreenShare,
-                    self.locale.screen_share(),
-                    snapshot.has_mesh_session() || snapshot.media != MediaState::Idle,
-                    width - if compact { 24.0 } else { 40.0 },
-                );
-                nav_button(
-                    ui,
-                    &mut self.page,
-                    Page::Settings,
-                    self.locale.settings(),
-                    true,
-                    width - if compact { 24.0 } else { 40.0 },
-                );
-
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.label(RichText::new("MoQ / QUIC").size(11.0).color(theme::MUTED));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if components::danger_button(ui, stop_label, controls.stop_enabled)
+                            .clicked()
+                        {
+                            self.send(command);
+                        }
+                    });
                 });
             });
     }
@@ -183,76 +293,102 @@ impl eframe::App for MoqCastApp {
             context.request_repaint_after(std::time::Duration::from_millis(33));
             return;
         }
-        self.navigation(ui, &snapshot);
+        let layout = shell_layout(ui.available_width());
+        let controls = shell_controls(&snapshot.media);
+        self.app_bar(ui, &snapshot, layout.compact_app_bar, controls);
+        self.active_media_bar(ui, &snapshot, controls);
 
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(theme::PAGE).inner_margin(Margin::same(
-                if ui.available_width() < 760.0 { 20 } else { 32 },
-            )))
+            .frame(Frame::new().fill(theme::PAGE))
             .show(ui, |ui| {
-                let (title, description) = match self.page {
-                    Page::Nearby => (self.locale.nearby(), self.locale.nearby_description()),
-                    Page::ScreenShare => {
-                        (self.locale.screen_share(), self.locale.share_description())
-                    }
-                    Page::Settings => (self.locale.settings(), self.locale.settings_description()),
-                };
-                components::page_header(ui, title, description, self.locale, &snapshot);
-
-                let error = self
-                    .command_error
-                    .as_deref()
-                    .or(snapshot.last_error.as_deref());
-                let mut command = if let Some(error) = error {
-                    let recovery = match self.page {
-                        Page::Nearby if snapshot.discovery == DiscoveryState::Error => {
-                            Some((self.locale.retry(), UserCommand::RetryDiscovery))
-                        }
-                        Page::Nearby => None,
-                        Page::ScreenShare
-                            if snapshot.has_mesh_session()
-                                && snapshot.discovery != DiscoveryState::Error
-                                && matches!(snapshot.media, MediaState::Idle) =>
-                        {
-                            Some((self.locale.retry(), UserCommand::StartScreenShare))
-                        }
-                        Page::ScreenShare | Page::Settings => None,
-                    };
-                    let clicked = components::error_banner(
-                        ui,
-                        error,
-                        recovery.as_ref().map(|(label, _)| *label),
-                    );
-                    ui.add_space(16.0);
-                    clicked.then(|| recovery.expect("a recovery action was rendered").1)
-                } else {
-                    None
-                };
-
-                let page_command = match self.page {
-                    Page::Nearby => pages::nearby::show(ui, self.locale, &snapshot),
-                    Page::ScreenShare => pages::screen_share::show(
-                        ui,
-                        self.locale,
-                        &snapshot,
-                        self.playback_texture.as_ref(),
-                        &mut self.player,
+                let available = ui.available_rect_before_wrap();
+                let content = egui::Rect::from_min_size(
+                    egui::pos2(
+                        available.center().x - layout.content_width / 2.0,
+                        available.top() + layout.page_padding,
                     ),
-                    Page::Settings => {
-                        if let Some(locale) = pages::settings::show(ui, self.locale) {
-                            self.locale = locale;
+                    egui::vec2(
+                        layout.content_width,
+                        (available.height() - layout.page_padding * 2.0).max(1.0),
+                    ),
+                );
+                ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+                    ui.set_width(layout.content_width);
+                    let (title, description) = match self.page {
+                        Page::Nearby => (self.locale.nearby(), self.locale.nearby_description()),
+                        Page::ScreenShare => {
+                            (self.locale.screen_share(), self.locale.share_description())
                         }
-                        None
-                    }
-                };
-                command = command.or(page_command);
+                        Page::Settings => {
+                            (self.locale.settings(), self.locale.settings_description())
+                        }
+                    };
+                    components::page_header(ui, title, description);
 
-                if let Some(command) = command {
-                    if matches!(command, UserCommand::StartWatching { .. }) {
-                        self.page = Page::ScreenShare;
+                    let error = self
+                        .command_error
+                        .as_deref()
+                        .or(snapshot.last_error.as_deref());
+                    let mut command = if let Some(error) = error {
+                        let recovery = match self.page {
+                            Page::Nearby if snapshot.discovery == DiscoveryState::Error => {
+                                Some((self.locale.retry(), UserCommand::RetryDiscovery))
+                            }
+                            Page::Nearby => None,
+                            Page::ScreenShare
+                                if snapshot.has_mesh_session()
+                                    && snapshot.discovery != DiscoveryState::Error
+                                    && matches!(snapshot.media, MediaState::Idle) =>
+                            {
+                                Some((self.locale.retry(), UserCommand::StartScreenShare))
+                            }
+                            Page::ScreenShare | Page::Settings => None,
+                        };
+                        let clicked = components::error_banner(
+                            ui,
+                            error,
+                            recovery.as_ref().map(|(label, _)| *label),
+                        );
+                        ui.add_space(12.0);
+                        clicked.then(|| recovery.expect("a recovery action was rendered").1)
+                    } else {
+                        None
+                    };
+
+                    let page_command = match self.page {
+                        Page::Nearby => pages::nearby::show(
+                            ui,
+                            self.locale,
+                            &snapshot,
+                            &mut self.selected_peer,
+                            layout.device_workspace,
+                        ),
+                        Page::ScreenShare => pages::screen_share::show(
+                            ui,
+                            self.locale,
+                            &snapshot,
+                            self.playback_texture.as_ref(),
+                            &mut self.player,
+                        ),
+                        Page::Settings => {
+                            if let Some(locale) = pages::settings::show(ui, self.locale) {
+                                self.locale = locale;
+                            }
+                            None
+                        }
+                    };
+                    command = command.or(page_command);
+
+                    if let Some(command) = command {
+                        if matches!(
+                            command,
+                            UserCommand::StartWatching { .. } | UserCommand::StartScreenShare
+                        ) {
+                            self.page = Page::ScreenShare;
+                        }
+                        self.send(command);
                     }
-                    self.send(command);
-                }
+                });
             });
 
         let repaint = if matches!(snapshot.media, MediaState::Viewing { .. }) {
@@ -268,18 +404,18 @@ impl eframe::App for MoqCastApp {
     }
 }
 
-fn nav_button(
-    ui: &mut egui::Ui,
-    page: &mut Page,
-    target: Page,
-    label: &str,
-    enabled: bool,
-    width: f32,
-) {
+fn view_switcher(ui: &mut egui::Ui, page: &mut Page, locale: Locale) {
+    ui.horizontal(|ui| {
+        view_button(ui, page, Page::Nearby, locale.nearby());
+        view_button(ui, page, Page::ScreenShare, locale.screen_share());
+        view_button(ui, page, Page::Settings, locale.settings());
+    });
+}
+
+fn view_button(ui: &mut egui::Ui, page: &mut Page, target: Page, label: &str) {
     let active = *page == target;
-    let response = ui.add_enabled(
-        enabled,
-        egui::Button::new(RichText::new(label).size(15.0).color(if active {
+    let response = ui.add(
+        egui::Button::new(RichText::new(label).size(13.0).strong().color(if active {
             theme::BRAND_DARK
         } else {
             theme::TEXT
@@ -289,18 +425,13 @@ fn nav_button(
         } else {
             Color32::TRANSPARENT
         })
-        .stroke(if active {
-            Stroke::new(1.0, theme::BRAND_SOFT)
-        } else {
-            Stroke::NONE
-        })
+        .stroke(Stroke::NONE)
         .corner_radius(theme::RADIUS)
-        .min_size(egui::vec2(width, 42.0)),
+        .min_size(egui::vec2(104.0, 36.0)),
     );
     if response.clicked() {
         *page = target;
     }
-    ui.add_space(4.0);
 }
 
 fn configure_fonts(context: &egui::Context) {
@@ -325,6 +456,66 @@ fn configure_fonts(context: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wide_shell_centers_content_at_the_maximum_width() {
+        let layout = shell_layout(1440.0);
+
+        assert_eq!(layout.content_width, 1040.0);
+        assert_eq!(layout.page_padding, 32.0);
+        assert!(!layout.compact_app_bar);
+        assert_eq!(layout.device_workspace, DeviceWorkspaceLayout::Split);
+    }
+
+    #[test]
+    fn standard_window_keeps_the_device_workspace_split() {
+        let layout = shell_layout(1024.0);
+
+        assert_eq!(layout.content_width, 960.0);
+        assert_eq!(layout.device_workspace, DeviceWorkspaceLayout::Split);
+    }
+
+    #[test]
+    fn minimum_window_keeps_compact_padding_and_available_content() {
+        let layout = shell_layout(680.0);
+
+        assert_eq!(layout.content_width, 632.0);
+        assert_eq!(layout.page_padding, 24.0);
+        assert!(layout.compact_app_bar);
+        assert_eq!(layout.device_workspace, DeviceWorkspaceLayout::Single);
+    }
+
+    #[test]
+    fn active_media_keeps_navigation_and_stop_available() {
+        let publishing = shell_controls(&MediaState::Publishing);
+        assert!(publishing.navigation_visible);
+        assert_eq!(publishing.stop, Some(MediaStopAction::Publish));
+        assert!(publishing.stop_enabled);
+
+        let viewing = shell_controls(&MediaState::Viewing {
+            path: "moqcast.screen/peer-a".to_owned(),
+        });
+        assert!(viewing.navigation_visible);
+        assert_eq!(viewing.stop, Some(MediaStopAction::View));
+        assert!(viewing.stop_enabled);
+
+        let stopping = shell_controls(&MediaState::StoppingView {
+            path: "moqcast.screen/peer-a".to_owned(),
+        });
+        assert!(stopping.navigation_visible);
+        assert_eq!(stopping.stop, Some(MediaStopAction::View));
+        assert!(!stopping.stop_enabled);
+
+        let preparing_view = shell_controls(&MediaState::PreparingView {
+            path: "moqcast.screen/peer-a".to_owned(),
+        });
+        assert_eq!(preparing_view.stop, Some(MediaStopAction::View));
+        assert!(preparing_view.stop_enabled);
+
+        let preparing_publish = shell_controls(&MediaState::PreparingPublish);
+        assert_eq!(preparing_publish.stop, Some(MediaStopAction::Publish));
+        assert!(!preparing_publish.stop_enabled);
+    }
 
     #[test]
     fn configured_fonts_cover_simplified_chinese() {
