@@ -3,7 +3,7 @@
 use moq_native::moq_net;
 
 #[cfg(target_os = "linux")]
-const SCREEN_BROADCAST: &str = "moqcast.screen";
+use crate::screen_path;
 
 /// A prepared screen publication whose future owns capture and encoding.
 pub(crate) struct Publication {
@@ -19,14 +19,14 @@ impl Publication {
     /// Create the announced broadcast before opening the system picker.
     pub(crate) fn prepare(
         origin: &moq_net::origin::Producer,
+        local_peer_id: &str,
         bandwidth: Option<moq_net::bandwidth::Consumer>,
     ) -> anyhow::Result<Self> {
         #[cfg(target_os = "linux")]
         {
-            let mut broadcast = origin.create_broadcast(
-                SCREEN_BROADCAST,
-                moq_net::broadcast::Route::new().with_announce(true),
-            )?;
+            let path = screen_path::for_peer(local_peer_id);
+            let mut broadcast = origin
+                .create_broadcast(path, moq_net::broadcast::Route::new().with_announce(true))?;
             let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
             Ok(Self {
                 broadcast,
@@ -37,7 +37,7 @@ impl Publication {
 
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (origin, bandwidth);
+            let _ = (origin, local_peer_id, bandwidth);
             anyhow::bail!("screen sharing is available only on Linux")
         }
     }

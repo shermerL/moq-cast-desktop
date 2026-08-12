@@ -3,7 +3,10 @@ use moq_cast_desktop::app::MoqCastApp;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> anyhow::Result<()> {
-    if std::env::args().skip(1).any(|argument| argument == "--version") {
+    if std::env::args()
+        .skip(1)
+        .any(|argument| argument == "--version")
+    {
         println!("MoQCast {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }

@@ -76,6 +76,20 @@ pub(crate) struct PeerRegistry {
     peers: HashMap<String, PeerRecord>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PeerUpdate {
+    Unchanged,
+    Added,
+    CandidatesMerged,
+    IdentityReplaced,
+}
+
+impl PeerUpdate {
+    pub(crate) fn changed(self) -> bool {
+        self != Self::Unchanged
+    }
+}
+
 impl PeerRegistry {
     pub(crate) fn new(local_id: impl Into<String>) -> Self {
         Self {
@@ -84,20 +98,28 @@ impl PeerRegistry {
         }
     }
 
-    pub(crate) fn found(&mut self, peer: PeerRecord) -> bool {
+    pub(crate) fn found(&mut self, peer: PeerRecord) -> PeerUpdate {
         if peer.id == self.local_id {
-            return false;
+            return PeerUpdate::Unchanged;
         }
 
         match self.peers.get_mut(&peer.id) {
             Some(current) if current.same_advertisement(&peer) => {
-                return current.merge_candidates(peer);
+                if current.merge_candidates(peer) {
+                    PeerUpdate::CandidatesMerged
+                } else {
+                    PeerUpdate::Unchanged
+                }
             }
-            _ => {
+            Some(_) => {
                 self.peers.insert(peer.id.clone(), peer);
+                PeerUpdate::IdentityReplaced
+            }
+            None => {
+                self.peers.insert(peer.id.clone(), peer);
+                PeerUpdate::Added
             }
         }
-        true
     }
 
     pub(crate) fn lost(&mut self, id: &str) -> bool {
@@ -106,10 +128,6 @@ impl PeerRegistry {
 
     pub(crate) fn get(&self, id: &str) -> Option<&PeerRecord> {
         self.peers.get(id)
-    }
-
-    pub(crate) fn values(&self) -> impl Iterator<Item = &PeerRecord> {
-        self.peers.values()
     }
 
     #[cfg(test)]
@@ -127,7 +145,7 @@ impl PeerRegistry {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    use super::{PeerRecord, PeerRegistry};
+    use super::{PeerRecord, PeerRegistry, PeerUpdate};
 
     fn record(id: &str, octet: u8, credential: &str) -> PeerRecord {
         PeerRecord::for_test(
@@ -141,9 +159,18 @@ mod tests {
     fn ignores_self_and_merges_candidates_from_one_advertisement() {
         let mut peers = PeerRegistry::new("linux-self");
 
-        assert!(!peers.found(record("linux-self", 1, "self-proof")));
-        assert!(peers.found(record("android", 2, "same-proof")));
-        assert!(peers.found(record("android", 3, "same-proof")));
+        assert_eq!(
+            peers.found(record("linux-self", 1, "self-proof")),
+            PeerUpdate::Unchanged
+        );
+        assert_eq!(
+            peers.found(record("android", 2, "same-proof")),
+            PeerUpdate::Added
+        );
+        assert_eq!(
+            peers.found(record("android", 3, "same-proof")),
+            PeerUpdate::CandidatesMerged
+        );
 
         let peer = peers.get("android").unwrap();
         assert_eq!(peer.addrs.len(), 2);
@@ -153,8 +180,14 @@ mod tests {
     #[test]
     fn replaces_candidates_when_security_identity_rotates_and_handles_lost() {
         let mut peers = PeerRegistry::new("linux-self");
-        peers.found(record("android", 2, "old-proof"));
-        peers.found(record("android", 3, "new-proof"));
+        assert_eq!(
+            peers.found(record("android", 2, "old-proof")),
+            PeerUpdate::Added
+        );
+        assert_eq!(
+            peers.found(record("android", 3, "new-proof")),
+            PeerUpdate::IdentityReplaced
+        );
 
         let peer = peers.get("android").unwrap();
         assert_eq!(peer.addrs.len(), 1);

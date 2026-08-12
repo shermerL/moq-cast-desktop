@@ -24,13 +24,6 @@ pub(crate) fn authorized_request(request: &moq_native::Request, credential: &str
     authorized(request.path(), credential)
 }
 
-pub(crate) fn incoming_peer_id(request: &moq_native::Request) -> String {
-    request
-        .peer_origin()
-        .map(|origin| origin.to_string())
-        .unwrap_or_else(|| "incoming-peer".into())
-}
-
 pub(crate) async fn accept(
     request: moq_native::Request,
     credential: &str,

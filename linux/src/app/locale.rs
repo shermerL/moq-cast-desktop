@@ -58,8 +58,8 @@ impl Locale {
 
     pub(super) fn nearby_description(self) -> &'static str {
         match self {
-            Self::Chinese => "发现并连接同一局域网内的 MoQCast 设备。",
-            Self::English => "Find and connect to MoQCast devices on this network.",
+            Self::Chinese => "自动连接同一局域网内的 MoQCast 设备。",
+            Self::English => "Automatically connect to MoQCast devices on this network.",
         }
     }
 
@@ -98,24 +98,80 @@ impl Locale {
         }
     }
 
-    pub(super) fn connect(self) -> &'static str {
+    pub(super) fn watch(self) -> &'static str {
         match self {
-            Self::Chinese => "连接并共享",
-            Self::English => "Connect and share",
+            Self::Chinese => "观看",
+            Self::English => "Watch",
         }
     }
 
-    pub(super) fn connecting(self) -> &'static str {
+    pub(super) fn discovery_found(self) -> &'static str {
         match self {
-            Self::Chinese => "正在连接…",
-            Self::English => "Connecting...",
+            Self::Chinese => "已发现",
+            Self::English => "Discovered",
         }
     }
 
-    pub(super) fn disconnect(self) -> &'static str {
+    pub(super) fn discovery_lost(self) -> &'static str {
         match self {
-            Self::Chinese => "断开连接",
-            Self::English => "Disconnect",
+            Self::Chinese => "发现已丢失",
+            Self::English => "Discovery lost",
+        }
+    }
+
+    pub(super) fn transport_waiting(self) -> &'static str {
+        match self {
+            Self::Chinese => "等待 mesh 连接",
+            Self::English => "Waiting for mesh",
+        }
+    }
+
+    pub(super) fn transport_connecting(self) -> &'static str {
+        match self {
+            Self::Chinese => "正在建立 mesh…",
+            Self::English => "Connecting mesh...",
+        }
+    }
+
+    pub(super) fn transport_connected(self) -> &'static str {
+        match self {
+            Self::Chinese => "Mesh 已连接",
+            Self::English => "Mesh connected",
+        }
+    }
+
+    pub(super) fn transport_failed(self) -> &'static str {
+        match self {
+            Self::Chinese => "Mesh 连接失败",
+            Self::English => "Mesh connection failed",
+        }
+    }
+
+    pub(super) fn screen_available(self) -> &'static str {
+        match self {
+            Self::Chinese => "屏幕可观看",
+            Self::English => "Screen available",
+        }
+    }
+
+    pub(super) fn screen_unavailable(self) -> &'static str {
+        match self {
+            Self::Chinese => "未共享屏幕",
+            Self::English => "No shared screen",
+        }
+    }
+
+    pub(super) fn inbound_sessions(self) -> &'static str {
+        match self {
+            Self::Chinese => "已授权入站连接",
+            Self::English => "Authorized inbound sessions",
+        }
+    }
+
+    pub(super) fn outbound_sessions(self) -> &'static str {
+        match self {
+            Self::Chinese => "出站连接",
+            Self::English => "Outbound sessions",
         }
     }
 
@@ -133,6 +189,13 @@ impl Locale {
         }
     }
 
+    pub(super) fn mesh_connected(self) -> &'static str {
+        match self {
+            Self::Chinese => "Mesh 已连接",
+            Self::English => "Mesh connected",
+        }
+    }
+
     pub(super) fn not_connected(self) -> &'static str {
         match self {
             Self::Chinese => "尚未连接设备",
@@ -140,17 +203,10 @@ impl Locale {
         }
     }
 
-    pub(super) fn connected(self) -> &'static str {
-        match self {
-            Self::Chinese => "已连接设备",
-            Self::English => "Connected device",
-        }
-    }
-
     pub(super) fn connect_first(self) -> &'static str {
         match self {
-            Self::Chinese => "请先在附近设备页面连接接收端。",
-            Self::English => "Connect a receiver from Nearby first.",
+            Self::Chinese => "正在等待同一局域网内的设备建立 mesh。",
+            Self::English => "Waiting for a device on this network to join the mesh.",
         }
     }
 
@@ -186,6 +242,27 @@ impl Locale {
         match self {
             Self::Chinese => "停止共享",
             Self::English => "Stop sharing",
+        }
+    }
+
+    pub(super) fn preparing_view(self) -> &'static str {
+        match self {
+            Self::Chinese => "正在打开远端屏幕…",
+            Self::English => "Opening remote screen...",
+        }
+    }
+
+    pub(super) fn viewing_screen(self) -> &'static str {
+        match self {
+            Self::Chinese => "正在观看远端屏幕",
+            Self::English => "Viewing remote screen",
+        }
+    }
+
+    pub(super) fn stop_watching(self) -> &'static str {
+        match self {
+            Self::Chinese => "停止观看",
+            Self::English => "Stop watching",
         }
     }
 

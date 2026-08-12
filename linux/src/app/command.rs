@@ -7,14 +7,14 @@ pub enum UserCommand {
     StartDiscovery,
     /// Stop looking for LAN peers.
     StopDiscovery,
-    /// Connect to a discovered peer by stable id.
-    ConnectPeer { peer_id: String },
-    /// Disconnect the selected peer.
-    Disconnect,
     /// Open the system picker and begin screen publishing.
     StartScreenShare,
     /// Stop the current screen publication while keeping the peer connected.
     StopScreenShare,
+    /// Begin viewing one announced remote screen.
+    StartWatching { path: String },
+    /// Stop the current remote screen playback while keeping the mesh connected.
+    StopWatching,
     /// Stop every runtime-owned task and exit.
     Shutdown,
 }

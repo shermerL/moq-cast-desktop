@@ -9,6 +9,7 @@ use super::discovery::PeerRecord;
 use super::security::peer_path;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const RECONNECT_BUDGET: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Error)]
 pub(crate) enum DialError {
@@ -38,7 +39,8 @@ pub(crate) fn dial(
 
     let mut config = moq_native::ClientConfig::default();
     config.bind.set_port(0);
-    config.reconnect = Some(false);
+    config.reconnect = Some(true);
+    config.backoff.timeout = Some(RECONNECT_BUDGET);
     config.timeout = Some(CONNECT_TIMEOUT);
     config.version = config
         .versions()
@@ -153,9 +155,14 @@ mod tests {
         let client_origin = moq_net::Origin::random().produce();
         let fingerprint = "00".repeat(32);
         let connection = dial(&peer(addr, fingerprint, "proof"), client_origin).unwrap();
-        let result = tokio::time::timeout(Duration::from_secs(3), connection.established()).await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(3), connection.clone().established()).await;
 
-        assert!(result.is_ok_and(|result| result.is_err()));
+        assert!(
+            result.is_err(),
+            "fingerprint failures remain in bounded backoff"
+        );
+        connection.close();
         accept.abort();
     }
 

@@ -8,7 +8,8 @@ mod snapshot;
 pub use command::UserCommand;
 pub use locale::Locale;
 pub use snapshot::{
-    AppSnapshot, DiscoveredPeer, DiscoveryState, PeerState, PublishState, StateError,
+    AppSnapshot, DiscoveredPeer, DiscoveryState, MediaState, PeerDiscoveryState, PeerSnapshot,
+    RemoteScreenSnapshot, ScreenAvailability, StateError, TransportState,
 };
 
 use eframe::egui::{self, Color32, CornerRadius, Frame, Margin, RichText, Stroke};
@@ -42,7 +43,8 @@ pub struct MoqCastApp {
     locale: Locale,
     runtime: RuntimeHandle,
     command_error: Option<String>,
-    connected_peer: Option<String>,
+    playback_texture: Option<egui::TextureHandle>,
+    playback_sequence: u64,
 }
 
 impl MoqCastApp {
@@ -61,7 +63,8 @@ impl MoqCastApp {
             locale,
             runtime: RuntimeHandle::start()?,
             command_error: None,
-            connected_peer: None,
+            playback_texture: None,
+            playback_sequence: 0,
         })
     }
 
@@ -94,7 +97,7 @@ impl MoqCastApp {
                     &mut self.page,
                     Page::ScreenShare,
                     self.locale.screen_share(),
-                    matches!(snapshot.peer, PeerState::Connected { .. }),
+                    snapshot.has_mesh_session(),
                 );
                 nav_button(
                     ui,
@@ -115,19 +118,27 @@ impl eframe::App for MoqCastApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
         let snapshot = self.runtime.snapshot();
-        let connected_peer = match &snapshot.peer {
-            PeerState::Connected { peer_id } => Some(peer_id.as_str()),
-            _ => None,
-        };
-        if connected_peer != self.connected_peer.as_deref() {
-            self.page = if connected_peer.is_some() {
-                Page::ScreenShare
-            } else if self.page == Page::ScreenShare {
-                Page::Nearby
+        if let Some(frame) = self.runtime.playback_frame()
+            && frame.sequence != self.playback_sequence
+        {
+            let image =
+                egui::ColorImage::from_rgba_unmultiplied([frame.width, frame.height], &frame.rgba);
+            if let Some(texture) = self.playback_texture.as_mut() {
+                texture.set(image, egui::TextureOptions::LINEAR);
             } else {
-                self.page
-            };
-            self.connected_peer = connected_peer.map(str::to_owned);
+                self.playback_texture = Some(context.load_texture(
+                    "remote-screen",
+                    image,
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
+            self.playback_sequence = frame.sequence;
+        }
+        if !matches!(
+            snapshot.media,
+            MediaState::Viewing { .. } | MediaState::PreparingView { .. }
+        ) {
+            self.playback_texture = None;
         }
         self.navigation(ui, &snapshot);
 
@@ -136,7 +147,12 @@ impl eframe::App for MoqCastApp {
             .show(ui, |ui| {
                 let command = match self.page {
                     Page::Nearby => pages::nearby::show(ui, self.locale, &snapshot),
-                    Page::ScreenShare => pages::screen_share::show(ui, self.locale, &snapshot),
+                    Page::ScreenShare => pages::screen_share::show(
+                        ui,
+                        self.locale,
+                        &snapshot,
+                        self.playback_texture.as_ref(),
+                    ),
                     Page::Settings => {
                         if let Some(locale) = pages::settings::show(ui, self.locale) {
                             self.locale = locale;
@@ -146,6 +162,9 @@ impl eframe::App for MoqCastApp {
                 };
 
                 if let Some(command) = command {
+                    if matches!(command, UserCommand::StartWatching { .. }) {
+                        self.page = Page::ScreenShare;
+                    }
                     self.send(command);
                 }
 
@@ -159,7 +178,12 @@ impl eframe::App for MoqCastApp {
                 }
             });
 
-        context.request_repaint_after(std::time::Duration::from_millis(250));
+        let repaint = if matches!(snapshot.media, MediaState::Viewing { .. }) {
+            33
+        } else {
+            250
+        };
+        context.request_repaint_after(std::time::Duration::from_millis(repaint));
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

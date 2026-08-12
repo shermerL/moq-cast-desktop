@@ -17,7 +17,7 @@ pub(crate) struct Event {
 }
 
 pub(crate) enum EventKind {
-    Found(mdns::Peer),
+    Found { peer: mdns::Peer, should_dial: bool },
     Lost(String),
     InitialScanFinished,
     DiscoveryStopped,
@@ -103,7 +103,10 @@ async fn run_discovery(
 ) {
     while let Some(event) = discovery.recv().await {
         let kind = match event {
-            mdns::Event::Found(peer) => EventKind::Found(peer),
+            mdns::Event::Found(peer) => EventKind::Found {
+                should_dial: discovery.should_dial(&peer.id),
+                peer,
+            },
             mdns::Event::Lost(id) => EventKind::Lost(id),
             _ => continue,
         };

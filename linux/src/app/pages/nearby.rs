@@ -3,7 +3,8 @@
 use eframe::egui::{self, RichText};
 
 use super::super::{
-    AppSnapshot, DiscoveryState, Locale, MUTED, TEAL, UserCommand, heading, section_frame,
+    AppSnapshot, DiscoveryState, Locale, MUTED, MediaState, PeerDiscoveryState, ScreenAvailability,
+    TEAL, TransportState, UserCommand, heading, section_frame,
 };
 
 pub(in crate::app) fn show(
@@ -31,6 +32,18 @@ pub(in crate::app) fn show(
         None
     };
 
+    if snapshot.inbound_session_count > 0 {
+        ui.label(
+            RichText::new(format!(
+                "{}: {}",
+                locale.inbound_sessions(),
+                snapshot.inbound_session_count
+            ))
+            .size(12.0)
+            .color(TEAL),
+        );
+    }
+
     ui.add_space(14.0);
     section_frame().show(ui, |ui| {
         ui.set_min_height(260.0);
@@ -52,12 +65,34 @@ pub(in crate::app) fn show(
             return;
         }
 
-        for peer in &snapshot.peers {
+        for (peer_id, peer) in &snapshot.peers {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(RichText::new(&peer.name).size(16.0).strong());
+                    if !peer.endpoints.is_empty() {
+                        ui.label(
+                            RichText::new(peer.endpoints.join(", "))
+                                .size(12.0)
+                                .color(MUTED),
+                        );
+                    }
+                    let discovery = match peer.discovery {
+                        PeerDiscoveryState::Found => locale.discovery_found(),
+                        PeerDiscoveryState::Lost => locale.discovery_lost(),
+                    };
+                    let transport = match peer.transport {
+                        TransportState::Waiting => locale.transport_waiting(),
+                        TransportState::Connecting => locale.transport_connecting(),
+                        TransportState::Connected => locale.transport_connected(),
+                        TransportState::Failed => locale.transport_failed(),
+                    };
+                    let screen = if peer.screen == ScreenAvailability::Available {
+                        locale.screen_available()
+                    } else {
+                        locale.screen_unavailable()
+                    };
                     ui.label(
-                        RichText::new(peer.endpoints.join(", "))
+                        RichText::new(format!("{discovery} · {transport} · {screen}"))
                             .size(12.0)
                             .color(MUTED),
                     );
@@ -70,30 +105,16 @@ pub(in crate::app) fn show(
                     }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    match &snapshot.peer {
-                        super::super::PeerState::Connecting { peer_id } if peer_id == &peer.id => {
-                            ui.add_enabled(false, egui::Button::new(locale.connecting()));
-                        }
-                        super::super::PeerState::Connected { peer_id } if peer_id == &peer.id => {
-                            if ui.button(locale.disconnect()).clicked() {
-                                command = Some(UserCommand::Disconnect);
-                            }
-                        }
-                        state => {
-                            let available = matches!(
-                                state,
-                                super::super::PeerState::Disconnected
-                                    | super::super::PeerState::Failed { .. }
-                            );
-                            if ui
-                                .add_enabled(available, egui::Button::new(locale.connect()))
-                                .clicked()
-                            {
-                                command = Some(UserCommand::ConnectPeer {
-                                    peer_id: peer.id.clone(),
-                                });
-                            }
-                        }
+                    let enabled = peer.screen == ScreenAvailability::Available
+                        && snapshot.has_mesh_session()
+                        && snapshot.media == MediaState::Idle;
+                    if ui
+                        .add_enabled(enabled, egui::Button::new(locale.watch()))
+                        .clicked()
+                    {
+                        command = Some(UserCommand::StartWatching {
+                            path: crate::screen_path::for_peer(peer_id),
+                        });
                     }
                 });
             });

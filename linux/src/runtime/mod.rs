@@ -2,6 +2,7 @@
 
 mod supervisor;
 
+use std::sync::Arc;
 use std::thread;
 
 use thiserror::Error;
@@ -10,6 +11,68 @@ use tokio::sync::{mpsc, watch};
 use crate::app::{AppSnapshot, UserCommand};
 
 const COMMAND_CAPACITY: usize = 32;
+
+/// The latest decoded remote screen frame in tightly packed RGBA.
+#[derive(Clone)]
+pub(crate) struct PlaybackFrame {
+    pub(crate) sequence: u64,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+    pub(crate) rgba: Vec<u8>,
+}
+
+impl PlaybackFrame {
+    #[cfg(target_os = "linux")]
+    fn from_video(frame: moq_video::Frame, sequence: u64) -> anyhow::Result<Self> {
+        let width = frame.surface.width() as usize;
+        let height = frame.surface.height() as usize;
+        anyhow::ensure!(
+            width > 0 && height > 0 && width.is_multiple_of(2) && height.is_multiple_of(2),
+            "remote I420 frame dimensions must be non-zero and even"
+        );
+        let i420 = frame.surface.into_i420()?;
+        let pixels = width
+            .checked_mul(height)
+            .ok_or_else(|| anyhow::anyhow!("remote frame dimensions overflow"))?;
+        let i420_len = pixels
+            .checked_mul(3)
+            .map(|length| length / 2)
+            .ok_or_else(|| anyhow::anyhow!("remote I420 frame length overflow"))?;
+        anyhow::ensure!(
+            i420.len() == i420_len,
+            "remote I420 frame has an invalid byte length"
+        );
+        let u_offset = pixels;
+        let v_offset = pixels + pixels / 4;
+        let rgba_len = pixels
+            .checked_mul(4)
+            .ok_or_else(|| anyhow::anyhow!("remote RGBA frame length overflow"))?;
+        let mut rgba = Vec::with_capacity(rgba_len);
+        for y in 0..height {
+            for x in 0..width {
+                let luma = i32::from(i420[y * width + x]) - 16;
+                let chroma = (y / 2) * (width / 2) + x / 2;
+                let u = i32::from(i420[u_offset + chroma]) - 128;
+                let v = i32::from(i420[v_offset + chroma]) - 128;
+                let r = (298 * luma + 409 * v + 128) >> 8;
+                let g = (298 * luma - 100 * u - 208 * v + 128) >> 8;
+                let b = (298 * luma + 516 * u + 128) >> 8;
+                rgba.extend_from_slice(&[
+                    r.clamp(0, 255) as u8,
+                    g.clamp(0, 255) as u8,
+                    b.clamp(0, 255) as u8,
+                    255,
+                ]);
+            }
+        }
+        Ok(Self {
+            sequence,
+            width,
+            height,
+            rgba,
+        })
+    }
+}
 
 /// Failure to start the background runtime thread.
 #[derive(Debug, Error)]
@@ -36,7 +99,8 @@ pub enum RuntimeSendError {
 /// UI-side handle for the runtime owner thread.
 pub struct RuntimeHandle {
     commands: mpsc::Sender<UserCommand>,
-    snapshot: watch::Receiver<AppSnapshot>,
+    snapshot: watch::Receiver<Arc<AppSnapshot>>,
+    playback: watch::Receiver<Option<Arc<PlaybackFrame>>>,
     owner: Option<thread::JoinHandle<()>>,
 }
 
@@ -50,15 +114,17 @@ impl RuntimeHandle {
             .build()
             .map_err(RuntimeStartError::AsyncRuntime)?;
         let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
-        let (snapshot_tx, snapshot) = watch::channel(AppSnapshot::default());
+        let (snapshot_tx, snapshot) = watch::channel(Arc::new(AppSnapshot::default()));
+        let (playback_tx, playback) = watch::channel(None);
         let owner = thread::Builder::new()
             .name("moqcast-runtime".into())
-            .spawn(move || runtime.block_on(supervisor::run(command_rx, snapshot_tx)))
+            .spawn(move || runtime.block_on(supervisor::run(command_rx, snapshot_tx, playback_tx)))
             .map_err(RuntimeStartError::OwnerThread)?;
 
         Ok(Self {
             commands,
             snapshot,
+            playback,
             owner: Some(owner),
         })
     }
@@ -74,8 +140,13 @@ impl RuntimeHandle {
     }
 
     /// Clone the newest runtime snapshot without waiting.
-    pub fn snapshot(&self) -> AppSnapshot {
+    pub fn snapshot(&self) -> Arc<AppSnapshot> {
         self.snapshot.borrow().clone()
+    }
+
+    /// Clone the newest decoded remote frame without waiting.
+    pub(crate) fn playback_frame(&self) -> Option<Arc<PlaybackFrame>> {
+        self.playback.borrow().clone()
     }
 
     fn shutdown(&mut self) {
