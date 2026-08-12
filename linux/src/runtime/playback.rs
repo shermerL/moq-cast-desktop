@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use moq_mux::catalog::Stream;
+use moq_native::moq_net;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
