@@ -1,26 +1,24 @@
 //! Windows CLI spike for Luke-compatible MoQ LAN discovery.
 
 mod registry;
+mod session;
 
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use moq_native::mdns;
 use registry::{PeerRegistry, RegistryChange, sanitize_identity};
+use session::{SessionFoundation, SessionSubject, TransportUpdate};
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Args {
-    /// Port of the MoQ listener represented by this advertisement.
-    #[arg(long)]
-    port: u16,
-
-    /// SHA-256 certificate fingerprint advertised for TLS pinning.
-    #[arg(long)]
-    fingerprint: Option<String>,
+    /// Address for the direct MoQ/QUIC listener.
+    #[arg(long, default_value = "[::]:0")]
+    bind: SocketAddr,
 
     /// Canonical node URL advertised instead of address-derived candidates.
     #[arg(long)]
@@ -40,11 +38,11 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let args = Args::parse();
+    let bound = SessionFoundation::bind(args.bind).context("failed to bind MoQ listener")?;
+    let advertisement = bound.advertisement().clone();
     let authenticated_discovery = args.secret_file.is_some();
-    let mut config = mdns::Config::new(args.port);
-    if let Some(fingerprint) = args.fingerprint {
-        config = config.with_fingerprint(fingerprint);
-    }
+    let mut config = mdns::Config::new(advertisement.addr.port())
+        .with_fingerprint(advertisement.fingerprint.clone());
     if let Some(node) = args.node {
         config = config.with_node(node);
     }
@@ -61,30 +59,86 @@ async fn main() -> Result<()> {
         .await
         .context("failed to start LAN discovery")?;
     let mut registry = PeerRegistry::new(discovery.id(), authenticated_discovery);
-    tracing::info!(local_id = %sanitize_identity(discovery.id()), port = args.port, "LAN discovery started");
+    let mut sessions = bound
+        .start(discovery.credential().to_owned())
+        .await
+        .context("failed to start MoQ listener")?;
+    tracing::info!(
+        local_id = %sanitize_identity(discovery.id()),
+        bind = %sessions.advertisement().addr,
+        "LAN discovery and session listener started"
+    );
 
-    loop {
+    let result = loop {
         tokio::select! {
             result = tokio::signal::ctrl_c() => {
                 result.context("failed to listen for Ctrl+C")?;
-                tracing::info!("LAN discovery stopping");
-                return Ok(());
+                tracing::info!("LAN discovery and sessions stopping");
+                break Ok(());
             }
             event = discovery.recv() => {
                 let Some(event) = event else {
-                    anyhow::bail!("LAN discovery stopped unexpectedly");
+                    break Err(anyhow::anyhow!("LAN discovery stopped unexpectedly"));
                 };
-                let change = match event {
+                match event {
                     mdns::Event::Found(peer) => {
                         let should_dial = discovery.should_dial(&peer.id);
-                        registry.found(&peer, should_dial)
+                        let change = registry.found(&peer, should_dial);
+                        let should_connect = should_dial
+                            && matches!(change, RegistryChange::Added(_) | RegistryChange::Updated(_));
+                        log_change(change);
+                        if should_connect {
+                            match sessions.connect(&peer).await {
+                                Ok(update) => log_transport(update),
+                                Err(error) => tracing::warn!(
+                                    peer = %sanitize_identity(&peer.id),
+                                    stage = "transport",
+                                    %error,
+                                    "peer dial was not started"
+                                ),
+                            }
+                        }
                     }
-                    mdns::Event::Lost(id) => registry.lost(&id),
-                    _ => continue,
+                    mdns::Event::Lost(id) => {
+                        log_change(registry.lost(&id));
+                        if let Some(update) = sessions.disconnect(&id).await {
+                            log_transport(update);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            update = sessions.recv() => {
+                let Some(update) = update else {
+                    break Err(anyhow::anyhow!("MoQ session runtime stopped unexpectedly"));
                 };
-                log_change(change);
+                log_transport(update);
             }
         }
+    };
+
+    sessions.shutdown().await;
+    result
+}
+
+fn log_transport(update: TransportUpdate) {
+    match update.subject {
+        SessionSubject::Peer(peer) => tracing::info!(
+            peer = %sanitize_identity(&peer),
+            direction = ?update.state.direction(),
+            phase = ?update.state.phase(),
+            generation = update.state.generation(),
+            stage = "transport",
+            "peer transport state changed"
+        ),
+        SessionSubject::Inbound(id) => tracing::info!(
+            inbound_id = id,
+            direction = ?update.state.direction(),
+            phase = ?update.state.phase(),
+            generation = update.state.generation(),
+            stage = "transport",
+            "inbound transport state changed"
+        ),
     }
 }
 

@@ -11,7 +11,8 @@ publish = false
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 moq-native = { git = "https://github.com/moq-dev/moq", rev = "68cf64603f067f64bc02fe800464aa59710a258c", default-features = false, features = ["aws-lc-rs", "mdns", "quinn"] }
-tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "signal", "time"] }
+thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
