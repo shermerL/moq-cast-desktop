@@ -7,6 +7,8 @@ pub enum UserCommand {
     StartDiscovery,
     /// Stop looking for LAN peers.
     StopDiscovery,
+    /// Restart LAN discovery and its listener after a visible failure.
+    RetryDiscovery,
     /// Open the system picker and begin screen publishing.
     StartScreenShare,
     /// Stop the current screen publication while keeping the peer connected.

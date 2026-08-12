@@ -35,7 +35,7 @@ impl PeerRecord {
     }
 
     #[cfg(test)]
-    fn for_test(id: &str, addr: SocketAddr, credential: &str) -> Self {
+    pub(crate) fn for_test(id: &str, addr: SocketAddr, credential: &str) -> Self {
         Self {
             id: id.to_owned(),
             addrs: vec![addr],

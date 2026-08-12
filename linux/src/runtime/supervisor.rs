@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 
 #[cfg(target_os = "linux")]
 use crate::app::MediaState;
-use crate::app::{AppSnapshot, DiscoveredPeer, TransportState, UserCommand};
+use crate::app::{AppSnapshot, DialRole, DiscoveredPeer, TransportState, UserCommand};
 use crate::network::discovery::{PeerRecord, PeerRegistry, PeerUpdate};
 use crate::network::{peer, server, service};
 use crate::publish::session::Publication;
@@ -289,6 +289,15 @@ impl MeshResources {
             .count()
     }
 
+    fn close_inbound(&mut self) -> usize {
+        let count = self.connected_inbound_count();
+        for resources in self.inbound.values_mut() {
+            resources.close();
+        }
+        self.inbound.clear();
+        count
+    }
+
     fn close_all(&mut self) {
         for peer in self.outbound.values_mut().chain(self.inbound.values_mut()) {
             peer.close();
@@ -399,10 +408,12 @@ impl Supervisor {
         match command {
             UserCommand::StartDiscovery => self.start_discovery(),
             UserCommand::StopDiscovery => {
+                self.close_inbound("LAN services stopped by user");
                 self.discovery.stop();
                 self.state.stop_discovery();
                 LoopAction::Changed
             }
+            UserCommand::RetryDiscovery => self.restart_discovery(),
             UserCommand::StartScreenShare => self.start_publish(),
             UserCommand::StopScreenShare => self.stop_publish().await,
             UserCommand::StartWatching { path } => self.start_view(path),
@@ -417,9 +428,20 @@ impl Supervisor {
             return LoopAction::Changed;
         }
 
+        self.close_inbound("LAN services restarted by user");
         self.state.start_discovery();
         self.discovery.stop();
         self.launch_services();
+        LoopAction::Changed
+    }
+
+    fn restart_discovery(&mut self) -> LoopAction {
+        self.close_inbound("LAN services restarted after user retry");
+        self.discovery.stop();
+        self.state.stop_discovery();
+        self.state.start_discovery();
+        self.launch_services();
+        tracing::info!(stage = "discovery", "LAN discovery restarted by user");
         LoopAction::Changed
     }
 
@@ -585,7 +607,7 @@ impl Supervisor {
                 if !update.changed() {
                     return LoopAction::Unchanged;
                 }
-                self.project_peer(&peer_id);
+                self.project_peer(&peer_id, should_dial);
                 if should_dial {
                     let connected = self
                         .mesh
@@ -593,6 +615,8 @@ impl Supervisor {
                         .get(&peer_id)
                         .is_some_and(|resources| resources.session.is_some());
                     self.ensure_outbound(&peer_id, reset_outbound_for(update, connected));
+                } else {
+                    self.accept_inbound_role(&peer_id);
                 }
                 LoopAction::Changed
             }
@@ -966,6 +990,7 @@ impl Supervisor {
 
     fn recover_discovery(&mut self, error: impl Into<String>) -> LoopAction {
         let error = error.into();
+        self.close_inbound("LAN listener is restarting");
         let generation = self.discovery.cancel_current();
         self.state.stop_discovery();
         self.state.start_discovery();
@@ -1000,7 +1025,32 @@ impl Supervisor {
         LoopAction::Changed
     }
 
-    fn project_peer(&mut self, peer_id: &str) {
+    fn close_inbound(&mut self, reason: &'static str) {
+        let closed = self.mesh.close_inbound();
+        self.state.set_inbound_session_count(0);
+        if closed > 0 {
+            tracing::info!(
+                stage = "transport",
+                inbound_sessions = closed,
+                reason,
+                "closed unattributed inbound mesh sessions"
+            );
+        }
+    }
+
+    fn accept_inbound_role(&mut self, peer_id: &str) {
+        if let Some(mut resources) = self.mesh.outbound.remove(peer_id) {
+            resources.close();
+            self.state.set_transport(peer_id, TransportState::Waiting);
+            tracing::info!(
+                stage = "transport",
+                peer_id,
+                "closed outbound session after deterministic dial role changed"
+            );
+        }
+    }
+
+    fn project_peer(&mut self, peer_id: &str, should_dial: bool) {
         let peers = self
             .discovery
             .peers
@@ -1014,6 +1064,11 @@ impl Supervisor {
             name: peer.id.clone(),
             endpoints: peer.endpoint_labels(),
             fingerprint_pinned: peer.fingerprint.is_some(),
+            dial_role: if should_dial {
+                DialRole::Outbound
+            } else {
+                DialRole::Inbound
+            },
         });
     }
 }
@@ -1145,10 +1200,12 @@ async fn run_view(
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
     use tokio::sync::watch;
 
     use crate::app::{
-        DiscoveredPeer, DiscoveryState, PeerDiscoveryState, TransportState, UserCommand,
+        DialRole, DiscoveredPeer, DiscoveryState, PeerDiscoveryState, TransportState, UserCommand,
     };
     use crate::network::service;
 
@@ -1168,7 +1225,16 @@ mod tests {
             name: id.into(),
             endpoints: vec!["192.0.2.1:4443".into()],
             fingerprint_pinned: true,
+            dial_role: DialRole::Outbound,
         }
+    }
+
+    fn peer_record(id: &str) -> crate::network::discovery::PeerRecord {
+        crate::network::discovery::PeerRecord::for_test(
+            id,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 4443),
+            "proof",
+        )
     }
 
     #[test]
@@ -1343,5 +1409,113 @@ mod tests {
             supervisor.state.peers["peer-b"].transport,
             TransportState::Connected
         );
+    }
+
+    #[tokio::test]
+    async fn listener_recovery_clears_unattributed_inbound_sessions() {
+        let mut supervisor = supervisor();
+        supervisor.state.start_discovery();
+        supervisor.mesh.inbound.insert(1, Default::default());
+        supervisor.mesh.inbound.insert(2, Default::default());
+        supervisor.state.set_inbound_session_count(2);
+
+        supervisor.recover_discovery("listener stopped");
+
+        assert!(supervisor.mesh.inbound.is_empty());
+        assert_eq!(supervisor.state.inbound_session_count, 0);
+    }
+
+    #[tokio::test]
+    async fn one_outbound_close_schedules_only_its_retry() {
+        let mut supervisor = supervisor();
+        supervisor.state.start_discovery();
+        supervisor.state.upsert_peer(peer("peer-a"));
+        supervisor.state.upsert_peer(peer("peer-b"));
+        assert_eq!(
+            supervisor.state.peers["peer-a"].transport,
+            TransportState::Waiting
+        );
+        supervisor
+            .state
+            .set_transport("peer-a", TransportState::Connecting);
+        assert_eq!(
+            supervisor.state.peers["peer-a"].transport,
+            TransportState::Connecting
+        );
+        supervisor
+            .state
+            .set_transport("peer-a", TransportState::Connected);
+        supervisor
+            .state
+            .set_transport("peer-b", TransportState::Connected);
+        let mut registry = crate::network::discovery::PeerRegistry::new("local");
+        registry.found(peer_record("peer-a"));
+        registry.found(peer_record("peer-b"));
+        supervisor.discovery.peers = Some(registry);
+        supervisor
+            .mesh
+            .outbound
+            .entry("peer-a".into())
+            .or_default()
+            .generation = 7;
+        supervisor
+            .mesh
+            .outbound
+            .entry("peer-b".into())
+            .or_default()
+            .generation = 3;
+
+        supervisor.session_closed(SessionKey::Outbound("peer-a".into()), 7, None);
+
+        assert_eq!(
+            supervisor.state.peers["peer-a"].transport,
+            TransportState::Failed
+        );
+        assert_eq!(
+            supervisor.state.peers["peer-b"].transport,
+            TransportState::Connected
+        );
+        assert_eq!(supervisor.mesh.outbound["peer-a"].retry_budget.attempts, 1);
+        assert_eq!(supervisor.mesh.outbound["peer-b"].retry_budget.attempts, 0);
+        supervisor.mesh.close_all();
+    }
+
+    #[tokio::test]
+    async fn inbound_role_change_closes_only_the_old_outbound_resource() {
+        let mut supervisor = supervisor();
+        supervisor.state.upsert_peer(peer("peer-a"));
+        supervisor.state.upsert_peer(peer("peer-b"));
+        supervisor
+            .state
+            .set_transport("peer-a", TransportState::Connected);
+        supervisor
+            .state
+            .set_transport("peer-b", TransportState::Connected);
+        supervisor
+            .mesh
+            .outbound
+            .entry("peer-a".into())
+            .or_default()
+            .generation = 4;
+        supervisor
+            .mesh
+            .outbound
+            .entry("peer-b".into())
+            .or_default()
+            .generation = 8;
+
+        supervisor.accept_inbound_role("peer-a");
+
+        assert!(!supervisor.mesh.outbound.contains_key("peer-a"));
+        assert!(supervisor.mesh.outbound.contains_key("peer-b"));
+        assert_eq!(
+            supervisor.state.peers["peer-a"].transport,
+            TransportState::Waiting
+        );
+        assert_eq!(
+            supervisor.state.peers["peer-b"].transport,
+            TransportState::Connected
+        );
+        supervisor.mesh.close_all();
     }
 }

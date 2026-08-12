@@ -53,6 +53,15 @@ pub enum TransportState {
     Failed,
 }
 
+/// Deterministic connection direction for one discovered peer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DialRole {
+    /// This desktop owns the exact outbound session and can report its state.
+    Outbound,
+    /// The remote peer is expected to dial; any inbound session remains unattributed.
+    Inbound,
+}
+
 /// Availability of a peer's screen broadcast.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum ScreenAvailability {
@@ -96,6 +105,8 @@ pub struct DiscoveredPeer {
     pub endpoints: Vec<String>,
     /// Whether outbound TLS will pin an advertised certificate fingerprint.
     pub fingerprint_pinned: bool,
+    /// Deterministic dial direction derived from the active mDNS discovery.
+    pub dial_role: DialRole,
 }
 
 /// Combined discovery, transport, and screen state for one known peer.
@@ -107,6 +118,8 @@ pub struct PeerSnapshot {
     pub endpoints: Vec<String>,
     /// Whether outbound TLS will pin an advertised certificate fingerprint.
     pub fingerprint_pinned: bool,
+    /// Which side owns dialing for this peer id pair.
+    pub dial_role: DialRole,
     /// Current mDNS availability.
     pub discovery: PeerDiscoveryState,
     /// Exact outbound transport state, when this side owns dialing.
@@ -207,6 +220,7 @@ impl AppSnapshot {
                 current.name.clone_from(&peer.name);
                 current.endpoints.clone_from(&peer.endpoints);
                 current.fingerprint_pinned = peer.fingerprint_pinned;
+                current.dial_role.clone_from(&peer.dial_role);
                 current.discovery = PeerDiscoveryState::Found;
                 current.screen.clone_from(&screen);
             })
@@ -214,6 +228,7 @@ impl AppSnapshot {
                 name: peer.name,
                 endpoints: peer.endpoints,
                 fingerprint_pinned: peer.fingerprint_pinned,
+                dial_role: peer.dial_role,
                 discovery: PeerDiscoveryState::Found,
                 transport: TransportState::Waiting,
                 screen,
@@ -290,10 +305,9 @@ impl AppSnapshot {
     /// Whether any exact outbound or aggregate inbound mesh session exists.
     pub fn has_mesh_session(&self) -> bool {
         self.inbound_session_count > 0
-            || self
-                .peers
-                .values()
-                .any(|peer| peer.transport == TransportState::Connected)
+            || self.peers.values().any(|peer| {
+                peer.dial_role == DialRole::Outbound && peer.transport == TransportState::Connected
+            })
     }
 
     /// Begin preparing a local screen publication.

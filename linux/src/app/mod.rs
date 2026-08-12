@@ -8,8 +8,8 @@ mod snapshot;
 pub use command::UserCommand;
 pub use locale::Locale;
 pub use snapshot::{
-    AppSnapshot, DiscoveredPeer, DiscoveryState, MediaState, PeerDiscoveryState, PeerSnapshot,
-    RemoteScreenSnapshot, ScreenAvailability, StateError, TransportState,
+    AppSnapshot, DialRole, DiscoveredPeer, DiscoveryState, MediaState, PeerDiscoveryState,
+    PeerSnapshot, RemoteScreenSnapshot, ScreenAvailability, StateError, TransportState,
 };
 
 use eframe::egui::{self, Color32, CornerRadius, Frame, Margin, RichText, Stroke};

@@ -2,7 +2,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use moq_cast_desktop::app::{
-    AppSnapshot, DiscoveredPeer, DiscoveryState, MediaState, PeerDiscoveryState,
+    AppSnapshot, DialRole, DiscoveredPeer, DiscoveryState, MediaState, PeerDiscoveryState,
     ScreenAvailability, StateError, TransportState, UserCommand,
 };
 use moq_cast_desktop::runtime::RuntimeHandle;
@@ -13,6 +13,7 @@ fn peer(id: &str) -> DiscoveredPeer {
         name: id.into(),
         endpoints: vec!["192.0.2.10:4443".into()],
         fingerprint_pinned: true,
+        dial_role: DialRole::Outbound,
     }
 }
 
@@ -119,6 +120,24 @@ fn discovery_lost_does_not_overwrite_transport_state() {
     assert_eq!(
         snapshot.peers["android-living-room"].discovery,
         PeerDiscoveryState::Lost
+    );
+    assert_eq!(
+        snapshot.peers["android-living-room"].transport,
+        TransportState::Connected
+    );
+}
+
+#[test]
+fn same_identity_reappearing_preserves_a_healthy_transport() {
+    let mut snapshot = connected_snapshot();
+    snapshot.start_discovery();
+    snapshot.mark_peer_lost("android-living-room");
+
+    snapshot.upsert_peer(peer("android-living-room"));
+
+    assert_eq!(
+        snapshot.peers["android-living-room"].discovery,
+        PeerDiscoveryState::Found
     );
     assert_eq!(
         snapshot.peers["android-living-room"].transport,
@@ -247,4 +266,20 @@ fn inbound_count_can_keep_media_available_without_claiming_peer_identity() {
     assert!(snapshot.has_mesh_session());
     assert!(snapshot.peers.is_empty());
     snapshot.begin_publish().unwrap();
+}
+
+#[test]
+fn inbound_role_never_fakes_a_connected_device_row() {
+    let mut snapshot = AppSnapshot::default();
+    let mut inbound_peer = peer("android-inbound");
+    inbound_peer.dial_role = DialRole::Inbound;
+    snapshot.upsert_peer(inbound_peer);
+    snapshot.set_inbound_session_count(1);
+
+    assert_eq!(
+        snapshot.peers["android-inbound"].transport,
+        TransportState::Waiting
+    );
+    assert_eq!(snapshot.inbound_session_count, 1);
+    assert!(snapshot.has_mesh_session());
 }
