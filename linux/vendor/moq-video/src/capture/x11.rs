@@ -338,17 +338,17 @@ impl SharedMemory {
 				0,
 			)
 		};
-		let Some(ptr) = NonNull::new(ptr.cast()) else {
-			let _ = conn.shm_detach(segment);
-			return Err(codec("mmap returned a null XShm buffer"));
-		};
-		if ptr.as_ptr().cast::<libc::c_void>() == libc::MAP_FAILED {
+		if ptr == libc::MAP_FAILED {
 			let _ = conn.shm_detach(segment);
 			return Err(codec(format!(
 				"could not mmap XShm buffer: {}",
 				std::io::Error::last_os_error()
 			)));
 		}
+		let Some(ptr) = NonNull::new(ptr.cast::<u8>()) else {
+			let _ = conn.shm_detach(segment);
+			return Err(codec("mmap returned a null XShm buffer"));
+		};
 		Ok(Self {
 			segment,
 			ptr,
