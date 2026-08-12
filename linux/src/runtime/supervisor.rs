@@ -9,6 +9,9 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 #[cfg(target_os = "linux")]
+use tokio::sync::oneshot;
+
+#[cfg(target_os = "linux")]
 use crate::app::MediaState;
 use crate::app::{AppSnapshot, DialRole, DiscoveredPeer, TransportState, UserCommand};
 use crate::network::discovery::{PeerRecord, PeerRegistry, PeerUpdate};
@@ -311,28 +314,6 @@ impl MeshResources {
 struct TaskResources {
     task: Option<JoinHandle<()>>,
     generation: u64,
-}
-
-#[cfg(any(target_os = "linux", test))]
-#[derive(Default)]
-struct ViewStartGate {
-    started: bool,
-}
-
-#[cfg(any(target_os = "linux", test))]
-impl ViewStartGate {
-    fn frame_ready(&mut self) -> bool {
-        if self.started {
-            return false;
-        }
-        self.started = true;
-        true
-    }
-
-    fn ensure_started(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(self.started, "remote screen ended before its first frame");
-        Ok(())
-    }
 }
 
 impl TaskResources {
@@ -1154,57 +1135,25 @@ async fn run_view(
     events: mpsc::Sender<OperationEvent>,
     frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
 ) {
-    use moq_mux::catalog::Stream;
-
-    let result = async {
-        let mut catalog = moq_mux::catalog::Consumer::<()>::new(
-            &broadcast,
-            moq_mux::catalog::CatalogFormat::Hang,
-        )
-        .await?;
-        let snapshot = catalog
-            .next()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("remote screen catalog ended"))?;
-        let (name, config) = snapshot
-            .video
-            .renditions
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("remote screen has no video rendition"))?;
-        anyhow::ensure!(
-            config.broadcast.is_none(),
-            "external rendition broadcasts are not supported yet"
-        );
-        let mut decoder = moq_video::decode::Consumer::new(
-            &broadcast,
-            &config,
-            name,
-            moq_video::decode::Config::new(),
-        )
-        .await?;
-        let mut sequence = 0_u64;
-        let mut start_gate = ViewStartGate::default();
-        while let Some(frame) = decoder.read().await? {
-            sequence = sequence.wrapping_add(1);
-            let frame = tokio::task::spawn_blocking(move || {
-                PlaybackFrame::from_video(frame, generation, sequence)
-            })
-            .await??;
-            frames.send_replace(Some(Arc::new(frame)));
-            if start_gate.frame_ready() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (started_ack_tx, started_ack_rx) = oneshot::channel();
+    let playback = super::playback::run(generation, broadcast, started_tx, started_ack_rx, frames);
+    tokio::pin!(playback);
+    let result = tokio::select! {
+        result = &mut playback => result,
+        started = started_rx => {
+            if started.is_ok() {
                 let _ = events
                     .send(OperationEvent::ViewStarted {
                         generation,
-                        path: path.clone(),
+                        path,
                     })
                     .await;
             }
+            let _ = started_ack_tx.send(());
+            playback.await
         }
-        start_gate.ensure_started()?;
-        Ok::<(), anyhow::Error>(())
     }
-    .await
     .map_err(|error| error.to_string());
 
     let _ = events
@@ -1241,7 +1190,7 @@ mod tests {
 
     use super::{
         DISCOVERY_RETRY_LIMIT, DiscoveryRetryBudget, PEER_RETRY_LIMIT, PeerRetryBudget, SessionKey,
-        Supervisor, ViewStartGate, reset_outbound_for,
+        Supervisor, reset_outbound_for,
     };
 
     fn supervisor() -> Supervisor {
@@ -1265,16 +1214,6 @@ mod tests {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 4443),
             "proof",
         )
-    }
-
-    #[test]
-    fn viewing_starts_only_after_the_first_renderable_frame() {
-        let mut gate = ViewStartGate::default();
-
-        assert!(gate.ensure_started().is_err());
-        assert!(gate.frame_ready());
-        assert!(!gate.frame_ready());
-        assert!(gate.ensure_started().is_ok());
     }
 
     #[test]
