@@ -313,6 +313,28 @@ struct TaskResources {
     generation: u64,
 }
 
+#[cfg(any(target_os = "linux", test))]
+#[derive(Default)]
+struct ViewStartGate {
+    started: bool,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl ViewStartGate {
+    fn frame_ready(&mut self) -> bool {
+        if self.started {
+            return false;
+        }
+        self.started = true;
+        true
+    }
+
+    fn ensure_started(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.started, "remote screen ended before its first frame");
+        Ok(())
+    }
+}
+
 impl TaskResources {
     fn advance(&mut self) -> u64 {
         self.generation = self.generation.wrapping_add(1);
@@ -1161,17 +1183,25 @@ async fn run_view(
             moq_video::decode::Config::new(),
         )
         .await?;
-        let _ = events
-            .send(OperationEvent::ViewStarted { generation, path })
-            .await;
         let mut sequence = 0_u64;
+        let mut start_gate = ViewStartGate::default();
         while let Some(frame) = decoder.read().await? {
             sequence = sequence.wrapping_add(1);
-            let frame =
-                tokio::task::spawn_blocking(move || PlaybackFrame::from_video(frame, sequence))
-                    .await??;
+            let frame = tokio::task::spawn_blocking(move || {
+                PlaybackFrame::from_video(frame, generation, sequence)
+            })
+            .await??;
             frames.send_replace(Some(Arc::new(frame)));
+            if start_gate.frame_ready() {
+                let _ = events
+                    .send(OperationEvent::ViewStarted {
+                        generation,
+                        path: path.clone(),
+                    })
+                    .await;
+            }
         }
+        start_gate.ensure_started()?;
         Ok::<(), anyhow::Error>(())
     }
     .await
@@ -1211,7 +1241,7 @@ mod tests {
 
     use super::{
         DISCOVERY_RETRY_LIMIT, DiscoveryRetryBudget, PEER_RETRY_LIMIT, PeerRetryBudget, SessionKey,
-        Supervisor, reset_outbound_for,
+        Supervisor, ViewStartGate, reset_outbound_for,
     };
 
     fn supervisor() -> Supervisor {
@@ -1235,6 +1265,16 @@ mod tests {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 4443),
             "proof",
         )
+    }
+
+    #[test]
+    fn viewing_starts_only_after_the_first_renderable_frame() {
+        let mut gate = ViewStartGate::default();
+
+        assert!(gate.ensure_started().is_err());
+        assert!(gate.frame_ready());
+        assert!(!gate.frame_ready());
+        assert!(gate.ensure_started().is_ok());
     }
 
     #[test]

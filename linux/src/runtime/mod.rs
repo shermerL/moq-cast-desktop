@@ -15,15 +15,22 @@ const COMMAND_CAPACITY: usize = 32;
 /// The latest decoded remote screen frame in tightly packed RGBA.
 #[derive(Clone)]
 pub(crate) struct PlaybackFrame {
-    pub(crate) sequence: u64,
+    pub(crate) identity: PlaybackFrameIdentity,
     pub(crate) width: usize,
     pub(crate) height: usize,
     pub(crate) rgba: Vec<u8>,
 }
 
+/// Identifies a decoded frame across playback sessions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PlaybackFrameIdentity {
+    pub(crate) generation: u64,
+    pub(crate) sequence: u64,
+}
+
 impl PlaybackFrame {
     #[cfg(target_os = "linux")]
-    fn from_video(frame: moq_video::Frame, sequence: u64) -> anyhow::Result<Self> {
+    fn from_video(frame: moq_video::Frame, generation: u64, sequence: u64) -> anyhow::Result<Self> {
         let width = frame.surface.width() as usize;
         let height = frame.surface.height() as usize;
         anyhow::ensure!(
@@ -66,7 +73,10 @@ impl PlaybackFrame {
             }
         }
         Ok(Self {
-            sequence,
+            identity: PlaybackFrameIdentity {
+                generation,
+                sequence,
+            },
             width,
             height,
             rgba,
@@ -162,5 +172,24 @@ impl RuntimeHandle {
 impl Drop for RuntimeHandle {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn equal_sequences_from_different_view_generations_are_different_frames() {
+        let previous = PlaybackFrameIdentity {
+            generation: 1,
+            sequence: 1,
+        };
+        let next = PlaybackFrameIdentity {
+            generation: 2,
+            sequence: 1,
+        };
+
+        assert_ne!(previous, next);
     }
 }

@@ -17,7 +17,7 @@ pub use snapshot::{
 
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Stroke};
 
-use crate::runtime::{RuntimeHandle, RuntimeStartError};
+use crate::runtime::{PlaybackFrameIdentity, RuntimeHandle, RuntimeStartError};
 
 const STORAGE_LOCALE: &str = "moqcast.locale";
 const CONTENT_MAX_WIDTH: f32 = 1040.0;
@@ -103,7 +103,7 @@ pub struct MoqCastApp {
     runtime: RuntimeHandle,
     command_error: Option<String>,
     playback_texture: Option<egui::TextureHandle>,
-    playback_sequence: u64,
+    playback_identity: Option<PlaybackFrameIdentity>,
     player: player::LivePlayer,
 }
 
@@ -125,7 +125,7 @@ impl MoqCastApp {
             runtime: RuntimeHandle::start()?,
             command_error: None,
             playback_texture: None,
-            playback_sequence: 0,
+            playback_identity: None,
             player: player::LivePlayer::default(),
         })
     }
@@ -249,7 +249,7 @@ impl eframe::App for MoqCastApp {
         let context = ui.ctx().clone();
         let snapshot = self.runtime.snapshot();
         if let Some(frame) = self.runtime.playback_frame()
-            && frame.sequence != self.playback_sequence
+            && Some(frame.identity) != self.playback_identity
         {
             let image =
                 egui::ColorImage::from_rgba_unmultiplied([frame.width, frame.height], &frame.rgba);
@@ -262,13 +262,14 @@ impl eframe::App for MoqCastApp {
                     egui::TextureOptions::LINEAR,
                 ));
             }
-            self.playback_sequence = frame.sequence;
+            self.playback_identity = Some(frame.identity);
         }
         if !matches!(
             snapshot.media,
             MediaState::Viewing { .. } | MediaState::PreparingView { .. }
         ) {
             self.playback_texture = None;
+            self.playback_identity = None;
         }
 
         let viewing = matches!(snapshot.media, MediaState::Viewing { .. });
