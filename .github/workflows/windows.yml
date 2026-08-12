@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 defaults:
   run:
     working-directory: windows
@@ -22,23 +26,35 @@ defaults:
 jobs:
   verify:
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.95.0
           components: clippy,rustfmt
+      - name: Cache Rust dependencies and build outputs
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            windows/target
+          key: windows-cargo-${{ runner.os }}-rust1.95.0-${{ hashFiles('windows/Cargo.lock') }}
+          restore-keys: |
+            windows-cargo-${{ runner.os }}-rust1.95.0-
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Run tests
-        run: cargo test --all-targets
+        run: cargo test --locked --all-targets
       - name: Run Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build release desktop app
-        run: cargo build --release
+        run: cargo build --locked --release
       - name: Upload Windows desktop app
         uses: actions/upload-artifact@v4
         with:
           name: moqcast-windows-${{ github.sha }}
           path: windows/target/release/moqcast-windows.exe
           if-no-files-found: error
+          retention-days: 14
