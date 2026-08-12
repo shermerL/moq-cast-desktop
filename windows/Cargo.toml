@@ -1,17 +1,18 @@
 [package]
-name = "moqcast-windows-discovery"
-description = "Windows discovery foundation for MoQCast"
+name = "moqcast-windows"
+description = "Native Windows desktop application for MoQCast"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wgpu"] }
 moq-native = { git = "https://github.com/moq-dev/moq", rev = "68cf64603f067f64bc02fe800464aa59710a258c", default-features = false, features = ["aws-lc-rs", "mdns", "quinn"] }
-tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

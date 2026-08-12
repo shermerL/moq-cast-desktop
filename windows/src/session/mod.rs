@@ -12,7 +12,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 
 pub(crate) use peer::DialError;
 pub(crate) use server::{Advertisement, BoundServer, StartError};
-pub(crate) use state::{TransportPhase, TransportState};
+pub(crate) use state::{TransportDirection, TransportPhase, TransportState};
 
 use state::PeerStates;
 

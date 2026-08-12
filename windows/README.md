@@ -2,15 +2,15 @@
 
 本目录是 `moq-cast-desktop` 单一桌面仓库的 Windows 平台实现，与同级 `linux/` 保持平台代码隔离。Windows 产品包含完整 MoQCast Windows 桌面端，以及只向本机浏览器提供设备发现结果的 Browser LAN Bridge；本目录不包含 Linux 或 Android 平台代码。
 
-W1 discovery CLI 已完成。W2 增加私有 session foundation：进程拥有真实 MoQ/QUIC listener，发现记录使用 listener 的实际端口和证书 fingerprint，并按 upstream `should_dial` 建立 fingerprint-pinned session。typed transport state、per-peer generation、Disconnect 和 shutdown 由 session foundation 管理；当前仍不传输媒体。
+W1 discovery registry 与 W2 私有 session foundation 已完成。D1 在其上提供 Rust + eframe/egui + wgpu 原生窗口：Nearby 显示实际发现与 typed transport state，并提供受状态门控的 Connect/Disconnect；Screen share 明确显示当前 build 不可用；Settings 提供语言和只读运行信息。当前仍不采集或传输媒体。
 
-## W2 session foundation
+## 启动桌面端
 
 ```powershell
 cargo run -- --bind "[::]:0"
 ```
 
-listener 默认绑定 `[::]:0`，启动后把实际端口和自动生成证书的 SHA-256 fingerprint 交给 mDNS。发现、连接与媒体仍是分开的层；看到 peer 不等于 TLS、credential 或 MoQ session 已成功。
+listener 默认绑定 `[::]:0`，后台 runtime owner 启动后把实际端口和自动生成证书的 SHA-256 fingerprint 交给 mDNS。发现、连接与媒体仍是分开的 typed state；看到 peer 不等于 TLS、credential 或 MoQ session 已成功。
 
 若局域网成员使用共享 secret，只接受 secret 文件，避免把 secret 直接放进进程参数：
 
@@ -18,7 +18,7 @@ listener 默认绑定 `[::]:0`，启动后把实际端口和自动生成证书�
 cargo run -- --bind "[::]:0" --secret-file C:\path\to\lan-secret.txt
 ```
 
-文件内容必须是 32 字节 secret 的 64 位十六进制编码。CLI 日志不会输出 secret、peer credential 或完整 TLS fingerprint。
+文件内容必须是 32 字节 secret 的 64 位十六进制编码。应用日志和 UI snapshot 不会输出 secret、peer credential 或完整 TLS fingerprint。
 
 即使 `RUST_LOG` 请求 debug/trace，应用也会把 `moq_native` 与 `mdns_sd` 限制到 warn，防止底层 DNS-SD 调试日志打印 TXT fingerprint、nonce 或 credential 派生材料。
 
