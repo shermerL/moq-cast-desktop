@@ -3,7 +3,7 @@
 use std::ptr::NonNull;
 use std::time::{Duration, Instant};
 
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::randr::{self, ConnectionExt as _};
 use x11rb::protocol::shm::{self, ConnectionExt as _};
 use x11rb::protocol::xfixes::ConnectionExt as _;
@@ -107,11 +107,13 @@ impl Capture {
 				format.bits_per_pixel
 			)));
 		}
+		let bits_per_pixel = format.bits_per_pixel;
+		let scanline_pad = format.scanline_pad;
 
 		let targets = query_targets(&conn, root, root_width, root_height)?;
 		let target = select_target(targets, selector)?;
-		let row_bits = u32::from(target.width) * u32::from(format.bits_per_pixel);
-		let pad = u32::from(format.scanline_pad);
+		let row_bits = u32::from(target.width) * u32::from(bits_per_pixel);
+		let pad = u32::from(scanline_pad);
 		let stride = row_bits.div_ceil(pad) * pad / 8;
 		let size = stride
 			.checked_mul(u32::from(target.height))
@@ -132,7 +134,7 @@ impl Capture {
 			root,
 			target,
 			stride,
-			bits_per_pixel: format.bits_per_pixel,
+			bits_per_pixel,
 			byte_order,
 			shm,
 			framerate,
