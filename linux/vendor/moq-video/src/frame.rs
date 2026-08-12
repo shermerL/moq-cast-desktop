@@ -402,7 +402,7 @@ impl I420 {
 	/// surface maps directly. Used by the screen-capture paths: Windows Desktop
 	/// Duplication (BGRA staging texture) and Linux PipeWire (BGRx/BGRA
 	/// shared-memory buffers).
-	#[cfg(any(target_os = "windows", all(target_os = "linux", feature = "pipewire")))]
+	#[cfg(any(target_os = "windows", target_os = "linux"))]
 	pub(crate) fn from_bgra(bgra: &[u8], stride: u32, width: u32, height: u32) -> Result<Self, Error> {
 		use yuv::bgra_to_yuv420;
 

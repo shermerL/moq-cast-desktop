@@ -2,8 +2,9 @@
 //! per-source:
 //! - macOS camera -> AVFoundation, screen -> ScreenCaptureKit, both yielding
 //!   zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
-//! - Linux camera -> native V4L2 (YUYV / MJPEG -> CPU I420), screen ->
-//!   xdg-desktop-portal + PipeWire (RGB -> CPU I420, `pipewire` feature).
+//! - Linux camera -> native V4L2 (YUYV / MJPEG -> CPU I420), Wayland screen ->
+//!   xdg-desktop-portal + PipeWire, X11 screen -> XRandR + XShm (RGB -> CPU
+//!   I420).
 //! - Windows camera -> native Media Foundation (`IMFSourceReader`), screen ->
 //!   DXGI Desktop Duplication (BGRA -> CPU I420).
 //!
@@ -44,6 +45,10 @@ mod v4l2;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pipewire;
 
+// Native XRandR + XShm screen capture on Linux X11 sessions.
+#[cfg(target_os = "linux")]
+mod x11;
+
 // Native Media Foundation camera capture on Windows.
 #[cfg(target_os = "windows")]
 mod mediafoundation;
@@ -74,8 +79,9 @@ pub enum Source {
 
 	/// A whole display. `None` opens the main display.
 	///
-	/// The id is a bare display index. macOS and Windows honor it; on Linux the
-	/// xdg-desktop-portal picker owns selection and the id is ignored.
+	/// The id is a bare display index on macOS and Windows. On Linux X11 it is an
+	/// XRandR output id; on Wayland the portal picker owns selection and ignores
+	/// it.
 	Display(Option<String>),
 
 	/// A single window, by the id [`windows`] reports. macOS only.
@@ -323,15 +329,23 @@ pub(crate) async fn open(config: &Config) -> Result<FrameStream, Error> {
 			{
 				desktopduplication::open(config, device.as_deref()).await
 			}
-			#[cfg(all(target_os = "linux", feature = "pipewire"))]
+			#[cfg(target_os = "linux")]
 			{
-				pipewire::open(config, device.as_deref()).await
-			}
-			#[cfg(all(target_os = "linux", not(feature = "pipewire")))]
-			{
-				Err(Error::Unsupported(
-					"screen capture on Linux without the `pipewire` feature".to_string(),
-				))
+				match linux_display_backend_from_env() {
+					LinuxDisplayBackend::X11 => x11::open(config, device.as_deref()).await,
+					LinuxDisplayBackend::Portal => {
+						#[cfg(feature = "pipewire")]
+						{
+							pipewire::open(config, device.as_deref()).await
+						}
+						#[cfg(not(feature = "pipewire"))]
+						{
+							Err(Error::Unsupported(
+								"Wayland screen capture without the `pipewire` feature".to_string(),
+							))
+						}
+					}
+				}
 			}
 			#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 			{
@@ -385,8 +399,8 @@ pub async fn cameras() -> Result<Vec<Camera>, Error> {
 
 /// List the available displays and the identifiers [`Source::Display`] accepts.
 ///
-/// On Linux the xdg-desktop-portal picker owns display selection, so there is no
-/// list or stable identifier to expose.
+/// Linux X11 sessions expose XRandR outputs. On Wayland the portal picker owns
+/// display selection, so there is no list or stable identifier to expose.
 pub async fn displays() -> Result<Vec<Display>, Error> {
 	#[cfg(target_os = "macos")]
 	{
@@ -396,9 +410,50 @@ pub async fn displays() -> Result<Vec<Display>, Error> {
 	{
 		blocking(desktopduplication::displays).await
 	}
-	#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+	#[cfg(target_os = "linux")]
+	{
+		match linux_display_backend_from_env() {
+			LinuxDisplayBackend::X11 => blocking(x11::displays).await,
+			LinuxDisplayBackend::Portal => Err(Error::Unsupported(
+				"listing displays while the Wayland portal owns selection".to_string(),
+			)),
+		}
+	}
+	#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 	{
 		Err(Error::Unsupported("listing displays".to_string()))
+	}
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinuxDisplayBackend {
+	Portal,
+	X11,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_display_backend_from_env() -> LinuxDisplayBackend {
+	let session_type = std::env::var("XDG_SESSION_TYPE").ok();
+	linux_display_backend(
+		session_type.as_deref(),
+		std::env::var_os("WAYLAND_DISPLAY").is_some(),
+		std::env::var_os("DISPLAY").is_some(),
+	)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_display_backend(
+	session_type: Option<&str>,
+	has_wayland_display: bool,
+	has_x11_display: bool,
+) -> LinuxDisplayBackend {
+	match session_type.map(str::to_ascii_lowercase).as_deref() {
+		Some("x11") => LinuxDisplayBackend::X11,
+		Some("wayland") => LinuxDisplayBackend::Portal,
+		_ if has_wayland_display => LinuxDisplayBackend::Portal,
+		_ if has_x11_display => LinuxDisplayBackend::X11,
+		_ => LinuxDisplayBackend::Portal,
 	}
 }
 
@@ -436,4 +491,28 @@ where
 	tokio::task::spawn_blocking(f)
 		.await
 		.map_err(|err| Error::Codec(anyhow::anyhow!("capture enumeration thread failed: {err}")))?
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+	use super::{LinuxDisplayBackend, linux_display_backend};
+
+	#[test]
+	fn x11_session_uses_native_capture() {
+		assert_eq!(linux_display_backend(Some("x11"), true, true), LinuxDisplayBackend::X11);
+	}
+
+	#[test]
+	fn wayland_session_uses_portal_capture() {
+		assert_eq!(
+			linux_display_backend(Some("wayland"), true, true),
+			LinuxDisplayBackend::Portal
+		);
+	}
+
+	#[test]
+	fn display_environment_is_the_fallback_when_session_type_is_missing() {
+		assert_eq!(linux_display_backend(None, false, true), LinuxDisplayBackend::X11);
+		assert_eq!(linux_display_backend(None, true, true), LinuxDisplayBackend::Portal);
+	}
 }

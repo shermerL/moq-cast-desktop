@@ -15,8 +15,8 @@
 //!
 //! - [`capture`] describes a frame source ([`capture::Config`]) and grabs
 //!   frames per platform: AVFoundation/ScreenCaptureKit on macOS, native V4L2
-//!   on Linux, native Media Foundation (camera) and DXGI Desktop Duplication
-//!   (screen) on Windows. [`capture::Source`] picks a camera, a display, or
+//!   and PipeWire/X11 on Linux, native Media Foundation (camera) and DXGI
+//!   Desktop Duplication (screen) on Windows. [`capture::Source`] picks a camera, a display, or
 //!   (macOS only) a single window or every window of an application;
 //!   [`capture::cameras`], [`capture::displays`], [`capture::windows`], and
 //!   [`capture::apps`] list what's available and hand back the ids it takes.

@@ -116,6 +116,10 @@ moq-vaapi = { version = "0.0.3", optional = true }
 # PipeWire video stream for the portal's node, behind the `pipewire` feature.
 # Links libpipewire-0.3 via pkg-config at build time; bindgen needs libclang.
 pipewire = { version = "0.10", optional = true }
+# Native X11 display capture. XRandR resolves monitor geometry, MIT-SHM avoids
+# copying pixels through the X11 socket, and XFixes supplies the cursor image.
+libc = "0.2"
+x11rb = { version = "0.13.2", features = ["randr", "shm", "xfixes"] }
 # Native V4L2 webcam capture (replaces nokhwa). `v4l` streams MMAP buffers;
 # MJPEG cameras are decoded with the pure-Rust `zune-jpeg` (no libjpeg/IJG).
 v4l = "0.14"

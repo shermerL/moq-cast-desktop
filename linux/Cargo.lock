@@ -3288,6 +3288,7 @@ dependencies = [
  "dispatch2",
  "fast_image_resize",
  "hang",
+ "libc",
  "libloading 0.9.0",
  "moq-mux",
  "moq-net",
@@ -3309,6 +3310,7 @@ dependencies = [
  "tracing",
  "v4l",
  "windows",
+ "x11rb",
  "yuv",
  "zune-jpeg",
 ]
