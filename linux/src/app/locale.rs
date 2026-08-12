@@ -280,17 +280,31 @@ impl Locale {
         }
     }
 
-    pub(super) fn viewing_screen(self) -> &'static str {
-        match self {
-            Self::Chinese => "正在观看远端屏幕",
-            Self::English => "Viewing remote screen",
-        }
-    }
-
     pub(super) fn stop_watching(self) -> &'static str {
         match self {
             Self::Chinese => "停止观看",
             Self::English => "Stop watching",
+        }
+    }
+
+    pub(super) fn enter_fullscreen(self) -> &'static str {
+        match self {
+            Self::Chinese => "进入全屏",
+            Self::English => "Fullscreen",
+        }
+    }
+
+    pub(super) fn exit_fullscreen(self) -> &'static str {
+        match self {
+            Self::Chinese => "退出全屏",
+            Self::English => "Exit fullscreen",
+        }
+    }
+
+    pub(super) fn waiting_for_first_frame(self) -> &'static str {
+        match self {
+            Self::Chinese => "等待首帧",
+            Self::English => "Waiting for first frame",
         }
     }
 

@@ -11,7 +11,6 @@ pub(super) const BRAND_DARK: Color32 = Color32::from_rgb(7, 91, 80);
 pub(super) const BRAND_SOFT: Color32 = Color32::from_rgb(220, 239, 233);
 pub(super) const TEXT: Color32 = Color32::from_rgb(22, 32, 29);
 pub(super) const MUTED: Color32 = Color32::from_rgb(100, 113, 109);
-pub(super) const PLAYER: Color32 = Color32::from_rgb(16, 22, 20);
 pub(super) const ERROR: Color32 = Color32::from_rgb(186, 26, 26);
 pub(super) const ERROR_SOFT: Color32 = Color32::from_rgb(253, 236, 235);
 pub(super) const RADIUS: CornerRadius = CornerRadius::same(8);

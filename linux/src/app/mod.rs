@@ -4,6 +4,7 @@ mod command;
 mod components;
 mod locale;
 mod pages;
+mod player;
 mod snapshot;
 mod theme;
 
@@ -40,6 +41,7 @@ pub struct MoqCastApp {
     command_error: Option<String>,
     playback_texture: Option<egui::TextureHandle>,
     playback_sequence: u64,
+    player: player::LivePlayer,
 }
 
 impl MoqCastApp {
@@ -60,6 +62,7 @@ impl MoqCastApp {
             command_error: None,
             playback_texture: None,
             playback_sequence: 0,
+            player: player::LivePlayer::default(),
         })
     }
 
@@ -157,6 +160,29 @@ impl eframe::App for MoqCastApp {
         ) {
             self.playback_texture = None;
         }
+
+        let viewing = matches!(snapshot.media, MediaState::Viewing { .. });
+        let fullscreen = self.player.reconcile_fullscreen(&context, viewing);
+        if fullscreen {
+            egui::CentralPanel::default()
+                .frame(Frame::new().fill(Color32::BLACK))
+                .show(ui, |ui| {
+                    if matches!(
+                        snapshot.media,
+                        MediaState::Viewing { .. } | MediaState::StoppingView { .. }
+                    ) && let Some(command) = pages::screen_share::show(
+                        ui,
+                        self.locale,
+                        &snapshot,
+                        self.playback_texture.as_ref(),
+                        &mut self.player,
+                    ) {
+                        self.send(command);
+                    }
+                });
+            context.request_repaint_after(std::time::Duration::from_millis(33));
+            return;
+        }
         self.navigation(ui, &snapshot);
 
         egui::CentralPanel::default()
@@ -210,6 +236,7 @@ impl eframe::App for MoqCastApp {
                         self.locale,
                         &snapshot,
                         self.playback_texture.as_ref(),
+                        &mut self.player,
                     ),
                     Page::Settings => {
                         if let Some(locale) = pages::settings::show(ui, self.locale) {
