@@ -2,35 +2,39 @@
 
 use eframe::egui::{self, RichText};
 
-use super::super::{Locale, heading, section_frame};
+use super::super::Locale;
+use super::super::components;
+use super::super::theme::{MUTED, TEXT};
 
 pub(in crate::app) fn show(ui: &mut egui::Ui, locale: Locale) -> Option<Locale> {
-    heading(ui, locale.settings(), "");
     let mut selected = locale;
 
-    section_frame().show(ui, |ui| {
-        ui.label(RichText::new(locale.language()).size(16.0).strong());
-        ui.horizontal(|ui| {
+    components::surface().show(ui, |ui| {
+        components::section_title(ui, locale.language(), None);
+        ui.add_space(10.0);
+        ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut selected, Locale::Chinese, "简体中文");
             ui.selectable_value(&mut selected, Locale::English, "English");
         });
     });
 
     ui.add_space(16.0);
-    section_frame().show(ui, |ui| {
-        ui.label(RichText::new(locale.about()).size(16.0).strong());
-        egui::Grid::new("about-grid")
-            .num_columns(2)
-            .spacing([28.0, 10.0])
-            .show(ui, |ui| {
-                ui.label(locale.app_version());
-                ui.label(env!("CARGO_PKG_VERSION"));
-                ui.end_row();
-                ui.label(locale.protocol());
-                ui.label("MoQ / QUIC");
-                ui.end_row();
-            });
+    components::surface().show(ui, |ui| {
+        components::section_title(ui, locale.about(), Some(locale.about_description()));
+        ui.add_space(14.0);
+        settings_row(ui, locale.app_version(), env!("CARGO_PKG_VERSION"));
+        ui.separator();
+        settings_row(ui, locale.protocol(), "MoQ / QUIC · mDNS");
     });
 
     (selected != locale).then_some(selected)
+}
+
+fn settings_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(label).size(13.0).color(MUTED));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new(value).size(13.0).strong().color(TEXT));
+        });
+    });
 }

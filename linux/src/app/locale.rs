@@ -56,6 +56,13 @@ impl Locale {
         }
     }
 
+    pub(super) fn settings_description(self) -> &'static str {
+        match self {
+            Self::Chinese => "语言与应用信息。网络安全设置由运行时管理。",
+            Self::English => "Language and app information. Network security is runtime-managed.",
+        }
+    }
+
     pub(super) fn nearby_description(self) -> &'static str {
         match self {
             Self::Chinese => "自动连接同一局域网内的 MoQCast 设备。",
@@ -81,6 +88,27 @@ impl Locale {
         match self {
             Self::Chinese => "正在扫描局域网…",
             Self::English => "Scanning the local network...",
+        }
+    }
+
+    pub(super) fn discovery_idle(self) -> &'static str {
+        match self {
+            Self::Chinese => "扫描已停止",
+            Self::English => "Scan stopped",
+        }
+    }
+
+    pub(super) fn discovery_ready(self) -> &'static str {
+        match self {
+            Self::Chinese => "发现服务运行中",
+            Self::English => "Discovery active",
+        }
+    }
+
+    pub(super) fn discovery_error(self) -> &'static str {
+        match self {
+            Self::Chinese => "发现服务需要恢复",
+            Self::English => "Discovery needs attention",
         }
     }
 
@@ -126,6 +154,13 @@ impl Locale {
         }
     }
 
+    pub(super) fn transport_inbound_role(self) -> &'static str {
+        match self {
+            Self::Chinese => "由对端发起连接",
+            Self::English => "Remote peer dials this device",
+        }
+    }
+
     pub(super) fn transport_connecting(self) -> &'static str {
         match self {
             Self::Chinese => "正在建立 mesh…",
@@ -163,8 +198,8 @@ impl Locale {
 
     pub(super) fn inbound_sessions(self) -> &'static str {
         match self {
-            Self::Chinese => "已授权入站连接",
-            Self::English => "Authorized inbound sessions",
+            Self::Chinese => "未归属入站连接",
+            Self::English => "Unattributed inbound sessions",
         }
     }
 
@@ -184,15 +219,8 @@ impl Locale {
 
     pub(super) fn share_description(self) -> &'static str {
         match self {
-            Self::Chinese => "通过系统选择器共享一个屏幕。",
-            Self::English => "Share one display through the system picker.",
-        }
-    }
-
-    pub(super) fn mesh_connected(self) -> &'static str {
-        match self {
-            Self::Chinese => "Mesh 已连接",
-            Self::English => "Mesh connected",
+            Self::Chinese => "共享本机屏幕，或观看一个已发布的远端屏幕。",
+            Self::English => "Share this desktop or view one available remote screen.",
         }
     }
 
@@ -266,6 +294,45 @@ impl Locale {
         }
     }
 
+    pub(super) fn retry(self) -> &'static str {
+        match self {
+            Self::Chinese => "重试",
+            Self::English => "Retry",
+        }
+    }
+
+    pub(super) fn devices(self) -> &'static str {
+        match self {
+            Self::Chinese => "设备",
+            Self::English => "Devices",
+        }
+    }
+
+    pub(super) fn mesh_status_hint(self) -> &'static str {
+        match self {
+            Self::Chinese => "设备行只显示精确出站状态；入站连接无法安全归属到具体设备。",
+            Self::English => {
+                "Device rows show exact outbound state. Inbound sessions cannot yet be assigned safely."
+            }
+        }
+    }
+
+    pub(super) fn media_idle(self) -> &'static str {
+        match self {
+            Self::Chinese => "屏幕媒体空闲",
+            Self::English => "Screen media is idle",
+        }
+    }
+
+    pub(super) fn media_idle_hint(self) -> &'static str {
+        match self {
+            Self::Chinese => "选择一个本机屏幕进行共享，或从附近设备观看可用屏幕。",
+            Self::English => {
+                "Choose a local display to share, or watch an available nearby screen."
+            }
+        }
+    }
+
     pub(super) fn language(self) -> &'static str {
         match self {
             Self::Chinese => "语言",
@@ -277,6 +344,13 @@ impl Locale {
         match self {
             Self::Chinese => "关于",
             Self::English => "About",
+        }
+    }
+
+    pub(super) fn about_description(self) -> &'static str {
+        match self {
+            Self::Chinese => "基于 mDNS 与 MoQ / QUIC 的局域网 screen-only mesh。",
+            Self::English => "A screen-only LAN mesh built on mDNS and MoQ / QUIC.",
         }
     }
 

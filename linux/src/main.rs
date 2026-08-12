@@ -21,7 +21,7 @@ fn main() -> anyhow::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("dev.moq.moqcast.desktop")
             .with_inner_size([1180.0, 760.0])
-            .with_min_inner_size([900.0, 600.0]),
+            .with_min_inner_size([680.0, 520.0]),
         persist_window: true,
         ..Default::default()
     };

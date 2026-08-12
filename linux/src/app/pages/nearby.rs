@@ -2,9 +2,11 @@
 
 use eframe::egui::{self, RichText};
 
+use super::super::components::{self, BadgeTone, primary_button, secondary_button, status_badge};
+use super::super::theme::{MUTED, TEXT};
 use super::super::{
-    AppSnapshot, DiscoveryState, Locale, MUTED, MediaState, PeerDiscoveryState, ScreenAvailability,
-    TEAL, TransportState, UserCommand, heading, section_frame,
+    AppSnapshot, DialRole, DiscoveryState, Locale, MediaState, PeerDiscoveryState,
+    ScreenAvailability, TransportState, UserCommand,
 };
 
 pub(in crate::app) fn show(
@@ -12,113 +14,151 @@ pub(in crate::app) fn show(
     locale: Locale,
     snapshot: &AppSnapshot,
 ) -> Option<UserCommand> {
-    heading(ui, locale.nearby(), locale.nearby_description());
-
     let discovery_active = snapshot.discovery.is_active();
-    let mut command = if ui
-        .button(if discovery_active {
-            locale.stop_scan()
+    let mut command = None;
+
+    ui.horizontal_wrapped(|ui| {
+        let (status, tone) = match snapshot.discovery {
+            DiscoveryState::Idle => (locale.discovery_idle(), BadgeTone::Neutral),
+            DiscoveryState::Scanning => (locale.scanning(), BadgeTone::Info),
+            DiscoveryState::Ready => (locale.discovery_ready(), BadgeTone::Success),
+            DiscoveryState::Empty => (locale.no_devices(), BadgeTone::Neutral),
+            DiscoveryState::Error => (locale.discovery_error(), BadgeTone::Error),
+        };
+        status_badge(ui, status, tone);
+        let response = if discovery_active {
+            secondary_button(ui, locale.stop_scan(), true)
         } else {
-            locale.start_scan()
-        })
-        .clicked()
-    {
-        Some(if discovery_active {
-            UserCommand::StopDiscovery
-        } else {
-            UserCommand::StartDiscovery
-        })
-    } else {
-        None
-    };
+            primary_button(ui, locale.start_scan(), true)
+        };
+        if response.clicked() {
+            command = Some(if discovery_active {
+                UserCommand::StopDiscovery
+            } else {
+                UserCommand::StartDiscovery
+            });
+        }
+    });
 
     if snapshot.inbound_session_count > 0 {
-        ui.label(
-            RichText::new(format!(
-                "{}: {}",
-                locale.inbound_sessions(),
-                snapshot.inbound_session_count
-            ))
-            .size(12.0)
-            .color(TEAL),
-        );
-    }
-
-    ui.add_space(14.0);
-    section_frame().show(ui, |ui| {
-        ui.set_min_height(260.0);
-        if snapshot.peers.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(64.0);
-                if snapshot.discovery == DiscoveryState::Scanning {
-                    ui.spinner();
-                    ui.label(RichText::new(locale.scanning()).size(15.0));
-                } else {
-                    ui.label(RichText::new(locale.no_devices()).size(18.0).strong());
-                }
+        ui.add_space(12.0);
+        components::muted_surface().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                status_badge(
+                    ui,
+                    &format!(
+                        "{}: {}",
+                        locale.inbound_sessions(),
+                        snapshot.inbound_session_count
+                    ),
+                    BadgeTone::Info,
+                );
                 ui.label(
-                    RichText::new(locale.no_devices_hint())
-                        .size(13.0)
+                    RichText::new(locale.mesh_status_hint())
+                        .size(12.0)
                         .color(MUTED),
                 );
             });
-            return;
-        }
+        });
+    }
 
-        for (peer_id, peer) in &snapshot.peers {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(&peer.name).size(16.0).strong());
-                    if !peer.endpoints.is_empty() {
-                        ui.label(
-                            RichText::new(peer.endpoints.join(", "))
-                                .size(12.0)
-                                .color(MUTED),
-                        );
-                    }
-                    let discovery = match peer.discovery {
+    ui.add_space(16.0);
+    if snapshot.peers.is_empty() {
+        components::empty_state(
+            ui,
+            if snapshot.discovery == DiscoveryState::Scanning {
+                locale.scanning()
+            } else {
+                locale.no_devices()
+            },
+            locale.no_devices_hint(),
+            snapshot.discovery == DiscoveryState::Scanning,
+        );
+        return command;
+    }
+
+    components::surface().show(ui, |ui| {
+        components::section_title(ui, locale.devices(), Some(locale.mesh_status_hint()));
+        ui.add_space(10.0);
+
+        for (index, (peer_id, peer)) in snapshot.peers.iter().enumerate() {
+            if index > 0 {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
+            }
+
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(&peer.name).size(16.0).strong().color(TEXT));
+                if peer.fingerprint_pinned {
+                    status_badge(ui, locale.fingerprint_pinning(), BadgeTone::Neutral);
+                }
+            });
+            if !peer.endpoints.is_empty() {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(peer.endpoints.join("  ·  "))
+                            .monospace()
+                            .size(11.0)
+                            .color(MUTED),
+                    )
+                    .wrap(),
+                );
+            }
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                status_badge(
+                    ui,
+                    match peer.discovery {
                         PeerDiscoveryState::Found => locale.discovery_found(),
                         PeerDiscoveryState::Lost => locale.discovery_lost(),
-                    };
-                    let transport = match peer.transport {
-                        TransportState::Waiting => locale.transport_waiting(),
-                        TransportState::Connecting => locale.transport_connecting(),
-                        TransportState::Connected => locale.transport_connected(),
-                        TransportState::Failed => locale.transport_failed(),
-                    };
-                    let screen = if peer.screen == ScreenAvailability::Available {
+                    },
+                    match peer.discovery {
+                        PeerDiscoveryState::Found => BadgeTone::Success,
+                        PeerDiscoveryState::Lost => BadgeTone::Neutral,
+                    },
+                );
+
+                let (transport, tone) = match (&peer.dial_role, &peer.transport) {
+                    (DialRole::Inbound, _) => (locale.transport_inbound_role(), BadgeTone::Info),
+                    (DialRole::Outbound, TransportState::Waiting) => {
+                        (locale.transport_waiting(), BadgeTone::Neutral)
+                    }
+                    (DialRole::Outbound, TransportState::Connecting) => {
+                        (locale.transport_connecting(), BadgeTone::Info)
+                    }
+                    (DialRole::Outbound, TransportState::Connected) => {
+                        (locale.transport_connected(), BadgeTone::Success)
+                    }
+                    (DialRole::Outbound, TransportState::Failed) => {
+                        (locale.transport_failed(), BadgeTone::Error)
+                    }
+                };
+                status_badge(ui, transport, tone);
+
+                status_badge(
+                    ui,
+                    if peer.screen == ScreenAvailability::Available {
                         locale.screen_available()
                     } else {
                         locale.screen_unavailable()
-                    };
-                    ui.label(
-                        RichText::new(format!("{discovery} · {transport} · {screen}"))
-                            .size(12.0)
-                            .color(MUTED),
-                    );
-                    if peer.fingerprint_pinned {
-                        ui.label(
-                            RichText::new(locale.fingerprint_pinning())
-                                .size(12.0)
-                                .color(TEAL),
-                        );
-                    }
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let enabled = peer.screen == ScreenAvailability::Available
-                        && snapshot.has_mesh_session()
-                        && snapshot.media == MediaState::Idle;
-                    if ui
-                        .add_enabled(enabled, egui::Button::new(locale.watch()))
-                        .clicked()
-                    {
-                        command = Some(UserCommand::StartWatching {
-                            path: crate::screen_path::for_peer(peer_id),
-                        });
-                    }
-                });
+                    },
+                    if peer.screen == ScreenAvailability::Available {
+                        BadgeTone::Success
+                    } else {
+                        BadgeTone::Neutral
+                    },
+                );
+
+                let enabled = peer.screen == ScreenAvailability::Available
+                    && snapshot.has_mesh_session()
+                    && snapshot.media == MediaState::Idle;
+                if primary_button(ui, locale.watch(), enabled).clicked() {
+                    command = Some(UserCommand::StartWatching {
+                        path: crate::screen_path::for_peer(peer_id),
+                    });
+                }
             });
-            ui.separator();
         }
     });
 
