@@ -1,0 +1,44 @@
+name: Windows
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "windows/**"
+      - ".github/workflows/windows.yml"
+  pull_request:
+    paths:
+      - "windows/**"
+      - ".github/workflows/windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: windows
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: clippy,rustfmt
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Run tests
+        run: cargo test --all-targets
+      - name: Run Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build release CLI
+        run: cargo build --release
+      - name: Upload discovery CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: moqcast-windows-discovery-${{ github.sha }}
+          path: windows/target/release/moqcast-windows-discovery.exe
+          if-no-files-found: error
