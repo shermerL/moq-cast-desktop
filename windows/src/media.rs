@@ -86,7 +86,9 @@ impl MediaSnapshot {
     }
 
     pub(crate) fn ended(&mut self, generation: u64, failed: bool) -> bool {
-        if generation != self.generation {
+        if generation != self.generation
+            || !matches!(self.phase, MediaPhase::Preparing | MediaPhase::Sharing)
+        {
             return false;
         }
         if failed {
@@ -258,6 +260,23 @@ mod tests {
         assert!(current > old);
         assert!(!media.ended(old, true));
         assert_eq!(media.phase, MediaPhase::Preparing);
+    }
+
+    #[test]
+    fn late_publication_end_cannot_override_an_explicit_stop() {
+        let mut media = MediaSnapshot::default();
+        let generation = media.begin("peer-a").expect("begin");
+        assert!(media.started(
+            generation,
+            PublicationInfo {
+                width: 1920,
+                height: 1080,
+            }
+        ));
+        assert_eq!(media.begin_stop(), Some(generation));
+        assert!(media.stopped(generation));
+        assert!(!media.ended(generation, true));
+        assert_eq!(media.phase, MediaPhase::Idle);
     }
 
     #[test]

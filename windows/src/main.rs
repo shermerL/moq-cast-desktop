@@ -2,7 +2,10 @@
 
 mod app;
 mod media;
+mod playback;
+mod player;
 mod registry;
+mod remote;
 mod runtime;
 mod screen_path;
 mod session;

@@ -4,17 +4,20 @@ use std::{
     collections::BTreeMap,
     net::SocketAddr,
     path::PathBuf,
+    sync::Arc,
     thread::{self, JoinHandle},
 };
 
-use moq_native::mdns;
+use moq_native::{mdns, moq_net};
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
 use crate::{
     media::{MediaSnapshot, Publication},
+    playback::{PlaybackFrame, ViewEvent, ViewPhase, ViewSnapshot},
     registry::{PeerRegistry, PeerSummary, RegistryChange, sanitize_identity},
+    remote::{Directory as RemoteDirectory, RemoteScreenView, ScreenAvailability},
     session::{
         SessionFoundation, SessionSubject, TransportDirection, TransportPhase, TransportUpdate,
     },
@@ -22,6 +25,7 @@ use crate::{
 
 const COMMAND_CAPACITY: usize = 32;
 const MEDIA_EVENT_CAPACITY: usize = 4;
+const VIEW_EVENT_CAPACITY: usize = 8;
 
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeConfig {
@@ -73,12 +77,15 @@ pub(crate) struct PeerView {
     pub(crate) tls_pinned: bool,
     pub(crate) present: bool,
     pub(crate) transport: TransportView,
+    pub(crate) screen: ScreenAvailability,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RuntimeSnapshot {
     pub(crate) discovery: DiscoveryState,
     pub(crate) media: MediaSnapshot,
+    pub(crate) view: ViewSnapshot,
+    pub(crate) remote_screens: BTreeMap<String, RemoteScreenView>,
     pub(crate) peers: BTreeMap<String, PeerView>,
     pub(crate) inbound_sessions: usize,
     pub(crate) listener: Option<String>,
@@ -93,6 +100,8 @@ impl Default for RuntimeSnapshot {
         Self {
             discovery: DiscoveryState::Starting,
             media: MediaSnapshot::default(),
+            view: ViewSnapshot::default(),
+            remote_screens: BTreeMap::new(),
             peers: BTreeMap::new(),
             inbound_sessions: 0,
             listener: None,
@@ -124,6 +133,12 @@ impl RuntimeSnapshot {
     }
 
     fn upsert(&mut self, summary: PeerSummary) {
+        let screen = self
+            .remote_screens
+            .get(&crate::screen_path::for_peer(&summary.id))
+            .map_or(ScreenAvailability::Unavailable, |screen| {
+                screen.availability
+            });
         self.peers
             .entry(summary.id.clone())
             .and_modify(|peer| {
@@ -132,6 +147,7 @@ impl RuntimeSnapshot {
                 peer.authenticated_discovery = summary.authenticated_discovery;
                 peer.tls_pinned = summary.tls_pinned;
                 peer.present = true;
+                peer.screen = screen;
             })
             .or_insert(PeerView {
                 id: summary.id,
@@ -141,7 +157,34 @@ impl RuntimeSnapshot {
                 tls_pinned: summary.tls_pinned,
                 present: true,
                 transport: TransportView::default(),
+                screen,
             });
+    }
+
+    fn update_remote_screen(&mut self, update: crate::remote::Update) -> bool {
+        let path = update.path;
+        let peer_id = update.view.peer_id.clone();
+        let availability = update.view.availability;
+        if self
+            .remote_screens
+            .get(&path)
+            .is_some_and(|screen| screen.peer_id == peer_id && screen.availability == availability)
+        {
+            return false;
+        }
+        self.remote_screens.insert(path, update.view);
+        if let Some(peer) = self.peers.get_mut(&peer_id) {
+            peer.screen = availability;
+        }
+        true
+    }
+
+    pub(crate) fn has_mesh_session(&self) -> bool {
+        self.inbound_sessions > 0
+            || self
+                .peers
+                .values()
+                .any(|peer| peer.transport.phase == TransportPhaseView::Connected)
     }
 
     fn should_auto_connect(&self, peer: &str) -> bool {
@@ -191,6 +234,8 @@ impl RuntimeSnapshot {
 pub(crate) enum RuntimeCommand {
     ShareScreen,
     StopSharing,
+    WatchScreen { path: String },
+    StopWatching,
     Shutdown,
 }
 
@@ -202,6 +247,41 @@ enum MediaEvent {
 struct PublicationOwner {
     generation: u64,
     task: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct ViewOwner {
+    generation: u64,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl ViewOwner {
+    fn start(
+        &mut self,
+        generation: u64,
+        path: String,
+        broadcast: moq_net::broadcast::Consumer,
+        events: mpsc::Sender<ViewEvent>,
+        frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
+    ) {
+        self.generation = generation;
+        self.task = Some(tokio::spawn(crate::playback::run(
+            generation, path, broadcast, events, frames,
+        )));
+    }
+
+    fn finished(&mut self, generation: u64) {
+        if self.generation == generation {
+            self.task = None;
+        }
+    }
+
+    async fn stop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
 }
 
 impl PublicationOwner {
@@ -257,6 +337,7 @@ pub(crate) enum CommandError {
 pub(crate) struct RuntimeOwner {
     commands: mpsc::Sender<RuntimeCommand>,
     snapshots: watch::Receiver<RuntimeSnapshot>,
+    playback: watch::Receiver<Option<Arc<PlaybackFrame>>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -264,6 +345,7 @@ impl RuntimeOwner {
     pub(crate) fn start(config: RuntimeConfig) -> Result<Self, RuntimeStartError> {
         let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (snapshot_tx, snapshots) = watch::channel(RuntimeSnapshot::default());
+        let (playback_tx, playback) = watch::channel(None);
         let thread = thread::Builder::new()
             .name("moqcast-windows-runtime".to_owned())
             .spawn(move || {
@@ -271,7 +353,9 @@ impl RuntimeOwner {
                     .enable_all()
                     .build();
                 match runtime {
-                    Ok(runtime) => runtime.block_on(run(config, command_rx, snapshot_tx)),
+                    Ok(runtime) => {
+                        runtime.block_on(run(config, command_rx, snapshot_tx, playback_tx))
+                    }
                     Err(_) => {
                         let failed = RuntimeSnapshot {
                             discovery: DiscoveryState::Failed,
@@ -285,12 +369,17 @@ impl RuntimeOwner {
         Ok(Self {
             commands,
             snapshots,
+            playback,
             thread: Some(thread),
         })
     }
 
     pub(crate) fn snapshot(&mut self) -> RuntimeSnapshot {
         self.snapshots.borrow_and_update().clone()
+    }
+
+    pub(crate) fn playback_frame(&mut self) -> Option<Arc<PlaybackFrame>> {
+        self.playback.borrow_and_update().clone()
     }
 
     pub(crate) fn try_send(&self, command: RuntimeCommand) -> Result<(), CommandError> {
@@ -320,6 +409,7 @@ async fn run(
     config: RuntimeConfig,
     mut commands: mpsc::Receiver<RuntimeCommand>,
     snapshots: watch::Sender<RuntimeSnapshot>,
+    playback: watch::Sender<Option<Arc<PlaybackFrame>>>,
 ) {
     let mut snapshot = RuntimeSnapshot::default();
     let Some((mut discovery, mut registry, mut sessions)) =
@@ -335,7 +425,16 @@ async fn run(
     };
     let mut raw_peers = BTreeMap::<String, mdns::Peer>::new();
     let (media_events, mut media_recv) = mpsc::channel(MEDIA_EVENT_CAPACITY);
+    let mut remote = RemoteDirectory::start(
+        sessions.origin().clone(),
+        snapshot
+            .local_id
+            .clone()
+            .expect("services set the local peer id"),
+    );
+    let (view_events, mut view_recv) = mpsc::channel(VIEW_EVENT_CAPACITY);
     let mut publication = PublicationOwner::default();
+    let mut view = ViewOwner::default();
     let _ = snapshots.send(snapshot.clone());
 
     loop {
@@ -344,11 +443,16 @@ async fn run(
                 let Some(command) = command else { break };
                 if handle_command(
                     command,
-                    &mut snapshot,
-                    &raw_peers,
-                    &mut sessions,
-                    &mut publication,
-                    &media_events,
+                    CommandContext {
+                        snapshot: &mut snapshot,
+                        sessions: &mut sessions,
+                        publication: &mut publication,
+                        media_events: &media_events,
+                        view: &mut view,
+                        view_events: &view_events,
+                        playback: &playback,
+                        remote: &remote,
+                    },
                 ).await {
                     let _ = snapshots.send(snapshot.clone());
                     break;
@@ -402,10 +506,47 @@ async fn run(
                 snapshot.media.ended(generation, failed);
                 let _ = snapshots.send(snapshot.clone());
             }
+            update = remote.recv() => {
+                let Some(update) = update else {
+                    snapshot.last_error = Some("The remote screen directory stopped unexpectedly.");
+                    let _ = snapshots.send(snapshot.clone());
+                    break;
+                };
+                if snapshot.update_remote_screen(update) {
+                    let _ = snapshots.send(snapshot.clone());
+                }
+            }
+            event = view_recv.recv() => {
+                let Some(event) = event else {
+                    continue;
+                };
+                match event {
+                    ViewEvent::DecoderReady {
+                        generation,
+                        path,
+                        decoder,
+                        width,
+                        height,
+                    } => {
+                        snapshot
+                            .view
+                            .decoder_ready(generation, &path, decoder, width, height);
+                    }
+                    ViewEvent::Ended { generation, result } => {
+                        view.finished(generation);
+                        playback.send_replace(None);
+                        snapshot.view.ended(generation, result);
+                    }
+                }
+                let _ = snapshots.send(snapshot.clone());
+            }
         }
     }
 
+    view.stop().await;
+    playback.send_replace(None);
     publication.stop().await;
+    remote.stop().await;
     snapshot.shutdown();
     let _ = snapshots.send(snapshot);
     sessions.shutdown().await;
@@ -454,14 +595,28 @@ fn fail<T>(snapshot: &mut RuntimeSnapshot, message: &'static str) -> Option<T> {
     None
 }
 
-async fn handle_command(
-    command: RuntimeCommand,
-    snapshot: &mut RuntimeSnapshot,
-    _peers: &BTreeMap<String, mdns::Peer>,
-    sessions: &mut SessionFoundation,
-    publication: &mut PublicationOwner,
-    media_events: &mpsc::Sender<MediaEvent>,
-) -> bool {
+struct CommandContext<'a> {
+    snapshot: &'a mut RuntimeSnapshot,
+    sessions: &'a mut SessionFoundation,
+    publication: &'a mut PublicationOwner,
+    media_events: &'a mpsc::Sender<MediaEvent>,
+    view: &'a mut ViewOwner,
+    view_events: &'a mpsc::Sender<ViewEvent>,
+    playback: &'a watch::Sender<Option<Arc<PlaybackFrame>>>,
+    remote: &'a RemoteDirectory,
+}
+
+async fn handle_command(command: RuntimeCommand, context: CommandContext<'_>) -> bool {
+    let CommandContext {
+        snapshot,
+        sessions,
+        publication,
+        media_events,
+        view,
+        view_events,
+        playback,
+        remote,
+    } = context;
     match command {
         RuntimeCommand::ShareScreen => {
             start_publication(snapshot, sessions, publication, media_events).await;
@@ -475,7 +630,25 @@ async fn handle_command(
             snapshot.media.stopped(generation);
             false
         }
+        RuntimeCommand::WatchScreen { path } => {
+            start_view(path, snapshot, remote, view, view_events, playback);
+            false
+        }
+        RuntimeCommand::StopWatching => {
+            let Some(generation) = snapshot.view.begin_stop() else {
+                return false;
+            };
+            view.stop().await;
+            playback.send_replace(None);
+            snapshot.view.stopped(generation);
+            false
+        }
         RuntimeCommand::Shutdown => {
+            if let Some(generation) = snapshot.view.begin_stop() {
+                view.stop().await;
+                playback.send_replace(None);
+                snapshot.view.stopped(generation);
+            }
             if let Some(generation) = snapshot.media.begin_stop() {
                 publication.stop().await;
                 snapshot.media.stopped(generation);
@@ -492,6 +665,10 @@ async fn start_publication(
     publication: &mut PublicationOwner,
     media_events: &mpsc::Sender<MediaEvent>,
 ) {
+    if !matches!(snapshot.view.phase, ViewPhase::Idle | ViewPhase::Failed) {
+        snapshot.last_error = Some("Stop watching before sharing the local screen.");
+        return;
+    }
     let Some(local_id) = snapshot.local_id.clone() else {
         snapshot.last_error = Some("LAN services must be ready before sharing.");
         return;
@@ -518,6 +695,52 @@ async fn start_publication(
     if snapshot.media.started(generation, info) {
         publication.start(generation, ready, media_events.clone());
     }
+}
+
+fn start_view(
+    path: String,
+    snapshot: &mut RuntimeSnapshot,
+    remote: &RemoteDirectory,
+    view: &mut ViewOwner,
+    events: &mpsc::Sender<ViewEvent>,
+    playback: &watch::Sender<Option<Arc<PlaybackFrame>>>,
+) {
+    if !snapshot.has_mesh_session() {
+        snapshot.last_error = Some("A direct peer session is required before watching.");
+        return;
+    }
+    if !matches!(
+        snapshot.media.phase,
+        crate::media::MediaPhase::Idle | crate::media::MediaPhase::Failed
+    ) {
+        snapshot.last_error = Some("Stop sharing before watching a remote screen.");
+        return;
+    }
+    let available = snapshot
+        .remote_screens
+        .get(&path)
+        .is_some_and(|screen| screen.availability == ScreenAvailability::Available);
+    if !available {
+        snapshot.last_error = Some("The selected remote screen is no longer available.");
+        return;
+    }
+    let Some(broadcast) = remote.broadcast(&path) else {
+        snapshot.last_error = Some("The selected remote screen is no longer available.");
+        return;
+    };
+    let Some(generation) = snapshot.view.begin(&path) else {
+        snapshot.last_error = Some("Another remote screen is already active.");
+        return;
+    };
+    snapshot.last_error = None;
+    playback.send_replace(None);
+    view.start(
+        generation,
+        path,
+        broadcast,
+        events.clone(),
+        playback.clone(),
+    );
 }
 
 async fn auto_connect(
@@ -720,9 +943,43 @@ mod tests {
     }
 
     #[test]
+    fn canonical_announcements_update_the_matching_peer_without_starting_view() {
+        let mut snapshot = RuntimeSnapshot {
+            local_id: Some("local".to_owned()),
+            ..RuntimeSnapshot::default()
+        };
+        snapshot.apply_registry(RegistryChange::Added(peer("peer", "moqt://one:4443")));
+
+        let update = |path: &str, peer_id: &str, availability| crate::remote::Update {
+            path: path.to_owned(),
+            view: RemoteScreenView {
+                peer_id: peer_id.to_owned(),
+                availability,
+            },
+        };
+
+        assert!(snapshot.update_remote_screen(update(
+            "moqcast.screen/peer",
+            "peer",
+            ScreenAvailability::Available,
+        )));
+        assert_eq!(snapshot.peers["peer"].screen, ScreenAvailability::Available);
+        assert_eq!(snapshot.view.phase, ViewPhase::Idle);
+
+        assert!(snapshot.update_remote_screen(update(
+            "moqcast.screen/peer",
+            "peer",
+            ScreenAvailability::Withdrawn,
+        )));
+        assert_eq!(snapshot.peers["peer"].screen, ScreenAvailability::Withdrawn);
+        assert_eq!(snapshot.view.phase, ViewPhase::Idle);
+    }
+
+    #[test]
     fn dropping_runtime_owner_sends_shutdown_and_joins_thread() {
         let (commands, mut command_rx) = mpsc::channel(1);
         let (_snapshot_tx, snapshots) = watch::channel(RuntimeSnapshot::default());
+        let (_playback_tx, playback) = watch::channel(None);
         let stopped = Arc::new(AtomicBool::new(false));
         let observed = stopped.clone();
         let thread = thread::spawn(move || {
@@ -733,6 +990,7 @@ mod tests {
         let owner = RuntimeOwner {
             commands,
             snapshots,
+            playback,
             thread: Some(thread),
         };
 

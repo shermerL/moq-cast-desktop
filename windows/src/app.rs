@@ -4,6 +4,9 @@ use eframe::egui::{self, Align, Color32, Frame, Layout, RichText, Stroke};
 
 use crate::{
     media::{MAX_SCREEN_EDGE, MediaPhase},
+    playback::{PlaybackFrameIdentity, ViewPhase},
+    player::{LivePlayer, PlayerAction},
+    remote::ScreenAvailability,
     runtime::{
         DiscoveryState, PeerView, RuntimeCommand, RuntimeOwner, RuntimeSnapshot, TransportPhaseView,
     },
@@ -55,6 +58,9 @@ pub(crate) struct MoqCastApp {
     runtime: RuntimeOwner,
     snapshot: RuntimeSnapshot,
     command_error: Option<String>,
+    playback_texture: Option<egui::TextureHandle>,
+    playback_identity: Option<PlaybackFrameIdentity>,
+    player: LivePlayer,
 }
 
 impl MoqCastApp {
@@ -67,6 +73,9 @@ impl MoqCastApp {
             runtime,
             snapshot,
             command_error: None,
+            playback_texture: None,
+            playback_identity: None,
+            player: LivePlayer,
         }
     }
 
@@ -186,10 +195,36 @@ impl MoqCastApp {
                         ui.small(security);
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.small(match self.locale {
-                            Locale::Chinese => "自动连接",
-                            Locale::English => "Automatic",
-                        });
+                        if peer.screen == ScreenAvailability::Available {
+                            let path = crate::screen_path::for_peer(&peer.id);
+                            let enabled = self.snapshot.has_mesh_session()
+                                && matches!(
+                                    self.snapshot.media.phase,
+                                    MediaPhase::Idle | MediaPhase::Failed
+                                )
+                                && matches!(
+                                    self.snapshot.view.phase,
+                                    ViewPhase::Idle | ViewPhase::Failed
+                                );
+                            if ui
+                                .add_enabled(
+                                    enabled,
+                                    egui::Button::new(match self.locale {
+                                        Locale::Chinese => "观看",
+                                        Locale::English => "Watch",
+                                    }),
+                                )
+                                .clicked()
+                            {
+                                self.page = Page::ScreenShare;
+                                self.send(RuntimeCommand::WatchScreen { path });
+                            }
+                        } else {
+                            ui.small(match self.locale {
+                                Locale::Chinese => "自动连接",
+                                Locale::English => "Automatic",
+                            });
+                        }
                     });
                 });
             });
@@ -197,6 +232,23 @@ impl MoqCastApp {
 
     fn screen_share(&mut self, ui: &mut egui::Ui) {
         ui.heading(self.locale.screen_share());
+        if matches!(
+            self.snapshot.view.phase,
+            ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping
+        ) {
+            if matches!(
+                self.player.show(
+                    ui,
+                    &self.snapshot.view,
+                    self.playback_texture.as_ref(),
+                    false,
+                ),
+                Some(PlayerAction::Stop)
+            ) {
+                self.send(RuntimeCommand::StopWatching);
+            }
+            return;
+        }
         let status = match (self.locale, self.snapshot.media.phase) {
             (Locale::Chinese, MediaPhase::Idle) => "尚未共享屏幕。",
             (Locale::English, MediaPhase::Idle) => "Screen sharing is idle.",
@@ -215,7 +267,11 @@ impl MoqCastApp {
         ui.add_space(8.0);
         match self.snapshot.media.phase {
             MediaPhase::Idle | MediaPhase::Failed => {
-                let enabled = self.snapshot.local_id.is_some();
+                let enabled = self.snapshot.local_id.is_some()
+                    && matches!(
+                        self.snapshot.view.phase,
+                        ViewPhase::Idle | ViewPhase::Failed
+                    );
                 if ui
                     .add_enabled(
                         enabled,
@@ -281,6 +337,36 @@ impl MoqCastApp {
             ui.add_space(8.0);
             ui.colored_label(Color32::LIGHT_RED, error);
         }
+        if let Some(error) = &self.snapshot.view.last_error {
+            ui.add_space(8.0);
+            ui.colored_label(Color32::LIGHT_RED, error);
+        }
+    }
+
+    fn update_playback_texture(&mut self, context: &egui::Context) {
+        if let Some(frame) = self.runtime.playback_frame()
+            && Some(frame.identity) != self.playback_identity
+        {
+            let image =
+                egui::ColorImage::from_rgba_unmultiplied([frame.width, frame.height], &frame.rgba);
+            if let Some(texture) = &mut self.playback_texture {
+                texture.set(image, egui::TextureOptions::LINEAR);
+            } else {
+                self.playback_texture = Some(context.load_texture(
+                    "remote-screen",
+                    image,
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
+            self.playback_identity = Some(frame.identity);
+        }
+        if matches!(
+            self.snapshot.view.phase,
+            ViewPhase::Idle | ViewPhase::Failed
+        ) {
+            self.playback_texture = None;
+            self.playback_identity = None;
+        }
     }
 
     fn settings(&mut self, ui: &mut egui::Ui) {
@@ -323,6 +409,18 @@ impl MoqCastApp {
                 ui.label("Screen media");
                 ui.monospace(format!("{:?}", self.snapshot.media.phase));
                 ui.end_row();
+                ui.label("Remote playback");
+                ui.monospace(format!("{:?}", self.snapshot.view.phase));
+                ui.end_row();
+                ui.label("Decoder");
+                ui.monospace(
+                    self.snapshot
+                        .view
+                        .decoder
+                        .as_deref()
+                        .unwrap_or("not active"),
+                );
+                ui.end_row();
             });
         if let Some(error) = self.snapshot.last_error {
             ui.add_space(10.0);
@@ -335,7 +433,36 @@ impl eframe::App for MoqCastApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.snapshot = self.runtime.snapshot();
         let context = ui.ctx().clone();
-        context.request_repaint_after(std::time::Duration::from_millis(100));
+        self.update_playback_texture(&context);
+        let viewing = matches!(
+            self.snapshot.view.phase,
+            ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping
+        );
+        let viewport_fullscreen = LivePlayer::fullscreen(&context);
+        if viewport_fullscreen && !viewing {
+            context.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+        let fullscreen = viewing && viewport_fullscreen;
+
+        if fullscreen {
+            egui::CentralPanel::default()
+                .frame(Frame::new().fill(Color32::BLACK))
+                .show(ui, |ui| {
+                    if matches!(
+                        self.player.show(
+                            ui,
+                            &self.snapshot.view,
+                            self.playback_texture.as_ref(),
+                            true,
+                        ),
+                        Some(PlayerAction::Stop)
+                    ) {
+                        self.send(RuntimeCommand::StopWatching);
+                    }
+                });
+            context.request_repaint_after(std::time::Duration::from_millis(33));
+            return;
+        }
 
         egui::Panel::top("navigation")
             .exact_size(52.0)
@@ -363,6 +490,11 @@ impl eframe::App for MoqCastApp {
                 });
             });
         });
+        context.request_repaint_after(std::time::Duration::from_millis(if viewing {
+            33
+        } else {
+            100
+        }));
     }
 }
 
