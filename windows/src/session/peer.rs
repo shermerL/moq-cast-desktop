@@ -9,6 +9,7 @@ use url::Url;
 use super::security::peer_path;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const RECONNECT_BUDGET: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Error)]
 pub(crate) enum DialError {
@@ -39,7 +40,10 @@ impl From<&mdns::Peer> for PeerRecord {
     }
 }
 
-pub(crate) fn dial(peer: &PeerRecord) -> Result<moq_native::Connection, DialError> {
+pub(crate) fn dial(
+    peer: &PeerRecord,
+    origin: moq_net::origin::Producer,
+) -> Result<moq_native::Connection, DialError> {
     let fingerprint = peer
         .fingerprint
         .as_ref()
@@ -54,7 +58,8 @@ pub(crate) fn dial(peer: &PeerRecord) -> Result<moq_native::Connection, DialErro
 
     let mut config = ClientConfig::default();
     config.bind.set_port(0);
-    config.reconnect = Some(false);
+    config.reconnect = Some(true);
+    config.backoff.timeout = Some(RECONNECT_BUDGET);
     config.timeout = Some(CONNECT_TIMEOUT);
     config.version = config
         .versions()
@@ -65,7 +70,11 @@ pub(crate) fn dial(peer: &PeerRecord) -> Result<moq_native::Connection, DialErro
     config.tls = moq_native::tls::Client::default();
     config.tls.fingerprint = vec![fingerprint.clone()];
 
-    Ok(config.init()?.connect(addrs))
+    let client = config
+        .init()?
+        .with_publisher(&origin)
+        .with_subscriber(origin);
+    Ok(client.connect(addrs))
 }
 
 fn carries_request_path(version: &moq_net::Version) -> bool {
@@ -103,14 +112,17 @@ mod tests {
         let (mut listener, addr, fingerprint) = listener().await;
         let accept = tokio::spawn(async move {
             let request = listener.accept().await.expect("request");
-            server::accept(request, "proof").await
+            server::accept(request, "proof", moq_net::Origin::random().produce()).await
         });
 
-        let connection = dial(&peer(addr, fingerprint, "proof"))
-            .expect("dial")
-            .established()
-            .await
-            .expect("established");
+        let connection = dial(
+            &peer(addr, fingerprint, "proof"),
+            moq_net::Origin::random().produce(),
+        )
+        .expect("dial")
+        .established()
+        .await
+        .expect("established");
         let session = accept.await.expect("accept task").expect("accepted");
 
         assert!(connection.connected());
@@ -123,13 +135,17 @@ mod tests {
         let (mut listener, addr, fingerprint) = listener().await;
         let accept = tokio::spawn(async move {
             let request = listener.accept().await.expect("request");
-            server::accept(request, "expected").await
+            server::accept(request, "expected", moq_net::Origin::random().produce()).await
         });
 
-        let established = dial(&peer(addr, fingerprint, "wrong"))
-            .expect("dial")
-            .established()
-            .await;
+        let connection = dial(
+            &peer(addr, fingerprint, "wrong"),
+            moq_net::Origin::random().produce(),
+        )
+        .expect("dial");
+        let established = tokio::time::timeout(Duration::from_secs(4), connection.established())
+            .await
+            .expect("credential rejection stays bounded");
         let accepted = accept.await.expect("accept task");
 
         assert!(accepted.is_err());
@@ -146,8 +162,12 @@ mod tests {
         let (mut listener, addr, _) = listener().await;
         let accept = tokio::spawn(async move { listener.accept().await });
 
-        let connection = dial(&peer(addr, "00".repeat(32), "proof")).expect("dial");
-        let result = tokio::time::timeout(Duration::from_secs(3), connection.established())
+        let connection = dial(
+            &peer(addr, "00".repeat(32), "proof"),
+            moq_net::Origin::random().produce(),
+        )
+        .expect("dial");
+        let result = tokio::time::timeout(Duration::from_secs(4), connection.established())
             .await
             .expect("bounded connection attempt");
 
@@ -160,14 +180,14 @@ mod tests {
         let (mut listener, addr, fingerprint) = listener().await;
         let accept = tokio::spawn(async move {
             let request = listener.accept().await.expect("request");
-            server::accept(request, "proof").await
+            server::accept(request, "proof", moq_net::Origin::random().produce()).await
         });
 
         let mut record = peer(addr, fingerprint, "proof");
         record
             .urls
             .insert(0, "moqt://127.0.0.1:9".parse().expect("candidate"));
-        let connection = dial(&record)
+        let connection = dial(&record, moq_net::Origin::random().produce())
             .expect("dial")
             .established()
             .await
@@ -175,6 +195,63 @@ mod tests {
         let session = accept.await.expect("accept task").expect("accepted");
 
         assert!(connection.connected());
+        connection.close();
+        session.abort(moq_net::Error::Cancel);
+    }
+
+    #[tokio::test]
+    async fn one_session_shares_broadcasts_in_both_directions() {
+        let (mut listener, addr, fingerprint) = listener().await;
+        let server_origin = moq_net::Origin::random().produce();
+        let client_origin = moq_net::Origin::random().produce();
+        let _from_server = server_origin
+            .create_broadcast(
+                "moqcast.screen/server",
+                moq_net::broadcast::Route::new().with_announce(true),
+            )
+            .expect("server broadcast");
+        let _from_client = client_origin
+            .create_broadcast(
+                "moqcast.screen/client",
+                moq_net::broadcast::Route::new().with_announce(true),
+            )
+            .expect("client broadcast");
+        let mut server_announcements = server_origin.consume().announced();
+        let mut client_announcements = client_origin.consume().announced();
+        let accepted_origin = server_origin.clone();
+        let accept = tokio::spawn(async move {
+            let request = listener.accept().await.expect("request");
+            server::accept(request, "proof", accepted_origin).await
+        });
+
+        let connection = dial(&peer(addr, fingerprint, "proof"), client_origin)
+            .expect("dial")
+            .established()
+            .await
+            .expect("established");
+        let session = accept.await.expect("accept task").expect("accepted");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let update = server_announcements.next().await.expect("server origin");
+                if update.path.as_str() == "moqcast.screen/client" {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("client broadcast reached server origin");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let update = client_announcements.next().await.expect("client origin");
+                if update.path.as_str() == "moqcast.screen/server" {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("server broadcast reached client origin");
+
         connection.close();
         session.abort(moq_net::Error::Cancel);
     }

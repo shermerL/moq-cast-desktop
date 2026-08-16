@@ -2,8 +2,11 @@
 
 use eframe::egui::{self, Align, Color32, Frame, Layout, RichText, Stroke};
 
-use crate::runtime::{
-    DiscoveryState, PeerView, RuntimeCommand, RuntimeOwner, RuntimeSnapshot, TransportPhaseView,
+use crate::{
+    media::{MAX_SCREEN_EDGE, MediaPhase},
+    runtime::{
+        DiscoveryState, PeerView, RuntimeCommand, RuntimeOwner, RuntimeSnapshot, TransportPhaseView,
+    },
 };
 
 const CONTENT_MAX_WIDTH: f32 = 900.0;
@@ -183,54 +186,101 @@ impl MoqCastApp {
                         ui.small(security);
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if matches!(
-                            peer.transport.phase,
-                            TransportPhaseView::Connecting | TransportPhaseView::Connected
-                        ) {
-                            if ui
-                                .button(match self.locale {
-                                    Locale::Chinese => "断开",
-                                    Locale::English => "Disconnect",
-                                })
-                                .clicked()
-                            {
-                                self.send(RuntimeCommand::Disconnect(peer.id.clone()));
-                            }
-                        } else {
-                            let enabled = peer.should_dial;
-                            if ui
-                                .add_enabled(
-                                    enabled,
-                                    egui::Button::new(match self.locale {
-                                        Locale::Chinese => "连接",
-                                        Locale::English => "Connect",
-                                    }),
-                                )
-                                .clicked()
-                            {
-                                self.send(RuntimeCommand::Connect(peer.id.clone()));
-                            }
-                        }
+                        ui.small(match self.locale {
+                            Locale::Chinese => "自动连接",
+                            Locale::English => "Automatic",
+                        });
                     });
                 });
             });
     }
 
-    fn screen_share(&self, ui: &mut egui::Ui) {
+    fn screen_share(&mut self, ui: &mut egui::Ui) {
         ui.heading(self.locale.screen_share());
-        ui.label(match self.locale {
-            Locale::Chinese => "当前版本尚不可用。Windows 屏幕采集与 H.264 发布将在后续版本提供。",
-            Locale::English => {
-                "Unavailable in this build. Windows capture and H.264 publishing will arrive in a later build."
+        let status = match (self.locale, self.snapshot.media.phase) {
+            (Locale::Chinese, MediaPhase::Idle) => "尚未共享屏幕。",
+            (Locale::English, MediaPhase::Idle) => "Screen sharing is idle.",
+            (Locale::Chinese, MediaPhase::Preparing) => "正在准备主显示器…",
+            (Locale::English, MediaPhase::Preparing) => "Preparing the primary display…",
+            (Locale::Chinese, MediaPhase::Sharing) => "正在共享主显示器。",
+            (Locale::English, MediaPhase::Sharing) => "The primary display is being shared.",
+            (Locale::Chinese, MediaPhase::Stopping) => "正在停止共享…",
+            (Locale::English, MediaPhase::Stopping) => "Stopping screen sharing…",
+            (Locale::Chinese, MediaPhase::Failed) => "屏幕共享未能启动或已意外结束。",
+            (Locale::English, MediaPhase::Failed) => {
+                "Screen sharing could not start or ended unexpectedly."
             }
-        });
+        };
+        ui.label(status);
         ui.add_space(8.0);
-        ui.small(match self.locale {
-            Locale::Chinese => "当前应用不会请求屏幕权限，也不会伪装正在共享。",
-            Locale::English => {
-                "The app does not request capture permission or present a false sharing state."
+        match self.snapshot.media.phase {
+            MediaPhase::Idle | MediaPhase::Failed => {
+                let enabled = self.snapshot.local_id.is_some();
+                if ui
+                    .add_enabled(
+                        enabled,
+                        egui::Button::new(match self.locale {
+                            Locale::Chinese => "共享屏幕",
+                            Locale::English => "Share screen",
+                        }),
+                    )
+                    .clicked()
+                {
+                    self.send(RuntimeCommand::ShareScreen);
+                }
             }
-        });
+            MediaPhase::Sharing => {
+                if ui
+                    .button(match self.locale {
+                        Locale::Chinese => "停止共享",
+                        Locale::English => "Stop sharing",
+                    })
+                    .clicked()
+                {
+                    self.send(RuntimeCommand::StopSharing);
+                }
+            }
+            MediaPhase::Preparing | MediaPhase::Stopping => {
+                ui.add_enabled(false, egui::Button::new(status));
+            }
+        }
+        ui.add_space(12.0);
+        egui::Grid::new("screen-share-stats")
+            .num_columns(2)
+            .spacing([18.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Broadcast");
+                ui.monospace(
+                    self.snapshot
+                        .media
+                        .path
+                        .as_deref()
+                        .unwrap_or("not announced"),
+                );
+                ui.end_row();
+                ui.label("Codec");
+                ui.monospace("H.264");
+                ui.end_row();
+                ui.label("Encoder");
+                ui.monospace("Media Foundation preferred, OpenH264 fallback");
+                ui.end_row();
+                ui.label("Output");
+                let output = self
+                    .snapshot
+                    .media
+                    .width
+                    .zip(self.snapshot.media.height)
+                    .map_or_else(
+                        || format!("max edge {MAX_SCREEN_EDGE}px"),
+                        |(width, height)| format!("{width}x{height} @ 30 fps"),
+                    );
+                ui.monospace(output);
+                ui.end_row();
+            });
+        if let Some(error) = self.snapshot.media.last_error {
+            ui.add_space(8.0);
+            ui.colored_label(Color32::LIGHT_RED, error);
+        }
     }
 
     fn settings(&mut self, ui: &mut egui::Ui) {
@@ -269,6 +319,9 @@ impl MoqCastApp {
                 ui.end_row();
                 ui.label("Inbound sessions");
                 ui.monospace(self.snapshot.inbound_sessions.to_string());
+                ui.end_row();
+                ui.label("Screen media");
+                ui.monospace(format!("{:?}", self.snapshot.media.phase));
                 ui.end_row();
             });
         if let Some(error) = self.snapshot.last_error {

@@ -65,17 +65,23 @@ pub(crate) fn bind(bind: SocketAddr) -> Result<BoundServer, StartError> {
 pub(crate) async fn accept(
     request: moq_native::Request,
     credential: &str,
+    origin: moq_native::moq_net::origin::Producer,
 ) -> Result<moq_native::moq_net::Session, AcceptError> {
     if !authorized(request.path(), credential) {
         request.close(403).await?;
         return Err(AcceptError::Unauthorized);
     }
-    Ok(request.ok().await?)
+    Ok(request
+        .with_publisher(&origin)
+        .with_subscriber(origin)
+        .ok()
+        .await?)
 }
 
 pub(super) async fn run_listener(
     mut listener: moq_native::Listener,
     credential: String,
+    origin: moq_native::moq_net::origin::Producer,
     events: mpsc::Sender<RuntimeEvent>,
 ) {
     let mut inbound_id = 0_u64;
@@ -85,8 +91,9 @@ pub(super) async fn run_listener(
         let id = inbound_id;
         let events = events.clone();
         let credential = credential.clone();
+        let origin = origin.clone();
         sessions.spawn(async move {
-            match accept(request, &credential).await {
+            match accept(request, &credential, origin).await {
                 Ok(session) => {
                     let _ = events
                         .send(RuntimeEvent::Inbound {

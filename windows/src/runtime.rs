@@ -13,6 +13,7 @@ use tokio::sync::{mpsc, watch};
 use url::Url;
 
 use crate::{
+    media::{MediaSnapshot, Publication},
     registry::{PeerRegistry, PeerSummary, RegistryChange, sanitize_identity},
     session::{
         SessionFoundation, SessionSubject, TransportDirection, TransportPhase, TransportUpdate,
@@ -20,6 +21,7 @@ use crate::{
 };
 
 const COMMAND_CAPACITY: usize = 32;
+const MEDIA_EVENT_CAPACITY: usize = 4;
 
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeConfig {
@@ -36,12 +38,6 @@ pub(crate) enum DiscoveryState {
     Empty,
     Failed,
     Stopped,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum MediaState {
-    #[default]
-    Unavailable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,7 +78,7 @@ pub(crate) struct PeerView {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RuntimeSnapshot {
     pub(crate) discovery: DiscoveryState,
-    pub(crate) media: MediaState,
+    pub(crate) media: MediaSnapshot,
     pub(crate) peers: BTreeMap<String, PeerView>,
     pub(crate) inbound_sessions: usize,
     pub(crate) listener: Option<String>,
@@ -96,7 +92,7 @@ impl Default for RuntimeSnapshot {
     fn default() -> Self {
         Self {
             discovery: DiscoveryState::Starting,
-            media: MediaState::Unavailable,
+            media: MediaSnapshot::default(),
             peers: BTreeMap::new(),
             inbound_sessions: 0,
             listener: None,
@@ -148,7 +144,7 @@ impl RuntimeSnapshot {
             });
     }
 
-    fn can_connect(&self, peer: &str) -> bool {
+    fn should_auto_connect(&self, peer: &str) -> bool {
         self.peers.get(peer).is_some_and(|peer| {
             peer.present
                 && peer.should_dial
@@ -161,17 +157,8 @@ impl RuntimeSnapshot {
         })
     }
 
-    fn can_disconnect(&self, peer: &str) -> bool {
-        self.peers.get(peer).is_some_and(|peer| {
-            matches!(
-                peer.transport.phase,
-                TransportPhaseView::Connecting | TransportPhaseView::Connected
-            )
-        })
-    }
-
-    fn begin_connect(&mut self, peer: &str) -> Option<u64> {
-        if !self.can_connect(peer) {
+    fn begin_auto_connect(&mut self, peer: &str) -> Option<u64> {
+        if !self.should_auto_connect(peer) {
             return None;
         }
         let current = self.peers.get_mut(peer)?;
@@ -182,16 +169,6 @@ impl RuntimeSnapshot {
             phase: TransportPhaseView::Connecting,
         };
         Some(generation)
-    }
-
-    fn begin_disconnect(&mut self, peer: &str) -> bool {
-        if !self.can_disconnect(peer) {
-            return false;
-        }
-        let current = self.peers.get_mut(peer).expect("checked peer");
-        current.transport.generation = current.transport.generation.saturating_add(1);
-        current.transport.phase = TransportPhaseView::Disconnected;
-        true
     }
 
     fn apply_transport(&mut self, peer: &str, update: TransportView) {
@@ -212,9 +189,55 @@ impl RuntimeSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RuntimeCommand {
-    Connect(String),
-    Disconnect(String),
+    ShareScreen,
+    StopSharing,
     Shutdown,
+}
+
+enum MediaEvent {
+    Ended { generation: u64, failed: bool },
+}
+
+#[derive(Default)]
+struct PublicationOwner {
+    generation: u64,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl PublicationOwner {
+    fn start(
+        &mut self,
+        generation: u64,
+        publication: crate::media::ReadyPublication,
+        events: mpsc::Sender<MediaEvent>,
+    ) {
+        self.generation = generation;
+        self.task = Some(tokio::spawn(async move {
+            let result = publication.run().await;
+            if let Err(error) = &result {
+                tracing::warn!(stage = "publish", %error, "screen publication ended");
+            }
+            let _ = events
+                .send(MediaEvent::Ended {
+                    generation,
+                    failed: result.is_err(),
+                })
+                .await;
+        }));
+    }
+
+    fn finished(&mut self, generation: u64) {
+        if self.generation == generation {
+            self.task = None;
+        }
+    }
+
+    async fn stop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -311,13 +334,22 @@ async fn run(
         return;
     };
     let mut raw_peers = BTreeMap::<String, mdns::Peer>::new();
+    let (media_events, mut media_recv) = mpsc::channel(MEDIA_EVENT_CAPACITY);
+    let mut publication = PublicationOwner::default();
     let _ = snapshots.send(snapshot.clone());
 
     loop {
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else { break };
-                if handle_command(command, &mut snapshot, &raw_peers, &mut sessions).await {
+                if handle_command(
+                    command,
+                    &mut snapshot,
+                    &raw_peers,
+                    &mut sessions,
+                    &mut publication,
+                    &media_events,
+                ).await {
                     let _ = snapshots.send(snapshot.clone());
                     break;
                 }
@@ -336,16 +368,18 @@ async fn run(
                         let raw_id = peer.id.clone();
                         let key = sanitize_identity(&raw_id);
                         let change = registry.found(&peer, should_dial);
-                        raw_peers.insert(key, peer);
+                        raw_peers.insert(key.clone(), peer);
                         snapshot.apply_registry(change);
+                        if should_dial {
+                            auto_connect(&key, &mut snapshot, &raw_peers, &mut sessions).await;
+                        } else if let Some(update) = sessions.disconnect(&raw_id).await {
+                            apply_session_update(&mut snapshot, update);
+                        }
                     }
                     mdns::Event::Lost(raw_id) => {
                         let key = sanitize_identity(&raw_id);
                         raw_peers.remove(&key);
                         snapshot.apply_registry(registry.lost(&raw_id));
-                        if let Some(update) = sessions.disconnect(&raw_id).await {
-                            apply_session_update(&mut snapshot, update);
-                        }
                     }
                     _ => {}
                 }
@@ -360,9 +394,18 @@ async fn run(
                 apply_session_update(&mut snapshot, update);
                 let _ = snapshots.send(snapshot.clone());
             }
+            event = media_recv.recv() => {
+                let Some(MediaEvent::Ended { generation, failed }) = event else {
+                    continue;
+                };
+                publication.finished(generation);
+                snapshot.media.ended(generation, failed);
+                let _ = snapshots.send(snapshot.clone());
+            }
         }
     }
 
+    publication.stop().await;
     snapshot.shutdown();
     let _ = snapshots.send(snapshot);
     sessions.shutdown().await;
@@ -414,43 +457,92 @@ fn fail<T>(snapshot: &mut RuntimeSnapshot, message: &'static str) -> Option<T> {
 async fn handle_command(
     command: RuntimeCommand,
     snapshot: &mut RuntimeSnapshot,
-    peers: &BTreeMap<String, mdns::Peer>,
+    _peers: &BTreeMap<String, mdns::Peer>,
     sessions: &mut SessionFoundation,
+    publication: &mut PublicationOwner,
+    media_events: &mpsc::Sender<MediaEvent>,
 ) -> bool {
     match command {
-        RuntimeCommand::Connect(key) => {
-            let Some(generation) = snapshot.begin_connect(&key) else {
-                return false;
-            };
-            let Some(peer) = peers.get(&key) else {
-                return false;
-            };
-            match sessions.connect(peer).await {
-                Ok(update) => apply_session_update(snapshot, update),
-                Err(_) => snapshot.apply_transport(
-                    &key,
-                    TransportView {
-                        generation,
-                        direction: Some(TransportDirectionView::Outbound),
-                        phase: TransportPhaseView::Failed,
-                    },
-                ),
-            }
+        RuntimeCommand::ShareScreen => {
+            start_publication(snapshot, sessions, publication, media_events).await;
+            false
         }
-        RuntimeCommand::Disconnect(key) => {
-            if snapshot.begin_disconnect(&key)
-                && let Some(peer) = peers.get(&key)
-                && let Some(update) = sessions.disconnect(&peer.id).await
-            {
-                apply_session_update(snapshot, update);
-            }
+        RuntimeCommand::StopSharing => {
+            let Some(generation) = snapshot.media.begin_stop() else {
+                return false;
+            };
+            publication.stop().await;
+            snapshot.media.stopped(generation);
+            false
         }
         RuntimeCommand::Shutdown => {
+            if let Some(generation) = snapshot.media.begin_stop() {
+                publication.stop().await;
+                snapshot.media.stopped(generation);
+            }
             snapshot.shutdown();
-            return true;
+            true
         }
     }
-    false
+}
+
+async fn start_publication(
+    snapshot: &mut RuntimeSnapshot,
+    sessions: &SessionFoundation,
+    publication: &mut PublicationOwner,
+    media_events: &mpsc::Sender<MediaEvent>,
+) {
+    let Some(local_id) = snapshot.local_id.clone() else {
+        snapshot.last_error = Some("LAN services must be ready before sharing.");
+        return;
+    };
+    let Some(generation) = snapshot.media.begin(&local_id) else {
+        return;
+    };
+    let prepared = match Publication::prepare(sessions.origin(), &local_id) {
+        Ok(prepared) => prepared,
+        Err(_) => {
+            snapshot.media.ended(generation, true);
+            return;
+        }
+    };
+    let ready = match prepared.configure().await {
+        Ok(ready) => ready,
+        Err(error) => {
+            tracing::warn!(stage = "capture", %error, "screen capture preparation failed");
+            snapshot.media.ended(generation, true);
+            return;
+        }
+    };
+    let info = ready.info();
+    if snapshot.media.started(generation, info) {
+        publication.start(generation, ready, media_events.clone());
+    }
+}
+
+async fn auto_connect(
+    key: &str,
+    snapshot: &mut RuntimeSnapshot,
+    peers: &BTreeMap<String, mdns::Peer>,
+    sessions: &mut SessionFoundation,
+) {
+    let Some(generation) = snapshot.begin_auto_connect(key) else {
+        return;
+    };
+    let Some(peer) = peers.get(key) else {
+        return;
+    };
+    match sessions.connect(peer).await {
+        Ok(update) => apply_session_update(snapshot, update),
+        Err(_) => snapshot.apply_transport(
+            key,
+            TransportView {
+                generation,
+                direction: Some(TransportDirectionView::Outbound),
+                phase: TransportPhaseView::Failed,
+            },
+        ),
+    }
 }
 
 fn apply_session_update(snapshot: &mut RuntimeSnapshot, update: TransportUpdate) {
@@ -511,8 +603,8 @@ mod tests {
         let mut snapshot = RuntimeSnapshot::default();
         snapshot.apply_registry(RegistryChange::Added(peer("peer", "moqt://one:4443")));
         assert_eq!(snapshot.discovery, DiscoveryState::Ready);
-        assert!(snapshot.can_connect("peer"));
-        snapshot.begin_connect("peer");
+        assert!(snapshot.should_auto_connect("peer"));
+        snapshot.begin_auto_connect("peer");
         snapshot.apply_registry(RegistryChange::Updated(peer("peer", "moqt://two:4443")));
         assert_eq!(snapshot.peers["peer"].candidates, vec!["moqt://two:4443"]);
         assert_eq!(
@@ -524,19 +616,28 @@ mod tests {
         });
         assert!(!snapshot.peers["peer"].present);
         assert_eq!(snapshot.discovery, DiscoveryState::Empty);
+        assert_eq!(
+            snapshot.peers["peer"].transport.phase,
+            TransportPhaseView::Connecting
+        );
     }
 
     #[test]
-    fn command_gate_separates_connect_and_disconnect() {
+    fn deterministic_role_gates_automatic_connect() {
         let mut snapshot = RuntimeSnapshot::default();
         snapshot.apply_registry(RegistryChange::Added(peer("peer", "moqt://one:4443")));
-        assert!(snapshot.can_connect("peer"));
-        assert!(!snapshot.can_disconnect("peer"));
-        snapshot.begin_connect("peer");
-        assert!(!snapshot.can_connect("peer"));
-        assert!(snapshot.can_disconnect("peer"));
-        assert!(snapshot.begin_disconnect("peer"));
-        assert!(snapshot.can_connect("peer"));
+        assert!(snapshot.should_auto_connect("peer"));
+        snapshot.begin_auto_connect("peer");
+        assert!(!snapshot.should_auto_connect("peer"));
+        snapshot.apply_transport(
+            "peer",
+            TransportView {
+                generation: 1,
+                direction: Some(TransportDirectionView::Outbound),
+                phase: TransportPhaseView::Connected,
+            },
+        );
+        assert!(!snapshot.should_auto_connect("peer"));
     }
 
     #[test]
@@ -545,16 +646,25 @@ mod tests {
         let mut inbound = peer("peer", "moqt://one:4443");
         inbound.should_dial = false;
         snapshot.apply_registry(RegistryChange::Added(inbound));
-        assert!(!snapshot.can_connect("peer"));
+        assert!(!snapshot.should_auto_connect("peer"));
     }
 
     #[test]
     fn old_generation_cannot_override_new_state() {
         let mut snapshot = RuntimeSnapshot::default();
         snapshot.apply_registry(RegistryChange::Added(peer("peer", "moqt://one:4443")));
-        let first = snapshot.begin_connect("peer").expect("first generation");
-        snapshot.begin_disconnect("peer");
-        snapshot.begin_connect("peer");
+        let first = snapshot
+            .begin_auto_connect("peer")
+            .expect("first generation");
+        snapshot.apply_transport(
+            "peer",
+            TransportView {
+                generation: first,
+                direction: Some(TransportDirectionView::Outbound),
+                phase: TransportPhaseView::Disconnected,
+            },
+        );
+        snapshot.begin_auto_connect("peer");
         snapshot.apply_transport(
             "peer",
             TransportView {
@@ -575,7 +685,38 @@ mod tests {
         snapshot.shutdown();
         assert!(snapshot.stopping);
         assert_eq!(snapshot.discovery, DiscoveryState::Stopped);
-        assert_eq!(snapshot.media, MediaState::Unavailable);
+        assert_eq!(snapshot.media.phase, crate::media::MediaPhase::Idle);
+    }
+
+    #[test]
+    fn stopping_media_does_not_change_transport_state() {
+        let mut snapshot = RuntimeSnapshot::default();
+        snapshot.apply_registry(RegistryChange::Added(peer("peer", "moqt://one:4443")));
+        let generation = snapshot.begin_auto_connect("peer").expect("connect");
+        snapshot.apply_transport(
+            "peer",
+            TransportView {
+                generation,
+                direction: Some(TransportDirectionView::Outbound),
+                phase: TransportPhaseView::Connected,
+            },
+        );
+        let media_generation = snapshot.media.begin("local").expect("share");
+        snapshot.media.started(
+            media_generation,
+            crate::media::PublicationInfo {
+                width: 1920,
+                height: 1080,
+            },
+        );
+        snapshot.media.begin_stop();
+        snapshot.media.stopped(media_generation);
+
+        assert_eq!(snapshot.media.phase, crate::media::MediaPhase::Idle);
+        assert_eq!(
+            snapshot.peers["peer"].transport.phase,
+            TransportPhaseView::Connected
+        );
     }
 
     #[test]

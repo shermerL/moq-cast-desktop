@@ -1,8 +1,10 @@
 //! Native Windows desktop entry point for MoQCast.
 
 mod app;
+mod media;
 mod registry;
 mod runtime;
+mod screen_path;
 mod session;
 
 use std::{net::SocketAddr, path::PathBuf};

@@ -50,6 +50,7 @@ struct Outbound {
 
 pub(crate) struct SessionFoundation {
     advertisement: Advertisement,
+    origin: moq_native::moq_net::origin::Producer,
     events: mpsc::Sender<RuntimeEvent>,
     recv: mpsc::Receiver<RuntimeEvent>,
     listener_task: Option<JoinHandle<()>>,
@@ -64,6 +65,10 @@ impl SessionFoundation {
 
     pub(crate) fn advertisement(&self) -> &Advertisement {
         &self.advertisement
+    }
+
+    pub(crate) fn origin(&self) -> &moq_native::moq_net::origin::Producer {
+        &self.origin
     }
 
     pub(crate) async fn connect(
@@ -81,7 +86,7 @@ impl SessionFoundation {
     ) -> Result<TransportUpdate, DialError> {
         self.stop_outbound(peer_id).await;
         let state = self.states.begin(peer_id);
-        let connection = match peer::dial(record) {
+        let connection = match peer::dial(record, self.origin.clone()) {
             Ok(connection) => connection,
             Err(error) => {
                 self.states
@@ -198,11 +203,17 @@ impl BoundServer {
     pub(crate) async fn start(self, credential: String) -> Result<SessionFoundation, StartError> {
         let advertisement = self.advertisement().clone();
         let listener = self.listen().await?;
+        let origin = moq_native::moq_net::Origin::random().produce();
         let (events, recv) = mpsc::channel(EVENT_CAPACITY);
-        let listener_task =
-            tokio::spawn(server::run_listener(listener, credential, events.clone()));
+        let listener_task = tokio::spawn(server::run_listener(
+            listener,
+            credential,
+            origin.clone(),
+            events.clone(),
+        ));
         Ok(SessionFoundation {
             advertisement,
+            origin,
             events,
             recv,
             listener_task: Some(listener_task),
