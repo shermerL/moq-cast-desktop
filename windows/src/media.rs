@@ -154,7 +154,7 @@ impl ReadyPublication {
             encode.codec = moq_video::encode::Codec::H264;
             encode.kind = moq_video::encode::Kind::Auto;
 
-            return moq_video::encode::publish_capture(
+            moq_video::encode::publish_capture(
                 self.publication.broadcast.clone(),
                 self.publication.catalog.clone(),
                 capture,
@@ -162,7 +162,7 @@ impl ReadyPublication {
                 moq_mux::Clock::new(),
             )
             .await
-            .map_err(Into::into);
+            .map_err(Into::into)
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -181,7 +181,7 @@ impl Publication {
             let mut broadcast = origin
                 .create_broadcast(path, moq_net::broadcast::Route::new().with_announce(true))?;
             let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
-            return Ok(Self { broadcast, catalog });
+            Ok(Self { broadcast, catalog })
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -204,11 +204,11 @@ impl Publication {
                 height: display.height,
             }
             .validate()?;
-            return Ok(ReadyPublication {
+            Ok(ReadyPublication {
                 publication: self,
                 source: display.source(),
                 info,
-            });
+            })
         }
 
         #[cfg(not(target_os = "windows"))]
