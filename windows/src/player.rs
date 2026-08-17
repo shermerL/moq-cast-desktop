@@ -2,7 +2,7 @@
 
 use eframe::egui::{self, Color32, Frame, Margin, Rect, RichText, Sense, Stroke, ViewportCommand};
 
-use crate::playback::{ViewPhase, ViewSnapshot};
+use crate::playback::{ViewAudioPhase, ViewPhase, ViewSnapshot};
 
 const FALLBACK_SOURCE: egui::Vec2 = egui::vec2(16.0, 9.0);
 const CONTROL_HEIGHT: f32 = 78.0;
@@ -121,6 +121,20 @@ impl LivePlayer {
                                         .color(Color32::from_gray(205)),
                                 )
                                 .truncate(),
+                            );
+                            ui.label(
+                                RichText::new(match view.audio.phase {
+                                    ViewAudioPhase::Idle => "NO AUDIO",
+                                    ViewAudioPhase::Pending => "AUDIO...",
+                                    ViewAudioPhase::NotPublished => "NO AUDIO",
+                                    ViewAudioPhase::Playing => "AUDIO",
+                                    ViewAudioPhase::Failed => "AUDIO ERROR",
+                                })
+                                .small()
+                                .color(match view.audio.phase {
+                                    ViewAudioPhase::Failed => Color32::from_rgb(255, 174, 174),
+                                    _ => Color32::from_gray(205),
+                                }),
                             );
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),

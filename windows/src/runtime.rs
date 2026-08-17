@@ -536,6 +536,13 @@ async fn run(
                             .view
                             .decoder_ready(generation, &path, decoder, width, height);
                     }
+                    ViewEvent::AudioChanged {
+                        generation,
+                        path,
+                        audio,
+                    } => {
+                        snapshot.view.audio_changed(generation, &path, audio);
+                    }
                     ViewEvent::Ended { generation, result } => {
                         view.finished(generation);
                         playback.send_replace(None);

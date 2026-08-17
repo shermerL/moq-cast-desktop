@@ -6,6 +6,8 @@
 
 Windows 屏幕发布使用 Desktop Duplication 与 H.264，优先 Media Foundation 硬件编码并保留 OpenH264 回退。系统音频只采集默认 render endpoint 的 WASAPI loopback，不申请或采集麦克风；PCM 被规范化为 48 kHz stereo Opus，并与视频共享 publication Clock。音频采集或编码失败只更新独立音频状态，不结束视频发布。首版安全支持 mono/stereo mix format，多声道输出设备会明确标为不支持而不会按未知 channel mask 静默下混。
 
+远端播放会从 Hang catalog 选择同一 broadcast 中受支持的 Opus 或 PCM rendition，复用 pinned `moq-audio` 的 decoder 与 CPAL/WASAPI 默认输出设备。音频订阅和设备生命周期运行在独立任务中，因此设备打开、track 结束或输出失败不会阻塞视频首帧，也不会结束视频播放。当前只提供 bounded jitter/resample 播放，不宣称已经完成严格的音画时钟同步。
+
 Desktop Duplication 尚未合成硬件 overlay 鼠标指针。根因与修复边界位于上游 `moq-video::capture::desktopduplication`，桌面端不维护第二套 capture workaround；上游完成 cursor shape 缓存与合成后再更新 pinned revision。
 
 ## 启动桌面端
@@ -35,4 +37,4 @@ cargo test --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-macOS 上的纯逻辑测试不会编译或运行 WASAPI、Desktop Duplication、Media Foundation/D3D11/DXVA。Windows CI 只能证明 Windows runner 上能够编译和运行自动测试。真实 Found/Updated/Lost、多网卡、IPv4/IPv6、TLS/QUIC、防火墙、GPU codec、WASAPI 设备切换与 shutdown 行为仍需 Windows 真机和 Android/Linux peer 联调。
+macOS 上的纯逻辑测试不会编译或运行 WASAPI、Desktop Duplication、Media Foundation/D3D11/DXVA 或 Windows 音频输出。Windows CI 只能证明 Windows runner 上能够编译和运行自动测试。真实 Found/Updated/Lost、多网卡、IPv4/IPv6、TLS/QUIC、防火墙、GPU codec、系统音频采集、默认输出设备、设备切换、音画表现与 shutdown 行为仍需 Windows 真机和 Android/Linux peer 联调。

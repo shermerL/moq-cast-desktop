@@ -1,5 +1,8 @@
 //! Remote screen playback lifecycle and decoded-frame delivery.
 
+#[cfg(target_os = "windows")]
+mod audio;
+
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
@@ -14,6 +17,26 @@ pub(crate) enum ViewPhase {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) enum ViewAudioPhase {
+    #[default]
+    Idle,
+    Pending,
+    NotPublished,
+    Playing,
+    Failed,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ViewAudioSnapshot {
+    pub(crate) phase: ViewAudioPhase,
+    pub(crate) codec: Option<String>,
+    pub(crate) sample_rate: Option<u32>,
+    pub(crate) channels: Option<u32>,
+    pub(crate) last_error: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ViewSnapshot {
     pub(crate) generation: u64,
@@ -22,6 +45,7 @@ pub(crate) struct ViewSnapshot {
     pub(crate) decoder: Option<String>,
     pub(crate) width: Option<u32>,
     pub(crate) height: Option<u32>,
+    pub(crate) audio: ViewAudioSnapshot,
     pub(crate) last_error: Option<String>,
 }
 
@@ -39,6 +63,10 @@ impl ViewSnapshot {
         self.decoder = None;
         self.width = None;
         self.height = None;
+        self.audio = ViewAudioSnapshot {
+            phase: ViewAudioPhase::Pending,
+            ..ViewAudioSnapshot::default()
+        };
         self.last_error = None;
         Some(self.generation)
     }
@@ -61,6 +89,22 @@ impl ViewSnapshot {
         self.decoder = Some(decoder);
         self.width = Some(width);
         self.height = Some(height);
+        true
+    }
+
+    pub(crate) fn audio_changed(
+        &mut self,
+        generation: u64,
+        path: &str,
+        audio: ViewAudioSnapshot,
+    ) -> bool {
+        if generation != self.generation
+            || self.path.as_deref() != Some(path)
+            || !matches!(self.phase, ViewPhase::Preparing | ViewPhase::Viewing)
+        {
+            return false;
+        }
+        self.audio = audio;
         true
     }
 
@@ -99,6 +143,7 @@ impl ViewSnapshot {
         self.decoder = None;
         self.width = None;
         self.height = None;
+        self.audio = ViewAudioSnapshot::default();
         self.last_error = error;
     }
 }
@@ -130,6 +175,11 @@ pub(crate) enum ViewEvent {
         width: u32,
         height: u32,
     },
+    AudioChanged {
+        generation: u64,
+        path: String,
+        audio: ViewAudioSnapshot,
+    },
     Ended {
         generation: u64,
         result: Result<(), String>,
@@ -144,11 +194,13 @@ struct Selection {
     display: Option<(u32, u32)>,
     quarter_turns: u8,
     flip: bool,
+    audio: audio::Selection,
 }
 
 #[cfg(target_os = "windows")]
 impl Selection {
     fn from_catalog(catalog: moq_mux::catalog::hang::Catalog) -> anyhow::Result<Self> {
+        let audio = audio::Selection::from_catalog(catalog.audio);
         let (name, config) = catalog
             .video
             .renditions
@@ -171,6 +223,7 @@ impl Selection {
             display,
             quarter_turns,
             flip: catalog.video.flip.unwrap_or(false),
+            audio,
         })
     }
 
@@ -211,6 +264,8 @@ pub(crate) async fn run(
             .ok_or_else(|| anyhow::anyhow!("remote screen catalog ended"))?;
         let mut selection = Selection::from_catalog(first)?;
         let mut decoder = selection.decoder(&broadcast).await?;
+        let mut audio_task =
+            audio::Task::spawn(generation, &path, &broadcast, &selection.audio, &events);
         let mut decoder_generation = 1_u64;
         let mut sequence = 0_u64;
         let mut decoder_ready = false;
@@ -224,6 +279,27 @@ pub(crate) async fn run(
                     };
                     let next = Selection::from_catalog(update)?;
                     if next == selection {
+                        continue;
+                    }
+                    let video_changed = next.name != selection.name
+                        || next.config != selection.config
+                        || next.display != selection.display
+                        || next.quarter_turns != selection.quarter_turns
+                        || next.flip != selection.flip;
+                    if next.audio != selection.audio {
+                        drop(std::mem::replace(
+                            &mut audio_task,
+                            audio::Task::spawn(
+                                generation,
+                                &path,
+                                &broadcast,
+                                &next.audio,
+                                &events,
+                            ),
+                        ));
+                    }
+                    if !video_changed {
+                        selection = next;
                         continue;
                     }
                     let next_decoder = next.decoder(&broadcast).await?;
@@ -264,8 +340,8 @@ pub(crate) async fn run(
                                 height,
                             })
                             .await;
+                        }
                     }
-                }
             }
         }
     }
@@ -444,6 +520,41 @@ mod tests {
         assert!(view.stopped(current));
         assert!(!view.ended(current, Err("late".to_owned())));
         assert_eq!(view.phase, ViewPhase::Idle);
+        assert_eq!(view.audio.phase, ViewAudioPhase::Idle);
+    }
+
+    #[test]
+    fn audio_state_is_generation_scoped_and_does_not_end_video() {
+        let mut view = ViewSnapshot::default();
+        let generation = view.begin("moqcast.screen/peer-a").expect("begin");
+        assert!(view.decoder_ready(
+            generation,
+            "moqcast.screen/peer-a",
+            "mediafoundation".to_owned(),
+            1920,
+            1080,
+        ));
+        assert!(!view.audio_changed(
+            generation + 1,
+            "moqcast.screen/peer-a",
+            ViewAudioSnapshot {
+                phase: ViewAudioPhase::Failed,
+                ..ViewAudioSnapshot::default()
+            },
+        ));
+        assert!(view.audio_changed(
+            generation,
+            "moqcast.screen/peer-a",
+            ViewAudioSnapshot {
+                phase: ViewAudioPhase::Playing,
+                codec: Some("opus".to_owned()),
+                sample_rate: Some(48_000),
+                channels: Some(2),
+                last_error: None,
+            },
+        ));
+        assert_eq!(view.phase, ViewPhase::Viewing);
+        assert_eq!(view.audio.phase, ViewAudioPhase::Playing);
     }
 
     #[test]

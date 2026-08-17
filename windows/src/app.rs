@@ -5,7 +5,7 @@ use eframe::egui::{self, Align, Color32, Frame, Layout, RichText, Stroke};
 use crate::{
     audio::AudioPhase,
     media::{MAX_SCREEN_EDGE, MediaPhase},
-    playback::{PlaybackFrameIdentity, ViewPhase},
+    playback::{PlaybackFrameIdentity, ViewAudioPhase, ViewPhase},
     player::{LivePlayer, PlayerAction},
     remote::ScreenAvailability,
     runtime::{
@@ -440,7 +440,26 @@ impl MoqCastApp {
                         .unwrap_or("not active"),
                 );
                 ui.end_row();
+                ui.label("Playback audio");
+                let audio = match self.snapshot.view.audio.phase {
+                    ViewAudioPhase::Idle => "not active".to_owned(),
+                    ViewAudioPhase::Pending => "pending".to_owned(),
+                    ViewAudioPhase::NotPublished => "not published".to_owned(),
+                    ViewAudioPhase::Playing => {
+                        let codec = self.snapshot.view.audio.codec.as_deref().unwrap_or("audio");
+                        let sample_rate = self.snapshot.view.audio.sample_rate.unwrap_or_default();
+                        let channels = self.snapshot.view.audio.channels.unwrap_or_default();
+                        format!("{codec} · {sample_rate} Hz · {channels} ch")
+                    }
+                    ViewAudioPhase::Failed => "unavailable (video continues)".to_owned(),
+                };
+                ui.monospace(audio);
+                ui.end_row();
             });
+        if let Some(error) = &self.snapshot.view.audio.last_error {
+            ui.add_space(10.0);
+            ui.colored_label(Color32::ORANGE, error);
+        }
         if let Some(error) = self.snapshot.last_error {
             ui.add_space(10.0);
             ui.colored_label(Color32::LIGHT_RED, error);
