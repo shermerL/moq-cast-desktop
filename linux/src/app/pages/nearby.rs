@@ -7,7 +7,7 @@ use eframe::egui::{self, RichText};
 use super::super::components::{
     self, BadgeTone, primary_button, secondary_button, status_badge, status_line,
 };
-use super::super::theme::{MUTED, TEXT};
+use super::super::theme::{BRAND_DARK, BRAND_SOFT, MUTED, TEXT};
 use super::super::{
     AppSnapshot, DeviceWorkspaceLayout, DialRole, DiscoveryState, Locale, MediaState,
     PeerDiscoveryState, PeerSnapshot, ScreenAvailability, TransportState, UserCommand,
@@ -161,23 +161,29 @@ fn show_device_list(
             let selectable = peer_can_be_selected(peer);
             let selected = selected_peer.as_deref() == Some(peer_id.as_str());
             let summary = peer_row_summary(locale, peer);
-            let response = ui.add_enabled(
-                selectable,
-                egui::Button::new(
-                    RichText::new(format!("{}\n{summary}", peer.name))
-                        .size(13.0)
-                        .color(if selected {
-                            egui::Color32::WHITE
-                        } else if selectable {
-                            TEXT
-                        } else {
-                            MUTED
-                        }),
-                )
-                .selected(selected)
-                .wrap()
-                .min_size(egui::vec2(ui.available_width(), 56.0)),
-            );
+            let response = ui
+                .scope(|ui| {
+                    ui.visuals_mut().selection.bg_fill = BRAND_SOFT;
+                    ui.visuals_mut().selection.stroke = egui::Stroke::new(1.0, BRAND_DARK);
+                    ui.add_enabled(
+                        selectable,
+                        egui::Button::new(
+                            RichText::new(format!("{}\n{summary}", peer.name))
+                                .size(13.0)
+                                .color(if selected {
+                                    BRAND_DARK
+                                } else if selectable {
+                                    TEXT
+                                } else {
+                                    MUTED
+                                }),
+                        )
+                        .selected(selected)
+                        .wrap()
+                        .min_size(egui::vec2(ui.available_width(), 56.0)),
+                    )
+                })
+                .inner;
             if response.clicked() {
                 *selected_peer = Some(peer_id.clone());
             }
