@@ -1,6 +1,7 @@
 //! Native Windows desktop entry point for MoQCast.
 
 mod app;
+mod audio;
 mod media;
 mod playback;
 mod player;

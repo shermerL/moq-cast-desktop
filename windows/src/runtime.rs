@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, watch};
 use url::Url;
 
 use crate::{
+    audio::StatusUpdate as AudioStatusUpdate,
     media::{MediaSnapshot, Publication},
     playback::{PlaybackFrame, ViewEvent, ViewPhase, ViewSnapshot},
     registry::{PeerRegistry, PeerSummary, RegistryChange, sanitize_identity},
@@ -290,10 +291,11 @@ impl PublicationOwner {
         generation: u64,
         publication: crate::media::ReadyPublication,
         events: mpsc::Sender<MediaEvent>,
+        audio_updates: watch::Sender<Option<AudioStatusUpdate>>,
     ) {
         self.generation = generation;
         self.task = Some(tokio::spawn(async move {
-            let result = publication.run().await;
+            let result = publication.run(generation, audio_updates).await;
             if let Err(error) = &result {
                 tracing::warn!(stage = "publish", %error, "screen publication ended");
             }
@@ -425,6 +427,7 @@ async fn run(
     };
     let mut raw_peers = BTreeMap::<String, mdns::Peer>::new();
     let (media_events, mut media_recv) = mpsc::channel(MEDIA_EVENT_CAPACITY);
+    let (audio_updates, mut audio_recv) = watch::channel(None::<AudioStatusUpdate>);
     let mut remote = RemoteDirectory::start(
         sessions.origin().clone(),
         snapshot
@@ -452,6 +455,7 @@ async fn run(
                         view_events: &view_events,
                         playback: &playback,
                         remote: &remote,
+                        audio_updates: &audio_updates,
                     },
                 ).await {
                     let _ = snapshots.send(snapshot.clone());
@@ -540,6 +544,17 @@ async fn run(
                 }
                 let _ = snapshots.send(snapshot.clone());
             }
+            changed = audio_recv.changed() => {
+                if changed.is_err() {
+                    continue;
+                }
+                let Some(update) = *audio_recv.borrow_and_update() else {
+                    continue;
+                };
+                if snapshot.media.audio.apply(update) {
+                    let _ = snapshots.send(snapshot.clone());
+                }
+            }
         }
     }
 
@@ -604,6 +619,7 @@ struct CommandContext<'a> {
     view_events: &'a mpsc::Sender<ViewEvent>,
     playback: &'a watch::Sender<Option<Arc<PlaybackFrame>>>,
     remote: &'a RemoteDirectory,
+    audio_updates: &'a watch::Sender<Option<AudioStatusUpdate>>,
 }
 
 async fn handle_command(command: RuntimeCommand, context: CommandContext<'_>) -> bool {
@@ -616,10 +632,11 @@ async fn handle_command(command: RuntimeCommand, context: CommandContext<'_>) ->
         view_events,
         playback,
         remote,
+        audio_updates,
     } = context;
     match command {
         RuntimeCommand::ShareScreen => {
-            start_publication(snapshot, sessions, publication, media_events).await;
+            start_publication(snapshot, sessions, publication, media_events, audio_updates).await;
             false
         }
         RuntimeCommand::StopSharing => {
@@ -664,6 +681,7 @@ async fn start_publication(
     sessions: &SessionFoundation,
     publication: &mut PublicationOwner,
     media_events: &mpsc::Sender<MediaEvent>,
+    audio_updates: &watch::Sender<Option<AudioStatusUpdate>>,
 ) {
     if !matches!(snapshot.view.phase, ViewPhase::Idle | ViewPhase::Failed) {
         snapshot.last_error = Some("Stop watching before sharing the local screen.");
@@ -693,7 +711,12 @@ async fn start_publication(
     };
     let info = ready.info();
     if snapshot.media.started(generation, info) {
-        publication.start(generation, ready, media_events.clone());
+        publication.start(
+            generation,
+            ready,
+            media_events.clone(),
+            audio_updates.clone(),
+        );
     }
 }
 
@@ -940,6 +963,26 @@ mod tests {
             snapshot.peers["peer"].transport.phase,
             TransportPhaseView::Connected
         );
+    }
+
+    #[test]
+    fn audio_failure_does_not_end_video_publication() {
+        let mut snapshot = RuntimeSnapshot::default();
+        let generation = snapshot.media.begin("local").expect("share");
+        snapshot.media.started(
+            generation,
+            crate::media::PublicationInfo {
+                width: 1920,
+                height: 1080,
+            },
+        );
+
+        assert!(snapshot.media.audio.apply(AudioStatusUpdate {
+            generation,
+            event: crate::audio::AudioEvent::Failed(crate::audio::AudioIssue::CaptureBackend),
+        }));
+        assert_eq!(snapshot.media.phase, crate::media::MediaPhase::Sharing);
+        assert_eq!(snapshot.media.audio.phase, crate::audio::AudioPhase::Failed);
     }
 
     #[test]

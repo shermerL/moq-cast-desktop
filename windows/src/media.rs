@@ -2,7 +2,10 @@
 
 use moq_native::moq_net;
 
-use crate::screen_path;
+use crate::{
+    audio::{AudioSnapshot, StatusUpdate as AudioStatusUpdate},
+    screen_path,
+};
 
 pub(crate) const MAX_SCREEN_EDGE: u32 = 1920;
 
@@ -20,6 +23,7 @@ pub(crate) enum MediaPhase {
 pub(crate) struct MediaSnapshot {
     pub(crate) generation: u64,
     pub(crate) phase: MediaPhase,
+    pub(crate) audio: AudioSnapshot,
     pub(crate) path: Option<String>,
     pub(crate) width: Option<u32>,
     pub(crate) height: Option<u32>,
@@ -31,6 +35,7 @@ impl Default for MediaSnapshot {
         Self {
             generation: 0,
             phase: MediaPhase::Idle,
+            audio: AudioSnapshot::default(),
             path: None,
             width: None,
             height: None,
@@ -53,6 +58,7 @@ impl MediaSnapshot {
         self.width = None;
         self.height = None;
         self.last_error = None;
+        self.audio.begin(self.generation);
         Some(self.generation)
     }
 
@@ -71,6 +77,7 @@ impl MediaSnapshot {
             return None;
         }
         self.phase = MediaPhase::Stopping;
+        self.audio.begin_stop(self.generation);
         Some(self.generation)
     }
 
@@ -82,6 +89,7 @@ impl MediaSnapshot {
         self.path = None;
         self.width = None;
         self.height = None;
+        self.audio.ended(generation);
         true
     }
 
@@ -91,6 +99,7 @@ impl MediaSnapshot {
         {
             return false;
         }
+        self.audio.ended(generation);
         if failed {
             self.phase = MediaPhase::Failed;
             self.last_error = Some("Screen publication ended unexpectedly.");
@@ -145,7 +154,11 @@ impl ReadyPublication {
         self.info
     }
 
-    pub(crate) async fn run(self) -> anyhow::Result<()> {
+    pub(crate) async fn run(
+        self,
+        generation: u64,
+        audio_updates: tokio::sync::watch::Sender<Option<AudioStatusUpdate>>,
+    ) -> anyhow::Result<()> {
         #[cfg(target_os = "windows")]
         {
             let mut capture = moq_video::capture::Config::default();
@@ -156,19 +169,35 @@ impl ReadyPublication {
             encode.codec = moq_video::encode::Codec::H264;
             encode.kind = moq_video::encode::Kind::Auto;
 
-            moq_video::encode::publish_capture(
+            let clock = moq_mux::Clock::new();
+            let audio = crate::audio::publish(
+                self.publication.broadcast.clone(),
+                self.publication.catalog.clone(),
+                clock,
+                generation,
+                audio_updates,
+            );
+            let video = moq_video::encode::publish_capture(
                 self.publication.broadcast.clone(),
                 self.publication.catalog.clone(),
                 capture,
                 encode,
-                moq_mux::Clock::new(),
-            )
-            .await
-            .map_err(Into::into)
+                clock,
+            );
+            tokio::pin!(audio);
+            tokio::pin!(video);
+
+            tokio::select! {
+                result = &mut video => result.map_err(Into::into),
+                () = &mut audio => video.await.map_err(Into::into),
+            }
         }
 
         #[cfg(not(target_os = "windows"))]
-        anyhow::bail!("Windows screen capture is unavailable on this host")
+        {
+            let _ = (generation, audio_updates);
+            anyhow::bail!("Windows screen capture is unavailable on this host")
+        }
     }
 }
 
@@ -246,9 +275,12 @@ mod tests {
             }
         ));
         assert_eq!(media.phase, MediaPhase::Sharing);
+        assert_eq!(media.audio.phase, crate::audio::AudioPhase::Preparing);
         assert_eq!(media.begin_stop(), Some(generation));
+        assert_eq!(media.audio.phase, crate::audio::AudioPhase::Stopping);
         assert!(media.stopped(generation));
         assert_eq!(media.phase, MediaPhase::Idle);
+        assert_eq!(media.audio.phase, crate::audio::AudioPhase::Idle);
     }
 
     #[test]

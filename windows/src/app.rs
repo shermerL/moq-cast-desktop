@@ -3,6 +3,7 @@
 use eframe::egui::{self, Align, Color32, Frame, Layout, RichText, Stroke};
 
 use crate::{
+    audio::AudioPhase,
     media::{MAX_SCREEN_EDGE, MediaPhase},
     playback::{PlaybackFrameIdentity, ViewPhase},
     player::{LivePlayer, PlayerAction},
@@ -320,6 +321,20 @@ impl MoqCastApp {
                 ui.label("Encoder");
                 ui.monospace("Media Foundation preferred, OpenH264 fallback");
                 ui.end_row();
+                ui.label(match self.locale {
+                    Locale::Chinese => "系统音频",
+                    Locale::English => "System audio",
+                });
+                ui.monospace(match self.snapshot.media.audio.phase {
+                    AudioPhase::Idle => "idle",
+                    AudioPhase::Preparing => "preparing",
+                    AudioPhase::Publishing => "Opus",
+                    AudioPhase::Silent => "silent",
+                    AudioPhase::Recovering => "recovering",
+                    AudioPhase::Stopping => "stopping",
+                    AudioPhase::Failed => "unavailable (video continues)",
+                });
+                ui.end_row();
                 ui.label("Output");
                 let output = self
                     .snapshot
@@ -336,6 +351,10 @@ impl MoqCastApp {
         if let Some(error) = self.snapshot.media.last_error {
             ui.add_space(8.0);
             ui.colored_label(Color32::LIGHT_RED, error);
+        }
+        if let Some(error) = self.snapshot.media.audio.last_error {
+            ui.add_space(8.0);
+            ui.colored_label(Color32::ORANGE, error);
         }
         if let Some(error) = &self.snapshot.view.last_error {
             ui.add_space(8.0);

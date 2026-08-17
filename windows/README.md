@@ -2,7 +2,11 @@
 
 本目录是 `moq-cast-desktop` 单一桌面仓库的 Windows 平台实现，与同级 `linux/` 保持平台代码隔离。Windows 产品包含完整 MoQCast Windows 桌面端，以及只向本机浏览器提供设备发现结果的 Browser LAN Bridge；本目录不包含 Linux 或 Android 平台代码。
 
-W1 discovery registry 与 W2 私有 session foundation 已完成。D1 在其上提供 Rust + eframe/egui + wgpu 原生窗口：Nearby 显示实际发现与 typed transport state，并提供受状态门控的 Connect/Disconnect；Screen share 明确显示当前 build 不可用；Settings 提供语言和只读运行信息。当前仍不采集或传输媒体。
+当前 Windows 桌面端已经包含 W1/W2 发现与安全会话基础、deterministic mesh、共享 Origin、单路屏幕发布，以及远端 screen catalog 订阅和 Live Player。Nearby 根据上游 `should_dial` 自动直连，不提供手动 Connect/Disconnect；短暂 mDNS Lost 不会拆除健康 QUIC session。屏幕发布固定使用 `moqcast.screen/<local-peer-id>`，观看与发布互斥，停止媒体不会拆除 mesh。
+
+Windows 屏幕发布使用 Desktop Duplication 与 H.264，优先 Media Foundation 硬件编码并保留 OpenH264 回退。系统音频只采集默认 render endpoint 的 WASAPI loopback，不申请或采集麦克风；PCM 被规范化为 48 kHz stereo Opus，并与视频共享 publication Clock。音频采集或编码失败只更新独立音频状态，不结束视频发布。首版安全支持 mono/stereo mix format，多声道输出设备会明确标为不支持而不会按未知 channel mask 静默下混。
+
+Desktop Duplication 尚未合成硬件 overlay 鼠标指针。根因与修复边界位于上游 `moq-video::capture::desktopduplication`，桌面端不维护第二套 capture workaround；上游完成 cursor shape 缓存与合成后再更新 pinned revision。
 
 ## 启动桌面端
 
@@ -26,8 +30,9 @@ cargo run -- --bind "[::]:0" --secret-file C:\path\to\lan-secret.txt
 
 ```powershell
 cargo fmt --all --check
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
+cargo check --locked --all-targets
+cargo test --locked --all-targets
+cargo clippy --locked --all-targets -- -D warnings
 ```
 
-Windows CI 只能证明 Windows runner 上能够编译和运行自动测试。真实 Found/Updated/Lost、多网卡、IPv4/IPv6、TLS/QUIC、防火墙和 shutdown 行为仍需 Windows 真机与 Android/Linux peer 联调。
+macOS 上的纯逻辑测试不会编译或运行 WASAPI、Desktop Duplication、Media Foundation/D3D11/DXVA。Windows CI 只能证明 Windows runner 上能够编译和运行自动测试。真实 Found/Updated/Lost、多网卡、IPv4/IPv6、TLS/QUIC、防火墙、GPU codec、WASAPI 设备切换与 shutdown 行为仍需 Windows 真机和 Android/Linux peer 联调。
