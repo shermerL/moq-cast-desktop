@@ -532,6 +532,14 @@ async fn run(
                         width,
                         height,
                     } => {
+                        tracing::info!(
+                            view_generation = generation,
+                            path = %path,
+                            decoder = %decoder,
+                            width,
+                            height,
+                            "remote video decoder produced its first frame"
+                        );
                         snapshot
                             .view
                             .decoder_ready(generation, &path, decoder, width, height);
@@ -544,6 +552,11 @@ async fn run(
                         snapshot.view.audio_changed(generation, &path, audio);
                     }
                     ViewEvent::Ended { generation, result } => {
+                        tracing::info!(
+                            view_generation = generation,
+                            failed = result.is_err(),
+                            "remote screen subscription ended"
+                        );
                         view.finished(generation);
                         playback.send_replace(None);
                         snapshot.view.ended(generation, result);
@@ -762,6 +775,11 @@ fn start_view(
         snapshot.last_error = Some("Another remote screen is already active.");
         return;
     };
+    tracing::info!(
+        view_generation = generation,
+        path = %path,
+        "remote screen subscription starting"
+    );
     snapshot.last_error = None;
     playback.send_replace(None);
     view.start(
@@ -802,21 +820,32 @@ fn apply_session_update(snapshot: &mut RuntimeSnapshot, update: TransportUpdate)
     match update.subject {
         SessionSubject::Peer(raw_id) => {
             let state = update.state;
+            let peer = sanitize_identity(&raw_id);
+            let generation = state.generation();
+            let direction = match state.direction() {
+                TransportDirection::Inbound => TransportDirectionView::Inbound,
+                TransportDirection::Outbound => TransportDirectionView::Outbound,
+            };
+            let phase = match state.phase() {
+                TransportPhase::Connecting => TransportPhaseView::Connecting,
+                TransportPhase::Connected => TransportPhaseView::Connected,
+                TransportPhase::Rejected => TransportPhaseView::Rejected,
+                TransportPhase::Failed => TransportPhaseView::Failed,
+                TransportPhase::Disconnected => TransportPhaseView::Disconnected,
+            };
+            tracing::info!(
+                peer = %peer,
+                generation,
+                direction = ?direction,
+                phase = ?phase,
+                "peer transport state changed"
+            );
             snapshot.apply_transport(
-                &sanitize_identity(&raw_id),
+                &peer,
                 TransportView {
-                    generation: state.generation(),
-                    direction: Some(match state.direction() {
-                        TransportDirection::Inbound => TransportDirectionView::Inbound,
-                        TransportDirection::Outbound => TransportDirectionView::Outbound,
-                    }),
-                    phase: match state.phase() {
-                        TransportPhase::Connecting => TransportPhaseView::Connecting,
-                        TransportPhase::Connected => TransportPhaseView::Connected,
-                        TransportPhase::Rejected => TransportPhaseView::Rejected,
-                        TransportPhase::Failed => TransportPhaseView::Failed,
-                        TransportPhase::Disconnected => TransportPhaseView::Disconnected,
-                    },
+                    generation,
+                    direction: Some(direction),
+                    phase,
                 },
             );
         }

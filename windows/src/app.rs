@@ -15,6 +15,14 @@ use crate::{
 
 const CONTENT_MAX_WIDTH: f32 = 900.0;
 
+fn content_width(available: f32, page: Page, viewing: bool) -> f32 {
+    if page == Page::ScreenShare && viewing {
+        available
+    } else {
+        available.min(CONTENT_MAX_WIDTH)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Page {
     #[default]
@@ -61,11 +69,13 @@ pub(crate) struct MoqCastApp {
     command_error: Option<String>,
     playback_texture: Option<egui::TextureHandle>,
     playback_identity: Option<PlaybackFrameIdentity>,
+    viewport_fullscreen: bool,
     player: LivePlayer,
 }
 
 impl MoqCastApp {
     pub(crate) fn new(context: &eframe::CreationContext<'_>, mut runtime: RuntimeOwner) -> Self {
+        configure_fonts(&context.egui_ctx);
         context.egui_ctx.set_visuals(egui::Visuals::light());
         let snapshot = runtime.snapshot();
         Self {
@@ -76,6 +86,7 @@ impl MoqCastApp {
             command_error: None,
             playback_texture: None,
             playback_identity: None,
+            viewport_fullscreen: false,
             player: LivePlayer,
         }
     }
@@ -363,21 +374,47 @@ impl MoqCastApp {
     }
 
     fn update_playback_texture(&mut self, context: &egui::Context) {
-        if let Some(frame) = self.runtime.playback_frame()
-            && Some(frame.identity) != self.playback_identity
-        {
-            let image =
-                egui::ColorImage::from_rgba_unmultiplied([frame.width, frame.height], &frame.rgba);
-            if let Some(texture) = &mut self.playback_texture {
-                texture.set(image, egui::TextureOptions::LINEAR);
-            } else {
-                self.playback_texture = Some(context.load_texture(
-                    "remote-screen",
-                    image,
-                    egui::TextureOptions::LINEAR,
-                ));
+        if let Some(frame) = self.runtime.playback_frame() {
+            if should_commit_playback_frame(
+                self.snapshot.view.generation,
+                self.playback_identity,
+                frame.identity,
+            ) {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [frame.width, frame.height],
+                    &frame.rgba,
+                );
+                if let Some(texture) = &mut self.playback_texture {
+                    texture.set(image, egui::TextureOptions::LINEAR);
+                } else {
+                    self.playback_texture = Some(context.load_texture(
+                        "remote-screen",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+                self.playback_identity = Some(frame.identity);
+                if frame.identity.sequence == 1 || frame.identity.sequence.is_multiple_of(300) {
+                    tracing::info!(
+                        view_generation = frame.identity.view_generation,
+                        decoder_generation = frame.identity.decoder_generation,
+                        sequence = frame.identity.sequence,
+                        frame_pts_us = %frame.timestamp_us,
+                        fullscreen = self.viewport_fullscreen,
+                        "remote video texture committed"
+                    );
+                }
+            } else if Some(frame.identity) != self.playback_identity {
+                tracing::warn!(
+                    current_view_generation = self.snapshot.view.generation,
+                    incoming_view_generation = frame.identity.view_generation,
+                    incoming_decoder_generation = frame.identity.decoder_generation,
+                    incoming_sequence = frame.identity.sequence,
+                    previous_identity = ?self.playback_identity,
+                    frame_pts_us = %frame.timestamp_us,
+                    "stale remote video frame rejected before texture commit"
+                );
             }
-            self.playback_identity = Some(frame.identity);
         }
         if matches!(
             self.snapshot.view.phase,
@@ -477,6 +514,18 @@ impl eframe::App for MoqCastApp {
             ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping
         );
         let viewport_fullscreen = LivePlayer::fullscreen(&context);
+        if viewport_fullscreen != self.viewport_fullscreen {
+            tracing::info!(
+                fullscreen = viewport_fullscreen,
+                view_generation = self.snapshot.view.generation,
+                decoder_generation = self
+                    .playback_identity
+                    .map(|identity| identity.decoder_generation),
+                sequence = self.playback_identity.map(|identity| identity.sequence),
+                "playback fullscreen changed"
+            );
+            self.viewport_fullscreen = viewport_fullscreen;
+        }
         if viewport_fullscreen && !viewing {
             context.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
@@ -510,7 +559,7 @@ impl eframe::App for MoqCastApp {
             });
         egui::CentralPanel::default().show(ui, |ui| {
             let available = ui.available_width();
-            let width = available.min(CONTENT_MAX_WIDTH);
+            let width = content_width(available, self.page, viewing);
             ui.horizontal(|ui| {
                 ui.add_space(((available - width) / 2.0).max(0.0));
                 ui.vertical(|ui| {
@@ -536,6 +585,34 @@ impl eframe::App for MoqCastApp {
     }
 }
 
+fn configure_fonts(context: &egui::Context) {
+    use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
+
+    context.add_font(FontInsert::new(
+        "Noto Sans SC",
+        egui::FontData::from_static(include_bytes!("../assets/fonts/NotoSansSC-Regular.otf")),
+        vec![
+            InsertFontFamily {
+                family: egui::FontFamily::Proportional,
+                priority: FontPriority::Lowest,
+            },
+            InsertFontFamily {
+                family: egui::FontFamily::Monospace,
+                priority: FontPriority::Lowest,
+            },
+        ],
+    ));
+}
+
+fn should_commit_playback_frame(
+    current_view_generation: u64,
+    previous: Option<PlaybackFrameIdentity>,
+    incoming: PlaybackFrameIdentity,
+) -> bool {
+    incoming.view_generation == current_view_generation
+        && previous.is_none_or(|previous| incoming > previous)
+}
+
 fn phase(phase: TransportPhaseView) -> &'static str {
     match phase {
         TransportPhaseView::Waiting => "waiting",
@@ -552,11 +629,89 @@ mod tests {
     use super::*;
 
     #[test]
+    fn configured_fonts_cover_core_simplified_chinese() {
+        let context = egui::Context::default();
+        configure_fonts(&context);
+
+        let mut output = context.run_ui(Default::default(), |ui| {
+            for font_id in [
+                egui::FontId::proportional(14.0),
+                egui::FontId::monospace(14.0),
+            ] {
+                ui.fonts_mut(|fonts| {
+                    assert!(fonts.has_glyphs(&font_id, "附近设备屏幕共享设置"));
+                });
+            }
+        });
+        output.textures_delta.clear();
+    }
+
+    #[test]
     fn routing_and_language_are_independent() {
         let page = Page::Settings;
         let locale = Locale::English;
         assert_eq!(page, Page::Settings);
         assert_eq!(locale.settings(), "Settings");
         assert_ne!(Page::Nearby, Page::ScreenShare);
+    }
+
+    #[test]
+    fn active_player_uses_wide_content_without_expanding_other_pages() {
+        assert_eq!(content_width(1200.0, Page::ScreenShare, true), 1200.0);
+        assert_eq!(content_width(1200.0, Page::ScreenShare, false), 900.0);
+        assert_eq!(content_width(1200.0, Page::Nearby, true), 900.0);
+        assert_eq!(content_width(1200.0, Page::Settings, true), 900.0);
+    }
+
+    #[test]
+    fn stale_view_decoder_and_sequence_cannot_replace_the_current_texture() {
+        let current = PlaybackFrameIdentity {
+            view_generation: 4,
+            decoder_generation: 2,
+            sequence: 10,
+        };
+        assert!(!should_commit_playback_frame(
+            4,
+            Some(current),
+            PlaybackFrameIdentity {
+                view_generation: 3,
+                decoder_generation: 99,
+                sequence: 99,
+            },
+        ));
+        assert!(!should_commit_playback_frame(
+            4,
+            Some(current),
+            PlaybackFrameIdentity {
+                decoder_generation: 1,
+                sequence: 99,
+                ..current
+            },
+        ));
+        assert!(!should_commit_playback_frame(
+            4,
+            Some(current),
+            PlaybackFrameIdentity {
+                sequence: 9,
+                ..current
+            },
+        ));
+        assert!(should_commit_playback_frame(
+            4,
+            Some(current),
+            PlaybackFrameIdentity {
+                sequence: 11,
+                ..current
+            },
+        ));
+        assert!(should_commit_playback_frame(
+            4,
+            Some(current),
+            PlaybackFrameIdentity {
+                decoder_generation: 3,
+                sequence: 1,
+                ..current
+            },
+        ));
     }
 }

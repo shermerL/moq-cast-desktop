@@ -148,7 +148,7 @@ impl ViewSnapshot {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct PlaybackFrameIdentity {
     pub(crate) view_generation: u64,
     pub(crate) decoder_generation: u64,
@@ -159,6 +159,7 @@ pub(crate) struct PlaybackFrameIdentity {
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) struct PlaybackFrame {
     pub(crate) identity: PlaybackFrameIdentity,
+    pub(crate) timestamp_us: u128,
     pub(crate) width: usize,
     pub(crate) height: usize,
     pub(crate) display_width: u32,
@@ -269,6 +270,14 @@ pub(crate) async fn run(
         let mut decoder_generation = 1_u64;
         let mut sequence = 0_u64;
         let mut decoder_ready = false;
+        let mut last_timestamp_us = None;
+        tracing::info!(
+            view_generation = generation,
+            decoder_generation,
+            decoder = decoder.name(),
+            track = %selection.name,
+            "remote video decoder opened"
+        );
 
         loop {
             tokio::select! {
@@ -286,6 +295,20 @@ pub(crate) async fn run(
                         || next.display != selection.display
                         || next.quarter_turns != selection.quarter_turns
                         || next.flip != selection.flip;
+                    tracing::info!(
+                        view_generation = generation,
+                        decoder_generation,
+                        video_changed,
+                        old_track = %selection.name,
+                        new_track = %next.name,
+                        old_display = ?selection.display,
+                        new_display = ?next.display,
+                        old_quarter_turns = selection.quarter_turns,
+                        new_quarter_turns = next.quarter_turns,
+                        old_flip = selection.flip,
+                        new_flip = next.flip,
+                        "remote screen catalog changed"
+                    );
                     if next.audio != selection.audio {
                         drop(std::mem::replace(
                             &mut audio_task,
@@ -308,12 +331,45 @@ pub(crate) async fn run(
                     decoder_generation = decoder_generation.saturating_add(1);
                     sequence = 0;
                     decoder_ready = false;
+                    last_timestamp_us = None;
+                    tracing::info!(
+                        view_generation = generation,
+                        decoder_generation,
+                        decoder = decoder.name(),
+                        track = %selection.name,
+                        "remote video decoder rebuilt after catalog change"
+                    );
                 }
                 decoded = decoder.read() => {
                     let Some(decoded) = decoded? else {
                         anyhow::bail!("remote screen video track ended");
                     };
                     sequence = sequence.saturating_add(1);
+                    let timestamp_us = decoded.timestamp.as_micros();
+                    if let Some(previous_timestamp_us) = last_timestamp_us
+                        && timestamp_us < previous_timestamp_us
+                    {
+                        tracing::warn!(
+                            view_generation = generation,
+                            decoder_generation,
+                            sequence,
+                            previous_pts_us = %previous_timestamp_us,
+                            frame_pts_us = %timestamp_us,
+                            decoder = decoder.name(),
+                            "decoded video PTS regressed; mux discontinuity is not exposed by moq-video"
+                        );
+                    }
+                    last_timestamp_us = Some(timestamp_us);
+                    if sequence == 1 || sequence.is_multiple_of(300) {
+                        tracing::info!(
+                            view_generation = generation,
+                            decoder_generation,
+                            sequence,
+                            frame_pts_us = %timestamp_us,
+                            decoder = decoder.name(),
+                            "decoded remote video frame"
+                        );
+                    }
                     let identity = PlaybackFrameIdentity {
                         view_generation: generation,
                         decoder_generation,
@@ -378,6 +434,7 @@ impl PlaybackFrame {
     ) -> anyhow::Result<Self> {
         let width = frame.surface.width() as usize;
         let height = frame.surface.height() as usize;
+        let timestamp_us = frame.timestamp.as_micros();
         anyhow::ensure!(
             width > 0 && height > 0 && width.is_multiple_of(2) && height.is_multiple_of(2),
             "remote I420 frame dimensions must be non-zero and even"
@@ -414,6 +471,7 @@ impl PlaybackFrame {
         let (display_width, display_height) = display.unwrap_or((width as u32, height as u32));
         Ok(Self {
             identity,
+            timestamp_us,
             width,
             height,
             display_width,
@@ -505,6 +563,8 @@ mod tests {
         };
         assert_ne!(first, replaced_decoder);
         assert_ne!(first, next_view);
+        assert!(first < replaced_decoder);
+        assert!(first < next_view);
     }
 
     #[test]

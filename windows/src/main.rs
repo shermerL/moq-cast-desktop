@@ -51,7 +51,7 @@ fn main() -> Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([920.0, 640.0])
+            .with_inner_size([1120.0, 760.0])
             .with_min_inner_size([680.0, 480.0]),
         ..Default::default()
     };

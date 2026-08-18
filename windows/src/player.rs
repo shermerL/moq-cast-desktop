@@ -13,11 +13,7 @@ struct PlayerLayout {
     image: egui::Vec2,
 }
 
-fn player_layout(
-    source: Option<egui::Vec2>,
-    available: egui::Vec2,
-    fullscreen: bool,
-) -> PlayerLayout {
+fn player_layout(source: Option<egui::Vec2>, available: egui::Vec2) -> PlayerLayout {
     let available = egui::vec2(valid_extent(available.x), valid_extent(available.y));
     let source = source
         .filter(|size| valid_size(*size))
@@ -25,7 +21,7 @@ fn player_layout(
     let scale = (available.x / source.x).min(available.y / source.y);
     let image = source * scale;
     PlayerLayout {
-        surface: if fullscreen { available } else { image },
+        surface: available,
         image,
     }
 }
@@ -62,16 +58,12 @@ impl LivePlayer {
         texture: Option<&egui::TextureHandle>,
         fullscreen: bool,
     ) -> Option<PlayerAction> {
-        let available = if fullscreen {
-            ui.available_size()
-        } else {
-            egui::vec2(ui.available_width(), ui.available_height().min(540.0))
-        };
+        let available = ui.available_size();
         let source = view
             .width
             .zip(view.height)
             .map(|(width, height)| egui::vec2(width as f32, height as f32));
-        let layout = player_layout(source, available, fullscreen);
+        let layout = player_layout(source, available);
         let mut action = None;
 
         ui.vertical_centered(|ui| {
@@ -196,28 +188,18 @@ mod tests {
 
     #[test]
     fn landscape_and_portrait_frames_remain_inside_the_player() {
-        let landscape = player_layout(
-            Some(egui::vec2(1920.0, 1080.0)),
-            egui::vec2(1000.0, 700.0),
-            false,
-        );
+        let landscape = player_layout(Some(egui::vec2(1920.0, 1080.0)), egui::vec2(1000.0, 700.0));
+        assert_size(landscape.surface, egui::vec2(1000.0, 700.0));
         assert_size(landscape.image, egui::vec2(1000.0, 562.5));
 
-        let portrait = player_layout(
-            Some(egui::vec2(1080.0, 1920.0)),
-            egui::vec2(1000.0, 700.0),
-            false,
-        );
+        let portrait = player_layout(Some(egui::vec2(1080.0, 1920.0)), egui::vec2(1000.0, 700.0));
+        assert_size(portrait.surface, egui::vec2(1000.0, 700.0));
         assert_size(portrait.image, egui::vec2(393.75, 700.0));
     }
 
     #[test]
     fn fullscreen_fills_the_surface_and_letterboxes_the_image() {
-        let layout = player_layout(
-            Some(egui::vec2(1080.0, 1920.0)),
-            egui::vec2(1200.0, 800.0),
-            true,
-        );
+        let layout = player_layout(Some(egui::vec2(1080.0, 1920.0)), egui::vec2(1200.0, 800.0));
         assert_size(layout.surface, egui::vec2(1200.0, 800.0));
         assert_size(layout.image, egui::vec2(450.0, 800.0));
     }
@@ -225,12 +207,8 @@ mod tests {
     #[test]
     fn invalid_source_uses_a_stable_fallback() {
         assert_eq!(
-            player_layout(None, egui::vec2(800.0, 600.0), false),
-            player_layout(
-                Some(egui::vec2(f32::NAN, 0.0)),
-                egui::vec2(800.0, 600.0),
-                false,
-            )
+            player_layout(None, egui::vec2(800.0, 600.0)),
+            player_layout(Some(egui::vec2(f32::NAN, 0.0)), egui::vec2(800.0, 600.0),)
         );
     }
 }

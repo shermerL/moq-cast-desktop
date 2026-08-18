@@ -4,6 +4,8 @@
 
 当前 Windows 桌面端已经包含 W1/W2 发现与安全会话基础、deterministic mesh、共享 Origin、单路屏幕发布，以及远端 screen catalog 订阅和 Live Player。Nearby 根据上游 `should_dial` 自动直连，不提供手动 Connect/Disconnect；短暂 mDNS Lost 不会拆除健康 QUIC session。屏幕发布固定使用 `moqcast.screen/<local-peer-id>`，观看与发布互斥，停止媒体不会拆除 mesh。
 
+界面内置 `assets/fonts/NotoSansSC-Regular.otf` 作为 proportional 与 monospace 的最低优先级简体中文 fallback，不替换默认拉丁字体。字体采用 SIL Open Font License，许可证见 `assets/fonts/LICENSE-NOTO`。
+
 Windows 屏幕发布使用 Desktop Duplication 与 H.264，优先 Media Foundation 硬件编码并保留 OpenH264 回退。系统音频只采集默认 render endpoint 的 WASAPI loopback，不申请或采集麦克风；PCM 被规范化为 48 kHz stereo Opus，并与视频共享 publication Clock。音频采集或编码失败只更新独立音频状态，不结束视频发布。首版安全支持 mono/stereo mix format，多声道输出设备会明确标为不支持而不会按未知 channel mask 静默下混。
 
 远端播放会从 Hang catalog 选择同一 broadcast 中受支持的 Opus 或 PCM rendition，复用 pinned `moq-audio` 的 decoder 与 CPAL/WASAPI 默认输出设备。音频订阅和设备生命周期运行在独立任务中，因此设备打开、track 结束或输出失败不会阻塞视频首帧，也不会结束视频播放。当前只提供 bounded jitter/resample 播放，不宣称已经完成严格的音画时钟同步。
