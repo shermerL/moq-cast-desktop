@@ -15,7 +15,7 @@ use url::Url;
 
 use crate::{
     audio::StatusUpdate as AudioStatusUpdate,
-    media::{MediaSnapshot, Publication},
+    media::{MediaSnapshot, Publication, PublicationFailure, VideoEncodingPolicy},
     playback::{PlaybackFrame, ViewEvent, ViewPhase, ViewSnapshot},
     registry::{PeerRegistry, PeerSummary, RegistryChange, sanitize_identity},
     remote::{Directory as RemoteDirectory, RemoteScreenView, ScreenAvailability},
@@ -233,6 +233,7 @@ impl RuntimeSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RuntimeCommand {
+    SetVideoEncodingPolicy(VideoEncodingPolicy),
     ShareScreen,
     StopSharing,
     WatchScreen { path: String },
@@ -241,7 +242,10 @@ pub(crate) enum RuntimeCommand {
 }
 
 enum MediaEvent {
-    Ended { generation: u64, failed: bool },
+    Ended {
+        generation: u64,
+        result: Result<(), PublicationFailure>,
+    },
 }
 
 #[derive(Default)]
@@ -296,15 +300,7 @@ impl PublicationOwner {
         self.generation = generation;
         self.task = Some(tokio::spawn(async move {
             let result = publication.run(generation, audio_updates).await;
-            if let Err(error) = &result {
-                tracing::warn!(stage = "publish", %error, "screen publication ended");
-            }
-            let _ = events
-                .send(MediaEvent::Ended {
-                    generation,
-                    failed: result.is_err(),
-                })
-                .await;
+            let _ = events.send(MediaEvent::Ended { generation, result }).await;
         }));
     }
 
@@ -503,11 +499,14 @@ async fn run(
                 let _ = snapshots.send(snapshot.clone());
             }
             event = media_recv.recv() => {
-                let Some(MediaEvent::Ended { generation, failed }) = event else {
+                let Some(MediaEvent::Ended {
+                    generation,
+                    result,
+                }) = event else {
                     continue;
                 };
                 publication.finished(generation);
-                snapshot.media.ended(generation, failed);
+                snapshot.media.ended(generation, result);
                 let _ = snapshots.send(snapshot.clone());
             }
             update = remote.recv() => {
@@ -655,6 +654,10 @@ async fn handle_command(command: RuntimeCommand, context: CommandContext<'_>) ->
         audio_updates,
     } = context;
     match command {
+        RuntimeCommand::SetVideoEncodingPolicy(policy) => {
+            snapshot.media.set_video_encoding_policy(policy);
+            false
+        }
         RuntimeCommand::ShareScreen => {
             start_publication(snapshot, sessions, publication, media_events, audio_updates).await;
             false
@@ -714,23 +717,33 @@ async fn start_publication(
     let Some(generation) = snapshot.media.begin(&local_id) else {
         return;
     };
+    let policy = snapshot.media.video_encoding;
     let prepared = match Publication::prepare(sessions.origin(), &local_id) {
         Ok(prepared) => prepared,
-        Err(_) => {
-            snapshot.media.ended(generation, true);
+        Err(error) => {
+            tracing::warn!(stage = "publish", %error, "screen publication preparation failed");
+            snapshot
+                .media
+                .ended(generation, Err(PublicationFailure::Unexpected));
             return;
         }
     };
-    let ready = match prepared.configure().await {
+    let ready = match prepared.configure(policy).await {
         Ok(ready) => ready,
         Err(error) => {
-            tracing::warn!(stage = "capture", %error, "screen capture preparation failed");
-            snapshot.media.ended(generation, true);
+            snapshot.media.ended(generation, Err(error));
             return;
         }
     };
     let info = ready.info();
     if snapshot.media.started(generation, info) {
+        tracing::info!(
+            generation,
+            video_policy = ?policy,
+            source_width = info.width,
+            source_height = info.height,
+            "screen publication configured"
+        );
         publication.start(
             generation,
             ready,
@@ -1019,6 +1032,39 @@ mod tests {
         }));
         assert_eq!(snapshot.media.phase, crate::media::MediaPhase::Sharing);
         assert_eq!(snapshot.media.audio.phase, crate::audio::AudioPhase::Failed);
+    }
+
+    #[test]
+    fn video_encoding_policy_is_locked_while_sharing_and_editable_after_stop() {
+        let mut snapshot = RuntimeSnapshot::default();
+        assert!(
+            snapshot
+                .media
+                .set_video_encoding_policy(crate::media::VideoEncodingPolicy::NativeQhdHardware)
+        );
+
+        let generation = snapshot.media.begin("local").expect("share");
+        assert!(
+            !snapshot
+                .media
+                .set_video_encoding_policy(crate::media::VideoEncodingPolicy::Compatible)
+        );
+        assert_eq!(
+            snapshot.media.video_encoding,
+            crate::media::VideoEncodingPolicy::NativeQhdHardware
+        );
+
+        snapshot.media.begin_stop();
+        snapshot.media.stopped(generation);
+        assert!(
+            snapshot
+                .media
+                .set_video_encoding_policy(crate::media::VideoEncodingPolicy::Compatible)
+        );
+        assert_eq!(
+            snapshot.media.video_encoding,
+            crate::media::VideoEncodingPolicy::Compatible
+        );
     }
 
     #[test]
