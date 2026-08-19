@@ -196,7 +196,7 @@ fn run(
             WAIT_FAILED => {
                 return Err(Failure::windows(
                     "WaitForSingleObject",
-                    WindowsError::from_win32(),
+                    WindowsError::from_thread(),
                 ));
             }
             other => {

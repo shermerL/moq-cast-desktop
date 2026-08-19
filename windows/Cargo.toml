@@ -20,7 +20,7 @@ url = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 hang = { git = "https://github.com/moq-dev/moq", rev = "68cf64603f067f64bc02fe800464aa59710a258c" }
-moq-audio = { git = "https://github.com/moq-dev/moq", rev = "68cf64603f067f64bc02fe800464aa59710a258c", default-features = false }
+moq-audio = { git = "https://github.com/moq-dev/moq", rev = "68cf64603f067f64bc02fe800464aa59710a258c", default-features = false, features = ["playback"] }
 moq-mux = { git = "https://github.com/moq-dev/moq", rev = "68cf64603f067f64bc02fe800464aa59710a258c" }
 moq-video = { git = "https://github.com/moq-dev/moq", rev = "68cf64603f067f64bc02fe800464aa59710a258c", default-features = false }
 windows = { version = "0.62", features = [

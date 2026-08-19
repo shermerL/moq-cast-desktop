@@ -5,7 +5,7 @@ use eframe::egui::{self, Align, Color32, Frame, Layout, RichText, Stroke};
 use crate::{
     audio::AudioPhase,
     media::{MAX_SCREEN_EDGE, MediaPhase},
-    playback::{PlaybackFrameIdentity, ViewPhase},
+    playback::{PlaybackFrameIdentity, ViewAudioPhase, ViewPhase},
     player::{LivePlayer, PlayerAction},
     remote::ScreenAvailability,
     runtime::{
@@ -14,6 +14,22 @@ use crate::{
 };
 
 const CONTENT_MAX_WIDTH: f32 = 900.0;
+const CONTENT_TOP_SPACING: f32 = 18.0;
+
+fn content_rect(available: egui::Rect, page: Page, viewing: bool) -> egui::Rect {
+    let width = if page == Page::ScreenShare && viewing {
+        available.width()
+    } else {
+        available.width().min(CONTENT_MAX_WIDTH)
+    };
+    egui::Rect::from_min_size(
+        egui::pos2(
+            available.center().x - width / 2.0,
+            available.top() + CONTENT_TOP_SPACING,
+        ),
+        egui::vec2(width, (available.height() - CONTENT_TOP_SPACING).max(1.0)),
+    )
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Page {
@@ -61,11 +77,15 @@ pub(crate) struct MoqCastApp {
     command_error: Option<String>,
     playback_texture: Option<egui::TextureHandle>,
     playback_identity: Option<PlaybackFrameIdentity>,
+    playback_timestamp_us: Option<u128>,
+    playback_high_water_timestamp_us: Option<u128>,
+    viewport_fullscreen: bool,
     player: LivePlayer,
 }
 
 impl MoqCastApp {
     pub(crate) fn new(context: &eframe::CreationContext<'_>, mut runtime: RuntimeOwner) -> Self {
+        configure_fonts(&context.egui_ctx);
         context.egui_ctx.set_visuals(egui::Visuals::light());
         let snapshot = runtime.snapshot();
         Self {
@@ -76,7 +96,10 @@ impl MoqCastApp {
             command_error: None,
             playback_texture: None,
             playback_identity: None,
-            player: LivePlayer,
+            playback_timestamp_us: None,
+            playback_high_water_timestamp_us: None,
+            viewport_fullscreen: false,
+            player: LivePlayer::default(),
         }
     }
 
@@ -363,21 +386,86 @@ impl MoqCastApp {
     }
 
     fn update_playback_texture(&mut self, context: &egui::Context) {
-        if let Some(frame) = self.runtime.playback_frame()
-            && Some(frame.identity) != self.playback_identity
-        {
-            let image =
-                egui::ColorImage::from_rgba_unmultiplied([frame.width, frame.height], &frame.rgba);
-            if let Some(texture) = &mut self.playback_texture {
-                texture.set(image, egui::TextureOptions::LINEAR);
-            } else {
-                self.playback_texture = Some(context.load_texture(
-                    "remote-screen",
-                    image,
-                    egui::TextureOptions::LINEAR,
-                ));
+        if let Some(frame) = self.runtime.playback_frame() {
+            if should_commit_playback_frame(
+                self.snapshot.view.generation,
+                self.playback_identity,
+                frame.identity,
+            ) {
+                let same_view = self.playback_identity.is_some_and(|identity| {
+                    identity.view_generation == frame.identity.view_generation
+                });
+                if !same_view {
+                    self.playback_timestamp_us = None;
+                    self.playback_high_water_timestamp_us = None;
+                }
+                let previous_timestamp_us = self.playback_timestamp_us;
+                let high_water_timestamp_us = self.playback_high_water_timestamp_us;
+                let regressed =
+                    previous_timestamp_us.is_some_and(|previous| frame.timestamp_us < previous);
+                let behind_high_water_us = high_water_timestamp_us
+                    .map(|high_water| high_water.saturating_sub(frame.timestamp_us))
+                    .unwrap_or(0);
+                if same_view
+                    && behind_high_water_us > 0
+                    && (regressed
+                        || frame.identity.sequence == 1
+                        || frame.identity.sequence.is_multiple_of(30))
+                {
+                    tracing::warn!(
+                        view_generation = frame.identity.view_generation,
+                        decoder_generation = frame.identity.decoder_generation,
+                        sequence = frame.identity.sequence,
+                        previous_identity = ?self.playback_identity,
+                        previous_pts_us = %previous_timestamp_us.unwrap_or_default(),
+                        frame_pts_us = %frame.timestamp_us,
+                        texture_high_water_pts_us = %high_water_timestamp_us.unwrap_or_default(),
+                        behind_high_water_us = %behind_high_water_us,
+                        fullscreen = self.viewport_fullscreen,
+                        "remote video texture commit is behind the displayed PTS high-water mark"
+                    );
+                }
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [frame.width, frame.height],
+                    &frame.rgba,
+                );
+                if let Some(texture) = &mut self.playback_texture {
+                    texture.set(image, egui::TextureOptions::LINEAR);
+                } else {
+                    self.playback_texture = Some(context.load_texture(
+                        "remote-screen",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+                self.playback_identity = Some(frame.identity);
+                self.playback_timestamp_us = Some(frame.timestamp_us);
+                self.playback_high_water_timestamp_us = Some(
+                    high_water_timestamp_us.map_or(frame.timestamp_us, |high_water| {
+                        high_water.max(frame.timestamp_us)
+                    }),
+                );
+                if frame.identity.sequence == 1 || frame.identity.sequence.is_multiple_of(300) {
+                    tracing::info!(
+                        view_generation = frame.identity.view_generation,
+                        decoder_generation = frame.identity.decoder_generation,
+                        sequence = frame.identity.sequence,
+                        frame_pts_us = %frame.timestamp_us,
+                        fullscreen = self.viewport_fullscreen,
+                        "remote video texture committed"
+                    );
+                }
+            } else if Some(frame.identity) != self.playback_identity {
+                tracing::warn!(
+                    current_view_generation = self.snapshot.view.generation,
+                    incoming_view_generation = frame.identity.view_generation,
+                    incoming_decoder_generation = frame.identity.decoder_generation,
+                    incoming_sequence = frame.identity.sequence,
+                    previous_identity = ?self.playback_identity,
+                    frame_pts_us = %frame.timestamp_us,
+                    "stale remote video frame rejected before texture commit"
+                );
             }
-            self.playback_identity = Some(frame.identity);
         }
         if matches!(
             self.snapshot.view.phase,
@@ -385,6 +473,8 @@ impl MoqCastApp {
         ) {
             self.playback_texture = None;
             self.playback_identity = None;
+            self.playback_timestamp_us = None;
+            self.playback_high_water_timestamp_us = None;
         }
     }
 
@@ -440,7 +530,26 @@ impl MoqCastApp {
                         .unwrap_or("not active"),
                 );
                 ui.end_row();
+                ui.label("Playback audio");
+                let audio = match self.snapshot.view.audio.phase {
+                    ViewAudioPhase::Idle => "not active".to_owned(),
+                    ViewAudioPhase::Pending => "pending".to_owned(),
+                    ViewAudioPhase::NotPublished => "not published".to_owned(),
+                    ViewAudioPhase::Playing => {
+                        let codec = self.snapshot.view.audio.codec.as_deref().unwrap_or("audio");
+                        let sample_rate = self.snapshot.view.audio.sample_rate.unwrap_or_default();
+                        let channels = self.snapshot.view.audio.channels.unwrap_or_default();
+                        format!("{codec} · {sample_rate} Hz · {channels} ch")
+                    }
+                    ViewAudioPhase::Failed => "unavailable (video continues)".to_owned(),
+                };
+                ui.monospace(audio);
+                ui.end_row();
             });
+        if let Some(error) = &self.snapshot.view.audio.last_error {
+            ui.add_space(10.0);
+            ui.colored_label(Color32::ORANGE, error);
+        }
         if let Some(error) = self.snapshot.last_error {
             ui.add_space(10.0);
             ui.colored_label(Color32::LIGHT_RED, error);
@@ -458,6 +567,18 @@ impl eframe::App for MoqCastApp {
             ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping
         );
         let viewport_fullscreen = LivePlayer::fullscreen(&context);
+        if viewport_fullscreen != self.viewport_fullscreen {
+            tracing::info!(
+                fullscreen = viewport_fullscreen,
+                view_generation = self.snapshot.view.generation,
+                decoder_generation = self
+                    .playback_identity
+                    .map(|identity| identity.decoder_generation),
+                sequence = self.playback_identity.map(|identity| identity.sequence),
+                "playback fullscreen changed"
+            );
+            self.viewport_fullscreen = viewport_fullscreen;
+        }
         if viewport_fullscreen && !viewing {
             context.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
@@ -490,23 +611,18 @@ impl eframe::App for MoqCastApp {
                 self.top_bar(ui);
             });
         egui::CentralPanel::default().show(ui, |ui| {
-            let available = ui.available_width();
-            let width = available.min(CONTENT_MAX_WIDTH);
-            ui.horizontal(|ui| {
-                ui.add_space(((available - width) / 2.0).max(0.0));
-                ui.vertical(|ui| {
-                    ui.set_width(width);
-                    ui.add_space(18.0);
-                    if let Some(error) = &self.command_error {
-                        ui.colored_label(Color32::LIGHT_RED, error);
-                        ui.add_space(6.0);
-                    }
-                    match self.page {
-                        Page::Nearby => self.nearby(ui),
-                        Page::ScreenShare => self.screen_share(ui),
-                        Page::Settings => self.settings(ui),
-                    }
-                });
+            let content = content_rect(ui.available_rect_before_wrap(), self.page, viewing);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+                ui.set_width(content.width());
+                if let Some(error) = &self.command_error {
+                    ui.colored_label(Color32::LIGHT_RED, error);
+                    ui.add_space(6.0);
+                }
+                match self.page {
+                    Page::Nearby => self.nearby(ui),
+                    Page::ScreenShare => self.screen_share(ui),
+                    Page::Settings => self.settings(ui),
+                }
             });
         });
         context.request_repaint_after(std::time::Duration::from_millis(if viewing {
@@ -515,6 +631,34 @@ impl eframe::App for MoqCastApp {
             100
         }));
     }
+}
+
+fn configure_fonts(context: &egui::Context) {
+    use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
+
+    context.add_font(FontInsert::new(
+        "Noto Sans SC",
+        egui::FontData::from_static(include_bytes!("../assets/fonts/NotoSansSC-Regular.otf")),
+        vec![
+            InsertFontFamily {
+                family: egui::FontFamily::Proportional,
+                priority: FontPriority::Lowest,
+            },
+            InsertFontFamily {
+                family: egui::FontFamily::Monospace,
+                priority: FontPriority::Lowest,
+            },
+        ],
+    ));
+}
+
+fn should_commit_playback_frame(
+    current_view_generation: u64,
+    previous: Option<PlaybackFrameIdentity>,
+    incoming: PlaybackFrameIdentity,
+) -> bool {
+    incoming.view_generation == current_view_generation
+        && previous.is_none_or(|previous| incoming > previous)
 }
 
 fn phase(phase: TransportPhaseView) -> &'static str {
@@ -533,11 +677,97 @@ mod tests {
     use super::*;
 
     #[test]
+    fn configured_fonts_cover_core_simplified_chinese() {
+        let context = egui::Context::default();
+        configure_fonts(&context);
+
+        let mut output = context.run_ui(Default::default(), |ui| {
+            for font_id in [
+                egui::FontId::proportional(14.0),
+                egui::FontId::monospace(14.0),
+            ] {
+                ui.fonts_mut(|fonts| {
+                    assert!(fonts.has_glyphs(&font_id, "附近设备屏幕共享设置"));
+                });
+            }
+        });
+        output.textures_delta.clear();
+    }
+
+    #[test]
     fn routing_and_language_are_independent() {
         let page = Page::Settings;
         let locale = Locale::English;
         assert_eq!(page, Page::Settings);
         assert_eq!(locale.settings(), "Settings");
         assert_ne!(Page::Nearby, Page::ScreenShare);
+    }
+
+    #[test]
+    fn active_player_content_keeps_panel_height_without_expanding_other_pages() {
+        let available =
+            egui::Rect::from_min_size(egui::pos2(20.0, 30.0), egui::vec2(1200.0, 700.0));
+
+        let player = content_rect(available, Page::ScreenShare, true);
+        assert_eq!(player.min, egui::pos2(20.0, 48.0));
+        assert_eq!(player.size(), egui::vec2(1200.0, 682.0));
+
+        for page in [Page::Nearby, Page::Settings] {
+            let content = content_rect(available, page, true);
+            assert_eq!(content.min, egui::pos2(170.0, 48.0));
+            assert_eq!(content.size(), egui::vec2(900.0, 682.0));
+        }
+    }
+
+    #[test]
+    fn stale_view_decoder_and_sequence_cannot_replace_the_current_texture() {
+        let current = PlaybackFrameIdentity {
+            view_generation: 4,
+            decoder_generation: 2,
+            sequence: 10,
+        };
+        assert!(!should_commit_playback_frame(
+            4,
+            Some(current),
+            PlaybackFrameIdentity {
+                view_generation: 3,
+                decoder_generation: 99,
+                sequence: 99,
+            },
+        ));
+        assert!(!should_commit_playback_frame(
+            4,
+            Some(current),
+            PlaybackFrameIdentity {
+                decoder_generation: 1,
+                sequence: 99,
+                ..current
+            },
+        ));
+        assert!(!should_commit_playback_frame(
+            4,
+            Some(current),
+            PlaybackFrameIdentity {
+                sequence: 9,
+                ..current
+            },
+        ));
+        assert!(should_commit_playback_frame(
+            4,
+            Some(current),
+            PlaybackFrameIdentity {
+                sequence: 11,
+                ..current
+            },
+        ));
+        assert!(should_commit_playback_frame(
+            4,
+            Some(current),
+            PlaybackFrameIdentity {
+                decoder_generation: 3,
+                sequence: 1,
+                ..current
+            },
+        ));
     }
 }

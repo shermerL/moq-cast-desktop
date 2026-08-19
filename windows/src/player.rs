@@ -2,7 +2,7 @@
 
 use eframe::egui::{self, Color32, Frame, Margin, Rect, RichText, Sense, Stroke, ViewportCommand};
 
-use crate::playback::{ViewPhase, ViewSnapshot};
+use crate::playback::{ViewAudioPhase, ViewPhase, ViewSnapshot};
 
 const FALLBACK_SOURCE: egui::Vec2 = egui::vec2(16.0, 9.0);
 const CONTROL_HEIGHT: f32 = 78.0;
@@ -13,11 +13,17 @@ struct PlayerLayout {
     image: egui::Vec2,
 }
 
-fn player_layout(
-    source: Option<egui::Vec2>,
-    available: egui::Vec2,
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PlayerLayoutSignature {
+    view_generation: u64,
     fullscreen: bool,
-) -> PlayerLayout {
+    texture_ready: bool,
+    source: Option<egui::Vec2>,
+    surface: egui::Vec2,
+    image: egui::Vec2,
+}
+
+fn player_layout(source: Option<egui::Vec2>, available: egui::Vec2) -> PlayerLayout {
     let available = egui::vec2(valid_extent(available.x), valid_extent(available.y));
     let source = source
         .filter(|size| valid_size(*size))
@@ -25,7 +31,7 @@ fn player_layout(
     let scale = (available.x / source.x).min(available.y / source.y);
     let image = source * scale;
     PlayerLayout {
-        surface: if fullscreen { available } else { image },
+        surface: available,
         image,
     }
 }
@@ -48,9 +54,19 @@ pub(crate) enum PlayerAction {
 }
 
 #[derive(Default)]
-pub(crate) struct LivePlayer;
+pub(crate) struct LivePlayer {
+    layout_signature: Option<PlayerLayoutSignature>,
+}
 
 impl LivePlayer {
+    fn update_layout_signature(&mut self, signature: PlayerLayoutSignature) -> bool {
+        if self.layout_signature == Some(signature) {
+            return false;
+        }
+        self.layout_signature = Some(signature);
+        true
+    }
+
     pub(crate) fn fullscreen(context: &egui::Context) -> bool {
         context.input(|input| input.viewport().fullscreen.unwrap_or(false))
     }
@@ -62,16 +78,34 @@ impl LivePlayer {
         texture: Option<&egui::TextureHandle>,
         fullscreen: bool,
     ) -> Option<PlayerAction> {
-        let available = if fullscreen {
-            ui.available_size()
-        } else {
-            egui::vec2(ui.available_width(), ui.available_height().min(540.0))
-        };
+        let available = ui.available_size();
         let source = view
             .width
             .zip(view.height)
             .map(|(width, height)| egui::vec2(width as f32, height as f32));
-        let layout = player_layout(source, available, fullscreen);
+        let layout = player_layout(source, available);
+        let signature = PlayerLayoutSignature {
+            view_generation: view.generation,
+            fullscreen,
+            texture_ready: texture.is_some(),
+            source,
+            surface: layout.surface,
+            image: layout.image,
+        };
+        if self.update_layout_signature(signature) {
+            tracing::info!(
+                view_generation = signature.view_generation,
+                fullscreen = signature.fullscreen,
+                texture_ready = signature.texture_ready,
+                source_width = %signature.source.map_or(0.0, |size| size.x),
+                source_height = %signature.source.map_or(0.0, |size| size.y),
+                surface_width = %signature.surface.x,
+                surface_height = %signature.surface.y,
+                image_width = %signature.image.x,
+                image_height = %signature.image.y,
+                "remote player layout changed"
+            );
+        }
         let mut action = None;
 
         ui.vertical_centered(|ui| {
@@ -121,6 +155,20 @@ impl LivePlayer {
                                         .color(Color32::from_gray(205)),
                                 )
                                 .truncate(),
+                            );
+                            ui.label(
+                                RichText::new(match view.audio.phase {
+                                    ViewAudioPhase::Idle => "NO AUDIO",
+                                    ViewAudioPhase::Pending => "AUDIO...",
+                                    ViewAudioPhase::NotPublished => "NO AUDIO",
+                                    ViewAudioPhase::Playing => "AUDIO",
+                                    ViewAudioPhase::Failed => "AUDIO ERROR",
+                                })
+                                .small()
+                                .color(match view.audio.phase {
+                                    ViewAudioPhase::Failed => Color32::from_rgb(255, 174, 174),
+                                    _ => Color32::from_gray(205),
+                                }),
                             );
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -182,28 +230,18 @@ mod tests {
 
     #[test]
     fn landscape_and_portrait_frames_remain_inside_the_player() {
-        let landscape = player_layout(
-            Some(egui::vec2(1920.0, 1080.0)),
-            egui::vec2(1000.0, 700.0),
-            false,
-        );
+        let landscape = player_layout(Some(egui::vec2(1920.0, 1080.0)), egui::vec2(1000.0, 700.0));
+        assert_size(landscape.surface, egui::vec2(1000.0, 700.0));
         assert_size(landscape.image, egui::vec2(1000.0, 562.5));
 
-        let portrait = player_layout(
-            Some(egui::vec2(1080.0, 1920.0)),
-            egui::vec2(1000.0, 700.0),
-            false,
-        );
+        let portrait = player_layout(Some(egui::vec2(1080.0, 1920.0)), egui::vec2(1000.0, 700.0));
+        assert_size(portrait.surface, egui::vec2(1000.0, 700.0));
         assert_size(portrait.image, egui::vec2(393.75, 700.0));
     }
 
     #[test]
     fn fullscreen_fills_the_surface_and_letterboxes_the_image() {
-        let layout = player_layout(
-            Some(egui::vec2(1080.0, 1920.0)),
-            egui::vec2(1200.0, 800.0),
-            true,
-        );
+        let layout = player_layout(Some(egui::vec2(1080.0, 1920.0)), egui::vec2(1200.0, 800.0));
         assert_size(layout.surface, egui::vec2(1200.0, 800.0));
         assert_size(layout.image, egui::vec2(450.0, 800.0));
     }
@@ -211,12 +249,34 @@ mod tests {
     #[test]
     fn invalid_source_uses_a_stable_fallback() {
         assert_eq!(
-            player_layout(None, egui::vec2(800.0, 600.0), false),
-            player_layout(
-                Some(egui::vec2(f32::NAN, 0.0)),
-                egui::vec2(800.0, 600.0),
-                false,
-            )
+            player_layout(None, egui::vec2(800.0, 600.0)),
+            player_layout(Some(egui::vec2(f32::NAN, 0.0)), egui::vec2(800.0, 600.0),)
         );
+    }
+
+    #[test]
+    fn layout_log_signature_changes_only_with_observable_player_layout() {
+        let signature = PlayerLayoutSignature {
+            view_generation: 3,
+            fullscreen: false,
+            texture_ready: true,
+            source: Some(egui::vec2(1080.0, 1920.0)),
+            surface: egui::vec2(1000.0, 700.0),
+            image: egui::vec2(393.75, 700.0),
+        };
+        let mut player = LivePlayer::default();
+
+        assert!(player.update_layout_signature(signature));
+        assert!(!player.update_layout_signature(signature));
+        assert!(player.update_layout_signature(PlayerLayoutSignature {
+            fullscreen: true,
+            ..signature
+        }));
+        assert!(player.update_layout_signature(PlayerLayoutSignature {
+            view_generation: 4,
+            surface: egui::vec2(1200.0, 800.0),
+            image: egui::vec2(450.0, 800.0),
+            ..signature
+        }));
     }
 }
