@@ -13,6 +13,16 @@ struct PlayerLayout {
     image: egui::Vec2,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PlayerLayoutSignature {
+    view_generation: u64,
+    fullscreen: bool,
+    texture_ready: bool,
+    source: Option<egui::Vec2>,
+    surface: egui::Vec2,
+    image: egui::Vec2,
+}
+
 fn player_layout(source: Option<egui::Vec2>, available: egui::Vec2) -> PlayerLayout {
     let available = egui::vec2(valid_extent(available.x), valid_extent(available.y));
     let source = source
@@ -44,9 +54,19 @@ pub(crate) enum PlayerAction {
 }
 
 #[derive(Default)]
-pub(crate) struct LivePlayer;
+pub(crate) struct LivePlayer {
+    layout_signature: Option<PlayerLayoutSignature>,
+}
 
 impl LivePlayer {
+    fn update_layout_signature(&mut self, signature: PlayerLayoutSignature) -> bool {
+        if self.layout_signature == Some(signature) {
+            return false;
+        }
+        self.layout_signature = Some(signature);
+        true
+    }
+
     pub(crate) fn fullscreen(context: &egui::Context) -> bool {
         context.input(|input| input.viewport().fullscreen.unwrap_or(false))
     }
@@ -64,6 +84,28 @@ impl LivePlayer {
             .zip(view.height)
             .map(|(width, height)| egui::vec2(width as f32, height as f32));
         let layout = player_layout(source, available);
+        let signature = PlayerLayoutSignature {
+            view_generation: view.generation,
+            fullscreen,
+            texture_ready: texture.is_some(),
+            source,
+            surface: layout.surface,
+            image: layout.image,
+        };
+        if self.update_layout_signature(signature) {
+            tracing::info!(
+                view_generation = signature.view_generation,
+                fullscreen = signature.fullscreen,
+                texture_ready = signature.texture_ready,
+                source_width = %signature.source.map_or(0.0, |size| size.x),
+                source_height = %signature.source.map_or(0.0, |size| size.y),
+                surface_width = %signature.surface.x,
+                surface_height = %signature.surface.y,
+                image_width = %signature.image.x,
+                image_height = %signature.image.y,
+                "remote player layout changed"
+            );
+        }
         let mut action = None;
 
         ui.vertical_centered(|ui| {
@@ -210,5 +252,31 @@ mod tests {
             player_layout(None, egui::vec2(800.0, 600.0)),
             player_layout(Some(egui::vec2(f32::NAN, 0.0)), egui::vec2(800.0, 600.0),)
         );
+    }
+
+    #[test]
+    fn layout_log_signature_changes_only_with_observable_player_layout() {
+        let signature = PlayerLayoutSignature {
+            view_generation: 3,
+            fullscreen: false,
+            texture_ready: true,
+            source: Some(egui::vec2(1080.0, 1920.0)),
+            surface: egui::vec2(1000.0, 700.0),
+            image: egui::vec2(393.75, 700.0),
+        };
+        let mut player = LivePlayer::default();
+
+        assert!(player.update_layout_signature(signature));
+        assert!(!player.update_layout_signature(signature));
+        assert!(player.update_layout_signature(PlayerLayoutSignature {
+            fullscreen: true,
+            ..signature
+        }));
+        assert!(player.update_layout_signature(PlayerLayoutSignature {
+            view_generation: 4,
+            surface: egui::vec2(1200.0, 800.0),
+            image: egui::vec2(450.0, 800.0),
+            ..signature
+        }));
     }
 }

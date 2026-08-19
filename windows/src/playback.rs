@@ -271,6 +271,7 @@ pub(crate) async fn run(
         let mut sequence = 0_u64;
         let mut decoder_ready = false;
         let mut last_timestamp_us = None;
+        let mut view_high_water_timestamp_us = None;
         tracing::info!(
             view_generation = generation,
             decoder_generation,
@@ -359,7 +360,28 @@ pub(crate) async fn run(
                             "decoded video PTS regressed; mux discontinuity is not exposed by moq-video"
                         );
                     }
+                    let behind_high_water_us = view_high_water_timestamp_us
+                        .map(|high_water: u128| high_water.saturating_sub(timestamp_us))
+                        .unwrap_or(0);
+                    if behind_high_water_us > 0
+                        && (sequence == 1 || sequence.is_multiple_of(30))
+                    {
+                        tracing::warn!(
+                            view_generation = generation,
+                            decoder_generation,
+                            sequence,
+                            frame_pts_us = %timestamp_us,
+                            view_high_water_pts_us = %view_high_water_timestamp_us.unwrap_or_default(),
+                            behind_high_water_us = %behind_high_water_us,
+                            decoder = decoder.name(),
+                            "decoded video remains behind the view PTS high-water mark"
+                        );
+                    }
                     last_timestamp_us = Some(timestamp_us);
+                    view_high_water_timestamp_us = Some(
+                        view_high_water_timestamp_us
+                            .map_or(timestamp_us, |high_water| high_water.max(timestamp_us)),
+                    );
                     if sequence == 1 || sequence.is_multiple_of(300) {
                         tracing::info!(
                             view_generation = generation,

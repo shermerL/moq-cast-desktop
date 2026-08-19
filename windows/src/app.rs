@@ -14,13 +14,21 @@ use crate::{
 };
 
 const CONTENT_MAX_WIDTH: f32 = 900.0;
+const CONTENT_TOP_SPACING: f32 = 18.0;
 
-fn content_width(available: f32, page: Page, viewing: bool) -> f32 {
-    if page == Page::ScreenShare && viewing {
-        available
+fn content_rect(available: egui::Rect, page: Page, viewing: bool) -> egui::Rect {
+    let width = if page == Page::ScreenShare && viewing {
+        available.width()
     } else {
-        available.min(CONTENT_MAX_WIDTH)
-    }
+        available.width().min(CONTENT_MAX_WIDTH)
+    };
+    egui::Rect::from_min_size(
+        egui::pos2(
+            available.center().x - width / 2.0,
+            available.top() + CONTENT_TOP_SPACING,
+        ),
+        egui::vec2(width, (available.height() - CONTENT_TOP_SPACING).max(1.0)),
+    )
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -69,6 +77,8 @@ pub(crate) struct MoqCastApp {
     command_error: Option<String>,
     playback_texture: Option<egui::TextureHandle>,
     playback_identity: Option<PlaybackFrameIdentity>,
+    playback_timestamp_us: Option<u128>,
+    playback_high_water_timestamp_us: Option<u128>,
     viewport_fullscreen: bool,
     player: LivePlayer,
 }
@@ -86,8 +96,10 @@ impl MoqCastApp {
             command_error: None,
             playback_texture: None,
             playback_identity: None,
+            playback_timestamp_us: None,
+            playback_high_water_timestamp_us: None,
             viewport_fullscreen: false,
-            player: LivePlayer,
+            player: LivePlayer::default(),
         }
     }
 
@@ -380,6 +392,39 @@ impl MoqCastApp {
                 self.playback_identity,
                 frame.identity,
             ) {
+                let same_view = self.playback_identity.is_some_and(|identity| {
+                    identity.view_generation == frame.identity.view_generation
+                });
+                if !same_view {
+                    self.playback_timestamp_us = None;
+                    self.playback_high_water_timestamp_us = None;
+                }
+                let previous_timestamp_us = self.playback_timestamp_us;
+                let high_water_timestamp_us = self.playback_high_water_timestamp_us;
+                let regressed =
+                    previous_timestamp_us.is_some_and(|previous| frame.timestamp_us < previous);
+                let behind_high_water_us = high_water_timestamp_us
+                    .map(|high_water| high_water.saturating_sub(frame.timestamp_us))
+                    .unwrap_or(0);
+                if same_view
+                    && behind_high_water_us > 0
+                    && (regressed
+                        || frame.identity.sequence == 1
+                        || frame.identity.sequence.is_multiple_of(30))
+                {
+                    tracing::warn!(
+                        view_generation = frame.identity.view_generation,
+                        decoder_generation = frame.identity.decoder_generation,
+                        sequence = frame.identity.sequence,
+                        previous_identity = ?self.playback_identity,
+                        previous_pts_us = %previous_timestamp_us.unwrap_or_default(),
+                        frame_pts_us = %frame.timestamp_us,
+                        texture_high_water_pts_us = %high_water_timestamp_us.unwrap_or_default(),
+                        behind_high_water_us = %behind_high_water_us,
+                        fullscreen = self.viewport_fullscreen,
+                        "remote video texture commit is behind the displayed PTS high-water mark"
+                    );
+                }
                 let image = egui::ColorImage::from_rgba_unmultiplied(
                     [frame.width, frame.height],
                     &frame.rgba,
@@ -394,6 +439,12 @@ impl MoqCastApp {
                     ));
                 }
                 self.playback_identity = Some(frame.identity);
+                self.playback_timestamp_us = Some(frame.timestamp_us);
+                self.playback_high_water_timestamp_us = Some(
+                    high_water_timestamp_us.map_or(frame.timestamp_us, |high_water| {
+                        high_water.max(frame.timestamp_us)
+                    }),
+                );
                 if frame.identity.sequence == 1 || frame.identity.sequence.is_multiple_of(300) {
                     tracing::info!(
                         view_generation = frame.identity.view_generation,
@@ -422,6 +473,8 @@ impl MoqCastApp {
         ) {
             self.playback_texture = None;
             self.playback_identity = None;
+            self.playback_timestamp_us = None;
+            self.playback_high_water_timestamp_us = None;
         }
     }
 
@@ -558,23 +611,18 @@ impl eframe::App for MoqCastApp {
                 self.top_bar(ui);
             });
         egui::CentralPanel::default().show(ui, |ui| {
-            let available = ui.available_width();
-            let width = content_width(available, self.page, viewing);
-            ui.horizontal(|ui| {
-                ui.add_space(((available - width) / 2.0).max(0.0));
-                ui.vertical(|ui| {
-                    ui.set_width(width);
-                    ui.add_space(18.0);
-                    if let Some(error) = &self.command_error {
-                        ui.colored_label(Color32::LIGHT_RED, error);
-                        ui.add_space(6.0);
-                    }
-                    match self.page {
-                        Page::Nearby => self.nearby(ui),
-                        Page::ScreenShare => self.screen_share(ui),
-                        Page::Settings => self.settings(ui),
-                    }
-                });
+            let content = content_rect(ui.available_rect_before_wrap(), self.page, viewing);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+                ui.set_width(content.width());
+                if let Some(error) = &self.command_error {
+                    ui.colored_label(Color32::LIGHT_RED, error);
+                    ui.add_space(6.0);
+                }
+                match self.page {
+                    Page::Nearby => self.nearby(ui),
+                    Page::ScreenShare => self.screen_share(ui),
+                    Page::Settings => self.settings(ui),
+                }
             });
         });
         context.request_repaint_after(std::time::Duration::from_millis(if viewing {
@@ -656,11 +704,19 @@ mod tests {
     }
 
     #[test]
-    fn active_player_uses_wide_content_without_expanding_other_pages() {
-        assert_eq!(content_width(1200.0, Page::ScreenShare, true), 1200.0);
-        assert_eq!(content_width(1200.0, Page::ScreenShare, false), 900.0);
-        assert_eq!(content_width(1200.0, Page::Nearby, true), 900.0);
-        assert_eq!(content_width(1200.0, Page::Settings, true), 900.0);
+    fn active_player_content_keeps_panel_height_without_expanding_other_pages() {
+        let available =
+            egui::Rect::from_min_size(egui::pos2(20.0, 30.0), egui::vec2(1200.0, 700.0));
+
+        let player = content_rect(available, Page::ScreenShare, true);
+        assert_eq!(player.min, egui::pos2(20.0, 48.0));
+        assert_eq!(player.size(), egui::vec2(1200.0, 682.0));
+
+        for page in [Page::Nearby, Page::Settings] {
+            let content = content_rect(available, page, true);
+            assert_eq!(content.min, egui::pos2(170.0, 48.0));
+            assert_eq!(content.size(), egui::vec2(900.0, 682.0));
+        }
     }
 
     #[test]
