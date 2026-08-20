@@ -436,7 +436,7 @@ impl Supervisor {
                 LoopAction::Changed
             }
             UserCommand::RetryDiscovery => self.restart_discovery(),
-            UserCommand::StartScreenShare => self.start_publish(),
+            UserCommand::StartScreenShare { system_audio } => self.start_publish(system_audio),
             UserCommand::StopScreenShare => self.stop_publish().await,
             UserCommand::StartWatching { path } => self.start_view(path),
             UserCommand::StopWatching => self.stop_view().await,
@@ -532,7 +532,7 @@ impl Supervisor {
         }));
     }
 
-    fn start_publish(&mut self) -> LoopAction {
+    fn start_publish(&mut self, system_audio: bool) -> LoopAction {
         if let Err(error) = self.state.begin_publish() {
             self.state.last_error = Some(error.to_string());
             return LoopAction::Changed;
@@ -544,15 +544,16 @@ impl Supervisor {
             return LoopAction::Changed;
         };
 
-        let publication = match Publication::prepare(&self.origin, &local_peer_id, None) {
-            Ok(publication) => publication,
-            Err(error) => {
-                self.state
-                    .fail_publish(error.to_string())
-                    .expect("publication preparation was active");
-                return LoopAction::Changed;
-            }
-        };
+        let publication =
+            match Publication::prepare(&self.origin, &local_peer_id, None, system_audio) {
+                Ok(publication) => publication,
+                Err(error) => {
+                    self.state
+                        .fail_publish(error.to_string())
+                        .expect("publication preparation was active");
+                    return LoopAction::Changed;
+                }
+            };
 
         let generation = self.publish.advance();
         let events = self.operation_tx.clone();

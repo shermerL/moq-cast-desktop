@@ -13,6 +13,7 @@ pub(in crate::app) fn show(
     snapshot: &AppSnapshot,
     playback: Option<&egui::TextureHandle>,
     player: &mut LivePlayer,
+    system_audio: &mut bool,
 ) -> Option<UserCommand> {
     if !snapshot.has_mesh_session() && snapshot.media == MediaState::Idle {
         components::empty_state(
@@ -98,9 +99,18 @@ pub(in crate::app) fn show(
                             .size(13.0)
                             .color(MUTED),
                     );
+                    ui.add_space(12.0);
+                    ui.checkbox(system_audio, locale.system_audio());
+                    ui.label(
+                        RichText::new(locale.system_audio_hint())
+                            .size(12.0)
+                            .color(MUTED),
+                    );
                     ui.add_space(18.0);
                     if primary_button(ui, locale.choose_screen(), true).clicked() {
-                        command = Some(UserCommand::StartScreenShare);
+                        command = Some(UserCommand::StartScreenShare {
+                            system_audio: *system_audio,
+                        });
                     }
                 });
             });

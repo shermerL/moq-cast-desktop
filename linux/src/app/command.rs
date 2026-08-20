@@ -10,7 +10,7 @@ pub enum UserCommand {
     /// Restart LAN discovery and its listener after a visible failure.
     RetryDiscovery,
     /// Open the system picker and begin screen publishing.
-    StartScreenShare,
+    StartScreenShare { system_audio: bool },
     /// Stop the current screen publication while keeping the peer connected.
     StopScreenShare,
     /// Begin viewing one announced remote screen.
