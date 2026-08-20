@@ -400,7 +400,7 @@ impl Publication {
                 width: display.width,
                 height: display.height,
             };
-            let plan = policy.resolve(info).map_err(|error| {
+            let plan = policy.resolve(info).inspect_err(|error| {
                 tracing::warn!(
                     video_policy = policy.name(),
                     source_width = info.width,
@@ -408,7 +408,6 @@ impl Publication {
                     reason = error.message(),
                     "screen source does not satisfy the requested encoding policy"
                 );
-                error
             })?;
             Ok(ReadyPublication {
                 publication: self,
