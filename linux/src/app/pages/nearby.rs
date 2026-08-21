@@ -19,8 +19,9 @@ pub(in crate::app) fn show(
     snapshot: &AppSnapshot,
     selected_peer: &mut Option<String>,
     layout: DeviceWorkspaceLayout,
+    system_audio: bool,
 ) -> Option<UserCommand> {
-    let mut command = workspace_toolbar(ui, locale, snapshot);
+    let mut command = workspace_toolbar(ui, locale, snapshot, system_audio);
 
     if snapshot.inbound_session_count > 0 {
         ui.add_space(12.0);
@@ -71,6 +72,7 @@ fn workspace_toolbar(
     ui: &mut egui::Ui,
     locale: Locale,
     snapshot: &AppSnapshot,
+    system_audio: bool,
 ) -> Option<UserCommand> {
     let discovery_active = snapshot.discovery.is_active();
     let mut command = None;
@@ -86,7 +88,7 @@ fn workspace_toolbar(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let share_enabled = snapshot.has_mesh_session() && snapshot.media == MediaState::Idle;
             if primary_button(ui, locale.share_local_screen(), share_enabled).clicked() {
-                command = Some(UserCommand::StartScreenShare);
+                command = Some(UserCommand::StartScreenShare { system_audio });
             }
             let scan_label = if discovery_active {
                 locale.stop_scan()

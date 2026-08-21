@@ -20,6 +20,7 @@ use eframe::egui::{self, Color32, Frame, Margin, RichText, Stroke};
 use crate::runtime::{PlaybackFrameIdentity, RuntimeHandle, RuntimeStartError};
 
 const STORAGE_LOCALE: &str = "moqcast.locale";
+const STORAGE_SYSTEM_AUDIO: &str = "moqcast.system-audio";
 const CONTENT_MAX_WIDTH: f32 = 1040.0;
 const DEVICE_WORKSPACE_SPLIT_WIDTH: f32 = 900.0;
 
@@ -50,6 +51,10 @@ fn shell_layout(window_width: f32) -> ShellLayout {
             DeviceWorkspaceLayout::Single
         },
     }
+}
+
+fn parse_system_audio(value: Option<String>) -> bool {
+    value.as_deref() == Some("true")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +105,7 @@ pub struct MoqCastApp {
     page: Page,
     selected_peer: Option<String>,
     locale: Locale,
+    system_audio: bool,
     runtime: RuntimeHandle,
     command_error: Option<String>,
     playback_texture: Option<egui::TextureHandle>,
@@ -117,11 +123,17 @@ impl MoqCastApp {
             .and_then(|storage| storage.get_string(STORAGE_LOCALE))
             .and_then(|value| Locale::parse(&value))
             .unwrap_or_default();
+        let system_audio = parse_system_audio(
+            creation_context
+                .storage
+                .and_then(|storage| storage.get_string(STORAGE_SYSTEM_AUDIO)),
+        );
 
         Ok(Self {
             page: Page::default(),
             selected_peer: None,
             locale,
+            system_audio,
             runtime: RuntimeHandle::start()?,
             command_error: None,
             playback_texture: None,
@@ -287,6 +299,7 @@ impl eframe::App for MoqCastApp {
                         &snapshot,
                         self.playback_texture.as_ref(),
                         &mut self.player,
+                        &mut self.system_audio,
                     ) {
                         self.send(command);
                     }
@@ -341,7 +354,12 @@ impl eframe::App for MoqCastApp {
                                     && snapshot.discovery != DiscoveryState::Error
                                     && matches!(snapshot.media, MediaState::Idle) =>
                             {
-                                Some((self.locale.retry(), UserCommand::StartScreenShare))
+                                Some((
+                                    self.locale.retry(),
+                                    UserCommand::StartScreenShare {
+                                        system_audio: self.system_audio,
+                                    },
+                                ))
                             }
                             Page::ScreenShare | Page::Settings => None,
                         };
@@ -363,6 +381,7 @@ impl eframe::App for MoqCastApp {
                             &snapshot,
                             &mut self.selected_peer,
                             layout.device_workspace,
+                            self.system_audio,
                         ),
                         Page::ScreenShare => pages::screen_share::show(
                             ui,
@@ -370,6 +389,7 @@ impl eframe::App for MoqCastApp {
                             &snapshot,
                             self.playback_texture.as_ref(),
                             &mut self.player,
+                            &mut self.system_audio,
                         ),
                         Page::Settings => {
                             if let Some(locale) = pages::settings::show(ui, self.locale) {
@@ -383,7 +403,8 @@ impl eframe::App for MoqCastApp {
                     if let Some(command) = command {
                         if matches!(
                             command,
-                            UserCommand::StartWatching { .. } | UserCommand::StartScreenShare
+                            UserCommand::StartWatching { .. }
+                                | UserCommand::StartScreenShare { .. }
                         ) {
                             self.page = Page::ScreenShare;
                         }
@@ -402,6 +423,10 @@ impl eframe::App for MoqCastApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(STORAGE_LOCALE, self.locale.as_str().to_owned());
+        storage.set_string(
+            STORAGE_SYSTEM_AUDIO,
+            if self.system_audio { "true" } else { "false" }.to_owned(),
+        );
     }
 }
 
@@ -457,6 +482,14 @@ fn configure_fonts(context: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_audio_is_off_unless_explicitly_enabled() {
+        assert!(!parse_system_audio(None));
+        assert!(!parse_system_audio(Some("false".to_owned())));
+        assert!(!parse_system_audio(Some("invalid".to_owned())));
+        assert!(parse_system_audio(Some("true".to_owned())));
+    }
 
     #[test]
     fn wide_shell_centers_content_at_the_maximum_width() {

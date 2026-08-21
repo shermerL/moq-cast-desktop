@@ -238,6 +238,20 @@ impl Locale {
         }
     }
 
+    pub(super) fn system_audio(self) -> &'static str {
+        match self {
+            Self::Chinese => "系统音频",
+            Self::English => "System audio",
+        }
+    }
+
+    pub(super) fn system_audio_hint(self) -> &'static str {
+        match self {
+            Self::Chinese => "同时共享此设备正在播放的声音。",
+            Self::English => "Also share sound playing on this device.",
+        }
+    }
+
     pub(super) fn share_local_screen(self) -> &'static str {
         match self {
             Self::Chinese => "共享本机屏幕",

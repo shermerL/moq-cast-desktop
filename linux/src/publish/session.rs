@@ -3,6 +3,8 @@
 use moq_native::moq_net;
 
 #[cfg(target_os = "linux")]
+use super::audio;
+#[cfg(target_os = "linux")]
 use crate::screen_path;
 
 /// A prepared screen publication whose future owns capture and encoding.
@@ -13,6 +15,8 @@ pub(crate) struct Publication {
     catalog: moq_mux::catalog::Producer,
     #[cfg(target_os = "linux")]
     bandwidth: Option<moq_net::bandwidth::Consumer>,
+    #[cfg(target_os = "linux")]
+    system_audio: bool,
 }
 
 impl Publication {
@@ -21,6 +25,7 @@ impl Publication {
         origin: &moq_net::origin::Producer,
         local_peer_id: &str,
         bandwidth: Option<moq_net::bandwidth::Consumer>,
+        system_audio: bool,
     ) -> anyhow::Result<Self> {
         #[cfg(target_os = "linux")]
         {
@@ -32,12 +37,13 @@ impl Publication {
                 broadcast,
                 catalog,
                 bandwidth,
+                system_audio,
             })
         }
 
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (origin, local_peer_id, bandwidth);
+            let _ = (origin, local_peer_id, bandwidth, system_audio);
             anyhow::bail!("screen sharing is available only on Linux")
         }
     }
@@ -55,15 +61,21 @@ impl Publication {
             encode.kind = moq_video::encode::Kind::Auto;
             encode.max_size = Some(moq_video::Size::new(1920, 1080));
             encode.bandwidth = self.bandwidth.clone();
-            let result = moq_video::encode::publish_capture(
+            let clock = moq_mux::Clock::new();
+            let video = moq_video::encode::publish_capture(
                 self.broadcast.clone(),
                 self.catalog.clone(),
                 capture,
                 encode,
-                moq_mux::Clock::new(),
-            )
-            .await;
-            result.map_err(Into::into)
+                clock,
+            );
+            if self.system_audio {
+                let audio = audio::publish(self.broadcast.clone(), self.catalog.clone(), clock);
+                tokio::try_join!(async { video.await.map_err(anyhow::Error::from) }, audio)?;
+                Ok(())
+            } else {
+                video.await.map_err(Into::into)
+            }
         }
 
         #[cfg(not(target_os = "linux"))]
