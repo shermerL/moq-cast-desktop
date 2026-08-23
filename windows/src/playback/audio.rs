@@ -10,7 +10,7 @@ pub(super) enum Selection {
     Unsupported,
     Playable {
         name: String,
-        config: hang::catalog::AudioConfig,
+        config: Box<hang::catalog::AudioConfig>,
     },
 }
 
@@ -31,7 +31,7 @@ impl Selection {
             })
             .map_or(Self::Unsupported, |(name, config)| Self::Playable {
                 name,
-                config,
+                config: Box::new(config),
             })
     }
 }
