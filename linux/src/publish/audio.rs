@@ -8,7 +8,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use moq_native::moq_net;
+use moq_tokio::moq_net;
 use pipewire as pw;
 use pw::spa;
 use tokio::sync::{Notify, oneshot};

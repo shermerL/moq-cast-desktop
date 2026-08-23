@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use moq_native::moq_net;
+use moq_tokio::moq_net;
 use thiserror::Error;
 
 use super::discovery::PeerRecord;
@@ -18,13 +18,13 @@ pub(crate) enum DialError {
     #[error("peer did not advertise a reachable address")]
     NoAddresses,
     #[error(transparent)]
-    Native(#[from] moq_native::Error),
+    Native(#[from] moq_tokio::Error),
 }
 
 pub(crate) fn dial(
     peer: &PeerRecord,
     origin: moq_net::origin::Producer,
-) -> Result<moq_native::Connection, DialError> {
+) -> Result<moq_tokio::Connection, DialError> {
     let fingerprint = peer
         .fingerprint
         .as_ref()
@@ -35,11 +35,11 @@ pub(crate) fn dial(
         }
         url
     });
-    let addrs = moq_native::Addrs::collect(urls).ok_or(DialError::NoAddresses)?;
+    let addrs = moq_tokio::Addrs::collect(urls).ok_or(DialError::NoAddresses)?;
 
-    let mut config = moq_native::ClientConfig::default();
-    config.bind.set_port(0);
-    config.reconnect = Some(true);
+    let mut config = moq_tokio::connect::Config::default();
+    config.bind = Some("[::]:0".parse().expect("valid ephemeral bind"));
+    config.once = Some(false);
     config.backoff.timeout = Some(RECONNECT_BUDGET);
     config.timeout = Some(CONNECT_TIMEOUT);
     config.version = config
@@ -48,11 +48,11 @@ pub(crate) fn dial(
         .filter(|version| carries_request_path(version))
         .copied()
         .collect();
-    config.tls = moq_native::tls::Client::default();
+    config.tls = moq_tokio::tls::Connect::default();
     config.tls.fingerprint = vec![fingerprint.clone()];
 
     let client = config
-        .init()?
+        .init(moq_tokio::quic::Config::default())?
         .with_publisher(&origin)
         .with_subscriber(origin);
     Ok(client.connect(addrs))
@@ -67,7 +67,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::Duration;
 
-    use moq_native::moq_net;
+    use moq_tokio::moq_net;
     use url::Url;
 
     use super::dial;
@@ -85,7 +85,7 @@ mod tests {
         }
     }
 
-    async fn listener() -> (moq_native::Server, SocketAddr, String) {
+    async fn listener() -> (moq_tokio::Server, SocketAddr, String) {
         let server = server::build().unwrap();
         let port = server.local_addr().unwrap().port();
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -100,16 +100,16 @@ mod tests {
 
     #[tokio::test]
     async fn connects_only_with_the_pinned_fingerprint_and_credential() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
         let (server, addr, fingerprint) = listener().await;
-        let server_origin = moq_net::Origin::random().produce();
+        let server_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
         let accept = tokio::spawn(async move {
             let mut listener = server.listen().await.unwrap();
             let request = listener.accept().await.unwrap();
             server::accept(request, "proof", server_origin).await
         });
 
-        let client_origin = moq_net::Origin::random().produce();
+        let client_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
         let connection = dial(&peer(addr, fingerprint, "proof"), client_origin)
             .unwrap()
             .established()
@@ -124,35 +124,41 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_a_wrong_credential() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
         let (server, addr, fingerprint) = listener().await;
-        let server_origin = moq_net::Origin::random().produce();
+        let server_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
         let accept = tokio::spawn(async move {
             let mut listener = server.listen().await.unwrap();
             let request = listener.accept().await.unwrap();
             server::accept(request, "expected", server_origin).await
         });
 
-        let client_origin = moq_net::Origin::random().produce();
-        let result = dial(&peer(addr, fingerprint, "wrong"), client_origin)
-            .unwrap()
-            .established()
-            .await;
+        let client_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+        let connection = dial(&peer(addr, fingerprint, "wrong"), client_origin).unwrap();
+        let established = tokio::time::timeout(Duration::from_secs(4), connection.established())
+            .await
+            .expect("credential rejection stays bounded");
+        let accepted = accept.await.unwrap();
 
-        assert!(result.is_err());
-        assert!(accept.await.unwrap().is_err());
+        assert!(accepted.is_err());
+        if let Ok(connection) = established {
+            let closed = tokio::time::timeout(Duration::from_secs(3), connection.closed())
+                .await
+                .expect("rejection must close the client");
+            assert!(closed.is_err());
+        }
     }
 
     #[tokio::test]
     async fn rejects_a_mismatched_fingerprint() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
         let (server, addr, _) = listener().await;
         let accept = tokio::spawn(async move {
             let mut listener = server.listen().await.unwrap();
             listener.accept().await
         });
 
-        let client_origin = moq_net::Origin::random().produce();
+        let client_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
         let fingerprint = "00".repeat(32);
         let connection = dial(&peer(addr, fingerprint, "proof"), client_origin).unwrap();
         let result =
@@ -168,9 +174,9 @@ mod tests {
 
     #[tokio::test]
     async fn falls_back_to_a_later_candidate_address() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
         let (server, addr, fingerprint) = listener().await;
-        let server_origin = moq_net::Origin::random().produce();
+        let server_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
         let accept = tokio::spawn(async move {
             let mut listener = server.listen().await.unwrap();
             let request = listener.accept().await.unwrap();
@@ -179,7 +185,7 @@ mod tests {
 
         let mut record = peer(addr, fingerprint, "proof");
         record.urls.insert(0, "moqt://127.0.0.1:9".parse().unwrap());
-        let client_origin = moq_net::Origin::random().produce();
+        let client_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
         let connection = dial(&record, client_origin)
             .unwrap()
             .established()

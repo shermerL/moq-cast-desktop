@@ -1,7 +1,7 @@
 //! Draw decoded frames on the GPU, handing back a texture you present.
 //!
 //! The egress half of the zero-copy story, and the fourth role module alongside
-//! [`capture`](crate::capture), [`encode`](crate::encode) and
+//! capture, [`encode`](crate::encode) and
 //! [`decode`](crate::decode). [`decode`](crate::decode) keeps a hardware-decoded
 //! frame on the GPU; this draws it there too, converting YUV to RGB in a shader
 //! instead of downloading pixels to convert them on the CPU.
@@ -26,13 +26,15 @@
 //! ## Zero-copy
 //!
 //! A hardware-decoded frame is imported by aliasing the decoder's surface as a
-//! texture rather than copying it: `CVMetalTextureCache` on macOS, for the
-//! `PixelBuffer` variant of [`Surface`](crate::Surface) that capture and a
-//! VideoToolbox decode produce.
+//! texture rather than copying it: `CVMetalTextureCache` on macOS for the
+//! `PixelBuffer` variant of [`Surface`](crate::Surface), and Vulkan external
+//! memory on Linux for packed PipeWire DMA-BUFs.
 // `PixelBuffer` is deliberately not a doc link: the variant is macOS-only, so a
 // link to it fails the `-D warnings` rustdoc build on every other platform.
 //!
-//! Every other frame, and any import that fails, goes through
+//! Linux callers must request
+//! [`wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF`] when creating the device
+//! to enable that import. Every other frame, and any import that fails, goes through
 //! [`Surface::into_i420`](crate::Surface::into_i420) and a plane upload. That
 //! path is always available, so which route a frame takes is a question of cost.
 //! An import path that keeps failing (a driver that cannot do it at all) retires
@@ -43,6 +45,9 @@
 mod color;
 mod renderer;
 mod source;
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+mod dmabuf;
 
 #[cfg(target_os = "macos")]
 mod metal;

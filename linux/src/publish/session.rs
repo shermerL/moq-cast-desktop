@@ -1,6 +1,6 @@
 //! One Linux display capture published as the MoQCast screen broadcast.
 
-use moq_native::moq_net;
+use moq_tokio::moq_net;
 
 #[cfg(target_os = "linux")]
 use super::audio;
