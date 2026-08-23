@@ -7,7 +7,131 @@ use crate::{
     screen_path,
 };
 
-pub(crate) const MAX_SCREEN_EDGE: u32 = 1920;
+pub(crate) const COMPATIBLE_MAX_SCREEN_EDGE: u32 = 1920;
+
+#[cfg(any(target_os = "windows", test))]
+const QHD_WIDTH: u32 = 2560;
+#[cfg(any(target_os = "windows", test))]
+const QHD_HEIGHT: u32 = 1440;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum VideoEncodingPolicy {
+    #[default]
+    Compatible,
+    NativeQhdHardware,
+}
+
+impl VideoEncodingPolicy {
+    #[cfg(any(target_os = "windows", test))]
+    fn resolve(self, info: PublicationInfo) -> Result<VideoEncodingPlan, PublicationFailure> {
+        if info.width == 0 || info.height == 0 {
+            return Err(PublicationFailure::CaptureUnavailable);
+        }
+        let encoder = match self {
+            Self::Compatible if info.width.max(info.height) <= COMPATIBLE_MAX_SCREEN_EDGE => {
+                EncoderRequirement::Auto
+            }
+            Self::Compatible => return Err(PublicationFailure::CompatibleDisplayTooLarge),
+            Self::NativeQhdHardware if (info.width, info.height) == (QHD_WIDTH, QHD_HEIGHT) => {
+                EncoderRequirement::HardwareOnly
+            }
+            Self::NativeQhdHardware => {
+                return Err(PublicationFailure::NativeQhdDisplayRequired);
+            }
+        };
+        Ok(VideoEncodingPlan {
+            policy: self,
+            encoder,
+            info,
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn name(self) -> &'static str {
+        match self {
+            Self::Compatible => "compatible",
+            Self::NativeQhdHardware => "native-qhd-hardware",
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EncoderRequirement {
+    Auto,
+    HardwareOnly,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl EncoderRequirement {
+    #[cfg(target_os = "windows")]
+    fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::HardwareOnly => "hardware-only",
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn kind(self) -> moq_video::encode::Kind {
+        match self {
+            Self::Auto => moq_video::encode::Kind::Auto,
+            Self::HardwareOnly => moq_video::encode::Kind::Hardware,
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VideoEncodingPlan {
+    policy: VideoEncodingPolicy,
+    encoder: EncoderRequirement,
+    info: PublicationInfo,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PublicationFailure {
+    CaptureUnavailable,
+    #[cfg(any(target_os = "windows", test))]
+    CompatibleDisplayTooLarge,
+    #[cfg(any(target_os = "windows", test))]
+    NativeQhdDisplayRequired,
+    #[cfg(any(target_os = "windows", test))]
+    NativeQhdUnavailable,
+    Unexpected,
+}
+
+impl PublicationFailure {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::CaptureUnavailable => "Windows could not open a capturable display.",
+            #[cfg(any(target_os = "windows", test))]
+            Self::CompatibleDisplayTooLarge => {
+                "Compatible mode supports native displays with a longest edge up to 1920 pixels."
+            }
+            #[cfg(any(target_os = "windows", test))]
+            Self::NativeQhdDisplayRequired => {
+                "Native QHD mode currently requires a landscape 2560x1440 display."
+            }
+            #[cfg(any(target_os = "windows", test))]
+            Self::NativeQhdUnavailable => {
+                "No hardware H.264 encoder could be opened for native QHD sharing."
+            }
+            Self::Unexpected => "Screen publication ended unexpectedly.",
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn classify_publication_failure(
+    policy: VideoEncodingPolicy,
+    no_encoder: bool,
+) -> PublicationFailure {
+    match (policy, no_encoder) {
+        (VideoEncodingPolicy::NativeQhdHardware, true) => PublicationFailure::NativeQhdUnavailable,
+        _ => PublicationFailure::Unexpected,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum MediaPhase {
@@ -24,6 +148,7 @@ pub(crate) struct MediaSnapshot {
     pub(crate) generation: u64,
     pub(crate) phase: MediaPhase,
     pub(crate) audio: AudioSnapshot,
+    pub(crate) video_encoding: VideoEncodingPolicy,
     pub(crate) path: Option<String>,
     pub(crate) width: Option<u32>,
     pub(crate) height: Option<u32>,
@@ -36,6 +161,7 @@ impl Default for MediaSnapshot {
             generation: 0,
             phase: MediaPhase::Idle,
             audio: AudioSnapshot::default(),
+            video_encoding: VideoEncodingPolicy::default(),
             path: None,
             width: None,
             height: None,
@@ -45,6 +171,15 @@ impl Default for MediaSnapshot {
 }
 
 impl MediaSnapshot {
+    pub(crate) fn set_video_encoding_policy(&mut self, policy: VideoEncodingPolicy) -> bool {
+        if !matches!(self.phase, MediaPhase::Idle | MediaPhase::Failed) {
+            return false;
+        }
+        self.video_encoding = policy;
+        self.last_error = None;
+        true
+    }
+
     pub(crate) fn begin(&mut self, local_peer_id: &str) -> Option<u64> {
         if matches!(
             self.phase,
@@ -93,21 +228,28 @@ impl MediaSnapshot {
         true
     }
 
-    pub(crate) fn ended(&mut self, generation: u64, failed: bool) -> bool {
+    pub(crate) fn ended(
+        &mut self,
+        generation: u64,
+        result: Result<(), PublicationFailure>,
+    ) -> bool {
         if generation != self.generation
             || !matches!(self.phase, MediaPhase::Preparing | MediaPhase::Sharing)
         {
             return false;
         }
         self.audio.ended(generation);
-        if failed {
-            self.phase = MediaPhase::Failed;
-            self.last_error = Some("Screen publication ended unexpectedly.");
-        } else {
-            self.phase = MediaPhase::Idle;
-            self.path = None;
-            self.width = None;
-            self.height = None;
+        match result {
+            Ok(()) => {
+                self.phase = MediaPhase::Idle;
+                self.path = None;
+                self.width = None;
+                self.height = None;
+            }
+            Err(failure) => {
+                self.phase = MediaPhase::Failed;
+                self.last_error = Some(failure.message());
+            }
         }
         true
     }
@@ -117,21 +259,6 @@ impl MediaSnapshot {
 pub(crate) struct PublicationInfo {
     pub(crate) width: u32,
     pub(crate) height: u32,
-}
-
-impl PublicationInfo {
-    #[cfg(any(target_os = "windows", test))]
-    fn validate(self) -> anyhow::Result<Self> {
-        if self.width == 0 || self.height == 0 {
-            anyhow::bail!("the selected display has no usable pixels");
-        }
-        if self.width.max(self.height) > MAX_SCREEN_EDGE {
-            anyhow::bail!(
-                "the selected display exceeds the current {MAX_SCREEN_EDGE}-pixel edge limit"
-            );
-        }
-        Ok(self)
-    }
 }
 
 pub(crate) struct Publication {
@@ -146,19 +273,29 @@ pub(crate) struct ReadyPublication {
     publication: Publication,
     #[cfg(target_os = "windows")]
     source: moq_video::capture::Source,
+    #[cfg(target_os = "windows")]
+    plan: VideoEncodingPlan,
+    #[cfg(not(target_os = "windows"))]
     info: PublicationInfo,
 }
 
 impl ReadyPublication {
     pub(crate) fn info(&self) -> PublicationInfo {
-        self.info
+        #[cfg(target_os = "windows")]
+        {
+            self.plan.info
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.info
+        }
     }
 
     pub(crate) async fn run(
         self,
         generation: u64,
         audio_updates: tokio::sync::watch::Sender<Option<AudioStatusUpdate>>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PublicationFailure> {
         #[cfg(target_os = "windows")]
         {
             let mut capture = moq_video::capture::Config::default();
@@ -167,7 +304,16 @@ impl ReadyPublication {
 
             let mut encode = moq_video::encode::Options::default();
             encode.codec = moq_video::encode::Codec::H264;
-            encode.kind = moq_video::encode::Kind::Auto;
+            encode.kind = self.plan.encoder.kind();
+
+            tracing::info!(
+                video_policy = self.plan.policy.name(),
+                source_width = self.plan.info.width,
+                source_height = self.plan.info.height,
+                encoder_kind = self.plan.encoder.name(),
+                codec = "H.264",
+                "screen publication requested"
+            );
 
             let clock = moq_mux::Clock::new();
             let audio = crate::audio::publish(
@@ -187,16 +333,30 @@ impl ReadyPublication {
             tokio::pin!(audio);
             tokio::pin!(video);
 
-            tokio::select! {
-                result = &mut video => result.map_err(Into::into),
-                () = &mut audio => video.await.map_err(Into::into),
-            }
+            let result = tokio::select! {
+                result = &mut video => result,
+                () = &mut audio => video.await,
+            };
+            result.map_err(|error| {
+                tracing::warn!(
+                    video_policy = self.plan.policy.name(),
+                    source_width = self.plan.info.width,
+                    source_height = self.plan.info.height,
+                    encoder_kind = self.plan.encoder.name(),
+                    %error,
+                    "screen publication failed"
+                );
+                classify_publication_failure(
+                    self.plan.policy,
+                    matches!(error, moq_video::Error::NoEncoder(_)),
+                )
+            })
         }
 
         #[cfg(not(target_os = "windows"))]
         {
             let _ = (generation, audio_updates);
-            anyhow::bail!("Windows screen capture is unavailable on this host")
+            Err(PublicationFailure::CaptureUnavailable)
         }
     }
 }
@@ -222,30 +382,45 @@ impl Publication {
         }
     }
 
-    pub(crate) async fn configure(self) -> anyhow::Result<ReadyPublication> {
+    pub(crate) async fn configure(
+        self,
+        policy: VideoEncodingPolicy,
+    ) -> Result<ReadyPublication, PublicationFailure> {
         #[cfg(target_os = "windows")]
         {
-            let display = moq_video::capture::displays()
-                .await?
+            let displays = moq_video::capture::displays().await.map_err(|error| {
+                tracing::warn!(%error, "could not enumerate Windows displays");
+                PublicationFailure::CaptureUnavailable
+            })?;
+            let display = displays
                 .into_iter()
                 .next()
-                .ok_or_else(|| anyhow::anyhow!("Windows reported no capturable display"))?;
+                .ok_or(PublicationFailure::CaptureUnavailable)?;
             let info = PublicationInfo {
                 width: display.width,
                 height: display.height,
-            }
-            .validate()?;
+            };
+            let plan = policy.resolve(info).inspect_err(|error| {
+                tracing::warn!(
+                    video_policy = policy.name(),
+                    source_width = info.width,
+                    source_height = info.height,
+                    reason = error.message(),
+                    "screen source does not satisfy the requested encoding policy"
+                );
+            })?;
             Ok(ReadyPublication {
                 publication: self,
                 source: display.source(),
-                info,
+                plan,
             })
         }
 
         #[cfg(not(target_os = "windows"))]
         {
             let _ = self;
-            anyhow::bail!("Windows screen capture is unavailable on this host")
+            let _ = policy;
+            Err(PublicationFailure::CaptureUnavailable)
         }
     }
 }
@@ -290,7 +465,7 @@ mod tests {
         media.phase = MediaPhase::Failed;
         let current = media.begin("peer-a").expect("current");
         assert!(current > old);
-        assert!(!media.ended(old, true));
+        assert!(!media.ended(old, Err(PublicationFailure::Unexpected)));
         assert_eq!(media.phase, MediaPhase::Preparing);
     }
 
@@ -307,43 +482,123 @@ mod tests {
         ));
         assert_eq!(media.begin_stop(), Some(generation));
         assert!(media.stopped(generation));
-        assert!(!media.ended(generation, true));
+        assert!(!media.ended(generation, Err(PublicationFailure::Unexpected)));
         assert_eq!(media.phase, MediaPhase::Idle);
     }
 
     #[test]
-    fn output_size_rejects_oversized_or_empty_displays() {
-        assert!(
+    fn compatible_policy_preserves_native_sizes_up_to_the_existing_limit() {
+        assert_eq!(
+            VideoEncodingPolicy::default(),
+            VideoEncodingPolicy::Compatible
+        );
+        for info in [
+            PublicationInfo {
+                width: 1280,
+                height: 720,
+            },
             PublicationInfo {
                 width: 1920,
                 height: 1080,
-            }
-            .validate()
-            .is_ok()
-        );
-        assert!(
+            },
             PublicationInfo {
                 width: 1080,
                 height: 1920,
-            }
-            .validate()
-            .is_ok()
-        );
-        assert!(
+            },
+        ] {
+            let plan = VideoEncodingPolicy::Compatible
+                .resolve(info)
+                .expect("compatible native size");
+            assert_eq!(plan.info, info);
+            assert_eq!(plan.encoder, EncoderRequirement::Auto);
+        }
+    }
+
+    #[test]
+    fn native_qhd_is_exact_landscape_and_hardware_only() {
+        let info = PublicationInfo {
+            width: 2560,
+            height: 1440,
+        };
+        let plan = VideoEncodingPolicy::NativeQhdHardware
+            .resolve(info)
+            .expect("native landscape QHD");
+        assert_eq!(plan.info, info);
+        assert_eq!(plan.encoder, EncoderRequirement::HardwareOnly);
+    }
+
+    #[test]
+    fn policies_reject_mismatched_empty_and_oversized_sources() {
+        let qhd = VideoEncodingPolicy::NativeQhdHardware;
+        for info in [
             PublicationInfo {
-                width: 2560,
-                height: 1440,
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            PublicationInfo {
-                width: 0,
+                width: 1920,
                 height: 1080,
-            }
-            .validate()
-            .is_err()
+            },
+            PublicationInfo {
+                width: 1440,
+                height: 2560,
+            },
+            PublicationInfo {
+                width: 3840,
+                height: 2160,
+            },
+            PublicationInfo {
+                width: 3440,
+                height: 1440,
+            },
+        ] {
+            assert_eq!(
+                qhd.resolve(info),
+                Err(PublicationFailure::NativeQhdDisplayRequired)
+            );
+        }
+        assert!(
+            VideoEncodingPolicy::Compatible
+                .resolve(PublicationInfo {
+                    width: 2560,
+                    height: 1440,
+                })
+                .is_err()
         );
+        assert!(
+            VideoEncodingPolicy::Compatible
+                .resolve(PublicationInfo {
+                    width: 0,
+                    height: 1080,
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn native_qhd_runtime_failure_is_explicit_and_does_not_claim_fallback() {
+        let message = PublicationFailure::NativeQhdUnavailable.message();
+        assert!(message.contains("hardware H.264"));
+        assert!(!message.contains("OpenH264"));
+        assert_eq!(
+            classify_publication_failure(VideoEncodingPolicy::NativeQhdHardware, true),
+            PublicationFailure::NativeQhdUnavailable
+        );
+        assert_eq!(
+            classify_publication_failure(VideoEncodingPolicy::NativeQhdHardware, false),
+            PublicationFailure::Unexpected
+        );
+        assert_eq!(
+            classify_publication_failure(VideoEncodingPolicy::Compatible, true),
+            PublicationFailure::Unexpected
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn native_qhd_maps_to_the_moq_video_hardware_kind() {
+        let plan = VideoEncodingPolicy::NativeQhdHardware
+            .resolve(PublicationInfo {
+                width: QHD_WIDTH,
+                height: QHD_HEIGHT,
+            })
+            .expect("native QHD plan");
+        assert_eq!(plan.encoder.kind(), moq_video::encode::Kind::Hardware);
     }
 }

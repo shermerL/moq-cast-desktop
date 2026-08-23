@@ -4,7 +4,7 @@ use eframe::egui::{self, Align, Color32, Frame, Layout, RichText, Stroke};
 
 use crate::{
     audio::AudioPhase,
-    media::{MAX_SCREEN_EDGE, MediaPhase},
+    media::{COMPATIBLE_MAX_SCREEN_EDGE, MediaPhase, VideoEncodingPolicy},
     playback::{PlaybackFrameIdentity, ViewAudioPhase, ViewPhase},
     player::{LivePlayer, PlayerAction},
     remote::ScreenAvailability,
@@ -341,8 +341,24 @@ impl MoqCastApp {
                 ui.label("Codec");
                 ui.monospace("H.264");
                 ui.end_row();
+                ui.label(match self.locale {
+                    Locale::Chinese => "编码模式",
+                    Locale::English => "Encoding mode",
+                });
+                ui.monospace(video_encoding_label(
+                    self.locale,
+                    self.snapshot.media.video_encoding,
+                ));
+                ui.end_row();
                 ui.label("Encoder");
-                ui.monospace("Media Foundation preferred, OpenH264 fallback");
+                ui.monospace(match self.snapshot.media.video_encoding {
+                    VideoEncodingPolicy::Compatible => {
+                        "Auto: Media Foundation preferred, OpenH264 fallback"
+                    }
+                    VideoEncodingPolicy::NativeQhdHardware => {
+                        "Media Foundation hardware required; checked at start"
+                    }
+                });
                 ui.end_row();
                 ui.label(match self.locale {
                     Locale::Chinese => "系统音频",
@@ -365,7 +381,14 @@ impl MoqCastApp {
                     .width
                     .zip(self.snapshot.media.height)
                     .map_or_else(
-                        || format!("max edge {MAX_SCREEN_EDGE}px"),
+                        || match self.snapshot.media.video_encoding {
+                            VideoEncodingPolicy::Compatible => {
+                                format!("native, max edge {COMPATIBLE_MAX_SCREEN_EDGE}px")
+                            }
+                            VideoEncodingPolicy::NativeQhdHardware => {
+                                "native landscape 2560x1440".to_owned()
+                            }
+                        },
                         |(width, height)| format!("{width}x{height} @ 30 fps"),
                     );
                 ui.monospace(output);
@@ -495,6 +518,63 @@ impl MoqCastApp {
                     ui.selectable_value(&mut self.locale, Locale::English, "English");
                 });
         });
+        ui.add_space(8.0);
+        let current_video_encoding = self.snapshot.media.video_encoding;
+        let mut selected_video_encoding = current_video_encoding;
+        let can_change_video_encoding = matches!(
+            self.snapshot.media.phase,
+            MediaPhase::Idle | MediaPhase::Failed
+        );
+        ui.add_enabled_ui(can_change_video_encoding, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(match self.locale {
+                    Locale::Chinese => "视频编码",
+                    Locale::English => "Video encoding",
+                });
+                egui::ComboBox::from_id_salt("video-encoding-policy")
+                    .selected_text(video_encoding_label(self.locale, selected_video_encoding))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut selected_video_encoding,
+                            VideoEncodingPolicy::Compatible,
+                            video_encoding_label(self.locale, VideoEncodingPolicy::Compatible),
+                        );
+                        ui.selectable_value(
+                            &mut selected_video_encoding,
+                            VideoEncodingPolicy::NativeQhdHardware,
+                            video_encoding_label(
+                                self.locale,
+                                VideoEncodingPolicy::NativeQhdHardware,
+                            ),
+                        );
+                    });
+            });
+        });
+        if selected_video_encoding != current_video_encoding {
+            self.send(RuntimeCommand::SetVideoEncodingPolicy(
+                selected_video_encoding,
+            ));
+        }
+        ui.small(match (self.locale, current_video_encoding) {
+            (Locale::Chinese, VideoEncodingPolicy::Compatible) => {
+                "保持显示器原生尺寸；最长边不超过 1920。编码器自动选择。"
+            }
+            (Locale::English, VideoEncodingPolicy::Compatible) => {
+                "Keeps the display's native size up to a 1920-pixel edge; encoder selection is automatic."
+            }
+            (Locale::Chinese, VideoEncodingPolicy::NativeQhdHardware) => {
+                "请求原生横屏 2560x1440；启动共享时验证硬件 H.264，失败时不会降级。"
+            }
+            (Locale::English, VideoEncodingPolicy::NativeQhdHardware) => {
+                "Requests native landscape 2560x1440; hardware H.264 is checked when sharing starts, with no fallback."
+            }
+        });
+        if !can_change_video_encoding {
+            ui.small(match self.locale {
+                Locale::Chinese => "停止共享后才能更改编码模式。",
+                Locale::English => "Stop sharing before changing the encoding mode.",
+            });
+        }
         ui.separator();
         egui::Grid::new("connection-info")
             .num_columns(2)
@@ -659,6 +739,17 @@ fn should_commit_playback_frame(
 ) -> bool {
     incoming.view_generation == current_view_generation
         && previous.is_none_or(|previous| incoming > previous)
+}
+
+fn video_encoding_label(locale: Locale, policy: VideoEncodingPolicy) -> &'static str {
+    match (locale, policy) {
+        (Locale::Chinese, VideoEncodingPolicy::Compatible) => "兼容（原生尺寸，最长边 1920）",
+        (Locale::English, VideoEncodingPolicy::Compatible) => "Compatible (native, max edge 1920)",
+        (Locale::Chinese, VideoEncodingPolicy::NativeQhdHardware) => "原生横屏 QHD（仅硬件）",
+        (Locale::English, VideoEncodingPolicy::NativeQhdHardware) => {
+            "Native landscape QHD (hardware only)"
+        }
+    }
 }
 
 fn phase(phase: TransportPhaseView) -> &'static str {

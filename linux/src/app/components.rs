@@ -3,8 +3,8 @@
 use eframe::egui::{self, Color32, Frame, Margin, Response, RichText, Stroke};
 
 use super::theme::{
-    BORDER, BRAND, BRAND_DARK, BRAND_SOFT, ERROR, ERROR_SOFT, MUTED, RADIUS, SURFACE,
-    SURFACE_MUTED, TEXT,
+    BORDER, BRAND, BRAND_DARK, BRAND_SOFT, ERROR, ERROR_SOFT, InteractionState, MUTED, RADIUS,
+    SURFACE, SURFACE_MUTED, TEXT, apply_widget_visual,
 };
 use super::{AppSnapshot, DialRole, Locale, TransportState};
 
@@ -94,6 +94,24 @@ pub(super) fn secondary_button(ui: &mut egui::Ui, label: &str, enabled: bool) ->
             .corner_radius(RADIUS)
             .min_size(egui::vec2(108.0, 36.0)),
     )
+}
+
+pub(super) fn selection_checkbox(
+    ui: &mut egui::Ui,
+    checked: &mut bool,
+    label: &str,
+    enabled: bool,
+) -> Response {
+    ui.scope(|ui| {
+        if *checked {
+            let widgets = &mut ui.visuals_mut().widgets;
+            apply_widget_visual(&mut widgets.inactive, true, InteractionState::Rest);
+            apply_widget_visual(&mut widgets.hovered, true, InteractionState::Hovered);
+            apply_widget_visual(&mut widgets.active, true, InteractionState::Active);
+        }
+        ui.add_enabled(enabled, egui::Checkbox::new(checked, label))
+    })
+    .inner
 }
 
 pub(super) fn danger_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> Response {
