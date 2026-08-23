@@ -14,7 +14,7 @@ libspa = { path = "vendor/libspa" }
 [dependencies]
 anyhow = "1"
 eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wayland", "wgpu", "x11"] }
-moq-native = { git = "https://github.com/moq-dev/moq.git", rev = "68cf64603f067f64bc02fe800464aa59710a258c", default-features = false, features = ["aws-lc-rs", "mdns", "quinn"] }
+moq-tokio = { git = "https://github.com/moq-dev/moq.git", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["aws-lc-rs", "mdns", "quinn"] }
 thiserror = "2"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
@@ -22,11 +22,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-moq-audio = { git = "https://github.com/moq-dev/moq.git", rev = "68cf64603f067f64bc02fe800464aa59710a258c" }
-moq-mux = { git = "https://github.com/moq-dev/moq.git", rev = "68cf64603f067f64bc02fe800464aa59710a258c" }
-moq-video = { path = "vendor/moq-video", default-features = false, features = ["nvenc", "nvdec", "pipewire"] }
+moq-audio = { git = "https://github.com/moq-dev/moq.git", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53" }
+moq-mux = { git = "https://github.com/moq-dev/moq.git", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53" }
+moq-video = { path = "vendor/moq-video", default-features = false, features = ["capture", "nvidia", "pipewire"] }
 pipewire = "0.10"
 
 [dev-dependencies]
-rustls = { version = "0.23", features = ["aws-lc-rs"] }
 tokio = { version = "1.53.1", features = ["macros"] }

@@ -41,7 +41,7 @@ if [[ ! $SOURCE_COMMIT =~ ^[0-9a-fA-F]{7,64}$ ]]; then
     exit 1
 fi
 SOURCE_COMMIT=${SOURCE_COMMIT:0:12}
-MOQ_REVISION=$(sed -n 's/.*moq-native.*rev = "\([^"]*\)".*/\1/p' "$LINUX_DIR/Cargo.toml")
+MOQ_REVISION=$(sed -n 's/.*moq-tokio.*rev = "\([^"]*\)".*/\1/p' "$LINUX_DIR/Cargo.toml")
 MOQ_VIDEO_REVISION=$(sed -n 's/^source_revision = `\([^`]*\)`/\1/p' "$LINUX_DIR/vendor/moq-video/VENDORED.md")
 BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 BUILD_DISTRO_ID=$(sed -n 's/^ID="\{0,1\}\([^" ]*\)"\{0,1\}$/\1/p' /etc/os-release | head -n 1)
@@ -87,7 +87,7 @@ mkdir -p "$APPDIR/usr/share/doc/moqcast"
     echo "moq_video_source=vendored"
     echo "moq_video_revision=$MOQ_VIDEO_REVISION"
     echo "libspa_source=vendored-0.10.0"
-    echo "cargo_features=moq-native:aws-lc-rs,mdns,quinn;moq-video:nvenc,nvdec,pipewire"
+    echo "cargo_features=moq-tokio:aws-lc-rs,mdns,quinn;moq-video:capture,nvidia,pipewire"
     echo "system_audio=pipewire"
     echo "build_date=$BUILD_DATE"
     echo "target=x86_64-unknown-linux-gnu"

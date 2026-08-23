@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use moq_native::moq_net;
+use moq_tokio::moq_net;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -166,7 +166,7 @@ enum OperationEvent {
 
 #[derive(Clone)]
 enum PeerSession {
-    Outbound(moq_native::Connection),
+    Outbound(moq_tokio::Connection),
     Inbound(moq_net::Session),
 }
 
@@ -353,6 +353,7 @@ impl TaskResources {
 struct Supervisor {
     state: AppSnapshot,
     origin: moq_net::origin::Producer,
+    origin_driver: JoinHandle<()>,
     discovery: DiscoveryResources,
     mesh: MeshResources,
     remote_screens: HashMap<String, moq_net::broadcast::Consumer>,
@@ -370,11 +371,14 @@ impl Supervisor {
     fn new(playback_tx: watch::Sender<Option<Arc<PlaybackFrame>>>) -> Self {
         let (service_tx, service_rx) = mpsc::channel(EVENT_CAPACITY);
         let (operation_tx, operation_rx) = mpsc::channel(EVENT_CAPACITY);
-        let origin = moq_net::Origin::random().produce();
+        let (origin, origin_driver) =
+            moq_net::origin::Producer::new(moq_net::origin::Info::new(moq_net::Origin::random()));
+        let origin_driver = tokio::spawn(origin_driver);
         let announcements = watch_announcements(origin.clone(), operation_tx.clone());
         Self {
             state: AppSnapshot::default(),
             origin,
+            origin_driver,
             discovery: DiscoveryResources::default(),
             mesh: MeshResources::default(),
             remote_screens: HashMap::new(),
@@ -422,7 +426,10 @@ impl Supervisor {
         self.mesh.close_all();
         self.discovery.stop();
         self.announcements.abort();
+        let _ = self.announcements.await;
         self.playback_tx.send_replace(None);
+        drop(self.origin);
+        let _ = self.origin_driver.await;
         tracing::info!(stage = "runtime", "desktop runtime stopped");
     }
 
@@ -687,7 +694,7 @@ impl Supervisor {
         }
     }
 
-    async fn accept_inbound(&mut self, request: moq_native::Request) -> LoopAction {
+    async fn accept_inbound(&mut self, request: moq_tokio::Request) -> LoopAction {
         let Some(credential) = self
             .discovery
             .services
