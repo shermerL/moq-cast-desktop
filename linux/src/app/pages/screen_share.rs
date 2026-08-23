@@ -100,7 +100,7 @@ pub(in crate::app) fn show(
                             .color(MUTED),
                     );
                     ui.add_space(12.0);
-                    ui.checkbox(system_audio, locale.system_audio());
+                    components::selection_checkbox(ui, system_audio, locale.system_audio(), true);
                     ui.label(
                         RichText::new(locale.system_audio_hint())
                             .size(12.0)

@@ -165,20 +165,10 @@ fn show_device_list(
             let summary = peer_row_summary(locale, peer);
             let response = ui.add_enabled(
                 selectable,
-                egui::Button::new(
-                    RichText::new(format!("{}\n{summary}", peer.name))
-                        .size(13.0)
-                        .color(if selected {
-                            egui::Color32::WHITE
-                        } else if selectable {
-                            TEXT
-                        } else {
-                            MUTED
-                        }),
-                )
-                .selected(selected)
-                .wrap()
-                .min_size(egui::vec2(ui.available_width(), 56.0)),
+                egui::Button::new(RichText::new(format!("{}\n{summary}", peer.name)).size(13.0))
+                    .selected(selected)
+                    .wrap()
+                    .min_size(egui::vec2(ui.available_width(), 56.0)),
             );
             if response.clicked() {
                 *selected_peer = Some(peer_id.clone());
