@@ -1257,6 +1257,10 @@ fn color_from_pipewire(range: u32, matrix: u32, size: Size) -> Result<Option<Col
 	}))
 }
 
+// Older distribution headers omit these stable SPA enum names.
+const PIPEWIRE_TRANSFER_BT2020_10: u32 = 13;
+const PIPEWIRE_TRANSFER_BT601: u32 = 16;
+
 fn validate_pipewire_description(color: Color, primaries: u32, transfer: u32) -> Result<(), Error> {
 	let expected_primaries = match color {
 		Color::Bt601Limited | Color::Bt601Full => spa::sys::SPA_VIDEO_COLOR_PRIMARIES_SMPTE170M,
@@ -1271,8 +1275,8 @@ fn validate_pipewire_description(color: Color, primaries: u32, transfer: u32) ->
 		transfer,
 		spa::sys::SPA_VIDEO_TRANSFER_UNKNOWN
 			| spa::sys::SPA_VIDEO_TRANSFER_BT709
-			| spa::sys::SPA_VIDEO_TRANSFER_BT601
-			| spa::sys::SPA_VIDEO_TRANSFER_BT2020_10
+			| PIPEWIRE_TRANSFER_BT601
+			| PIPEWIRE_TRANSFER_BT2020_10
 	) {
 		return Err(Error::Codec(anyhow::anyhow!(
 			"unsupported PipeWire NV12 transfer function {transfer}"
@@ -1693,6 +1697,22 @@ mod tests {
 		format.set_color_matrix(spa::sys::SPA_VIDEO_COLOR_MATRIX_UNKNOWN);
 		format.set_transfer_function(spa::sys::SPA_VIDEO_TRANSFER_SMPTE2084);
 		assert!(pipewire_color(format, 1920, 1080).is_err());
+		assert!(
+			validate_pipewire_description(
+				Color::Bt709Limited,
+				spa::sys::SPA_VIDEO_COLOR_PRIMARIES_BT709,
+				PIPEWIRE_TRANSFER_BT2020_10,
+			)
+			.is_ok()
+		);
+		assert!(
+			validate_pipewire_description(
+				Color::Bt601Limited,
+				spa::sys::SPA_VIDEO_COLOR_PRIMARIES_SMPTE170M,
+				PIPEWIRE_TRANSFER_BT601,
+			)
+			.is_ok()
+		);
 
 		let layout = FrameLayout {
 			stride: 4,
