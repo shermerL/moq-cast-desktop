@@ -30,7 +30,7 @@ cargo run -- --bind "[::]:0" --secret-file C:\path\to\lan-secret.txt
 
 文件内容必须是 32 字节 secret 的 64 位十六进制编码。应用日志和 UI snapshot 不会输出 secret、peer credential 或完整 TLS fingerprint。
 
-即使 `RUST_LOG` 请求 debug/trace，应用也会把 `moq_native` 与 `mdns_sd` 限制到 warn，防止底层 DNS-SD 调试日志打印 TXT fingerprint、nonce 或 credential 派生材料。
+即使 `RUST_LOG` 请求 debug/trace，应用也会把 `moq_tokio` 与 `mdns_sd` 限制到 warn，防止底层 DNS-SD 调试日志打印 TXT fingerprint、nonce 或 credential 派生材料。
 
 ## 验证
 

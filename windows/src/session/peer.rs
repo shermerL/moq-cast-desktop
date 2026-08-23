@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use moq_native::{Addrs, ClientConfig, mdns, moq_net};
+use moq_tokio::{Addrs, mdns, moq_net};
 use thiserror::Error;
 use url::Url;
 
@@ -18,7 +18,7 @@ pub(crate) enum DialError {
     #[error("peer did not advertise a reachable address")]
     NoAddresses,
     #[error(transparent)]
-    Native(#[from] moq_native::Error),
+    Native(#[from] moq_tokio::Error),
 }
 
 #[derive(Clone)]
@@ -43,7 +43,7 @@ impl From<&mdns::Peer> for PeerRecord {
 pub(crate) fn dial(
     peer: &PeerRecord,
     origin: moq_net::origin::Producer,
-) -> Result<moq_native::Connection, DialError> {
+) -> Result<moq_tokio::Connection, DialError> {
     let fingerprint = peer
         .fingerprint
         .as_ref()
@@ -56,9 +56,9 @@ pub(crate) fn dial(
     });
     let addrs = Addrs::collect(urls).ok_or(DialError::NoAddresses)?;
 
-    let mut config = ClientConfig::default();
-    config.bind.set_port(0);
-    config.reconnect = Some(true);
+    let mut config = moq_tokio::connect::Config::default();
+    config.bind = Some("[::]:0".parse().expect("valid ephemeral bind"));
+    config.once = Some(false);
     config.backoff.timeout = Some(RECONNECT_BUDGET);
     config.timeout = Some(CONNECT_TIMEOUT);
     config.version = config
@@ -67,11 +67,11 @@ pub(crate) fn dial(
         .filter(|version| carries_request_path(version))
         .copied()
         .collect();
-    config.tls = moq_native::tls::Client::default();
+    config.tls = moq_tokio::tls::Connect::default();
     config.tls.fingerprint = vec![fingerprint.clone()];
 
     let client = config
-        .init()?
+        .init(moq_tokio::quic::Config::default())?
         .with_publisher(&origin)
         .with_subscriber(origin);
     Ok(client.connect(addrs))
@@ -85,7 +85,7 @@ fn carries_request_path(version: &moq_net::Version) -> bool {
 mod tests {
     use std::{net::SocketAddr, time::Duration};
 
-    use moq_native::moq_net;
+    use moq_tokio::moq_net;
 
     use super::{PeerRecord, dial};
     use crate::session::server;
@@ -99,8 +99,8 @@ mod tests {
         }
     }
 
-    async fn listener() -> (moq_native::Listener, SocketAddr, String) {
-        let _ = moq_native::rustls::crypto::aws_lc_rs::default_provider().install_default();
+    async fn listener() -> (moq_tokio::Listener, SocketAddr, String) {
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
         let server = server::bind("127.0.0.1:0".parse().expect("bind")).expect("server");
         let advertised = server.advertisement().clone();
         let listener = server.listen().await.expect("listen");
@@ -112,12 +112,17 @@ mod tests {
         let (mut listener, addr, fingerprint) = listener().await;
         let accept = tokio::spawn(async move {
             let request = listener.accept().await.expect("request");
-            server::accept(request, "proof", moq_net::Origin::random().produce()).await
+            server::accept(
+                request,
+                "proof",
+                moq_tokio::origin::spawn(moq_net::Origin::random()),
+            )
+            .await
         });
 
         let connection = dial(
             &peer(addr, fingerprint, "proof"),
-            moq_net::Origin::random().produce(),
+            moq_tokio::origin::spawn(moq_net::Origin::random()),
         )
         .expect("dial")
         .established()
@@ -135,12 +140,17 @@ mod tests {
         let (mut listener, addr, fingerprint) = listener().await;
         let accept = tokio::spawn(async move {
             let request = listener.accept().await.expect("request");
-            server::accept(request, "expected", moq_net::Origin::random().produce()).await
+            server::accept(
+                request,
+                "expected",
+                moq_tokio::origin::spawn(moq_net::Origin::random()),
+            )
+            .await
         });
 
         let connection = dial(
             &peer(addr, fingerprint, "wrong"),
-            moq_net::Origin::random().produce(),
+            moq_tokio::origin::spawn(moq_net::Origin::random()),
         )
         .expect("dial");
         let established = tokio::time::timeout(Duration::from_secs(4), connection.established())
@@ -164,7 +174,7 @@ mod tests {
 
         let connection = dial(
             &peer(addr, "00".repeat(32), "proof"),
-            moq_net::Origin::random().produce(),
+            moq_tokio::origin::spawn(moq_net::Origin::random()),
         )
         .expect("dial");
         let result = tokio::time::timeout(Duration::from_secs(4), connection.established())
@@ -180,14 +190,19 @@ mod tests {
         let (mut listener, addr, fingerprint) = listener().await;
         let accept = tokio::spawn(async move {
             let request = listener.accept().await.expect("request");
-            server::accept(request, "proof", moq_net::Origin::random().produce()).await
+            server::accept(
+                request,
+                "proof",
+                moq_tokio::origin::spawn(moq_net::Origin::random()),
+            )
+            .await
         });
 
         let mut record = peer(addr, fingerprint, "proof");
         record
             .urls
             .insert(0, "moqt://127.0.0.1:9".parse().expect("candidate"));
-        let connection = dial(&record, moq_net::Origin::random().produce())
+        let connection = dial(&record, moq_tokio::origin::spawn(moq_net::Origin::random()))
             .expect("dial")
             .established()
             .await
@@ -202,8 +217,8 @@ mod tests {
     #[tokio::test]
     async fn one_session_shares_broadcasts_in_both_directions() {
         let (mut listener, addr, fingerprint) = listener().await;
-        let server_origin = moq_net::Origin::random().produce();
-        let client_origin = moq_net::Origin::random().produce();
+        let server_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+        let client_origin = moq_tokio::origin::spawn(moq_net::Origin::random());
         let _from_server = server_origin
             .create_broadcast(
                 "moqcast.screen/server",

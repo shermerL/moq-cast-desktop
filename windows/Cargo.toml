@@ -11,7 +11,7 @@ publish = false
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wgpu"] }
-moq-native = { git = "https://github.com/moq-dev/moq", rev = "68cf64603f067f64bc02fe800464aa59710a258c", default-features = false, features = ["aws-lc-rs", "mdns", "quinn"] }
+moq-tokio = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["aws-lc-rs", "mdns", "quinn"] }
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 thiserror = "2"
 tracing = "0.1"
@@ -19,10 +19,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-hang = { git = "https://github.com/moq-dev/moq", rev = "68cf64603f067f64bc02fe800464aa59710a258c" }
-moq-audio = { git = "https://github.com/moq-dev/moq", rev = "68cf64603f067f64bc02fe800464aa59710a258c", default-features = false, features = ["playback"] }
-moq-mux = { git = "https://github.com/moq-dev/moq", rev = "68cf64603f067f64bc02fe800464aa59710a258c" }
-moq-video = { git = "https://github.com/moq-dev/moq", rev = "68cf64603f067f64bc02fe800464aa59710a258c", default-features = false }
+hang = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53" }
+moq-audio = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["playback"] }
+moq-mux = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53" }
+moq-video = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["capture"] }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Media_Audio",

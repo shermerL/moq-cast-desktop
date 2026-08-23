@@ -43,7 +43,7 @@ struct Playback {
 
 impl Playback {
     async fn open(
-        broadcast: &moq_native::moq_net::broadcast::Consumer,
+        broadcast: &moq_tokio::moq_net::broadcast::Consumer,
         name: &str,
         config: &hang::catalog::AudioConfig,
     ) -> anyhow::Result<Self> {
@@ -84,7 +84,7 @@ impl Task {
     pub(super) fn spawn(
         generation: u64,
         path: &str,
-        broadcast: &moq_native::moq_net::broadcast::Consumer,
+        broadcast: &moq_tokio::moq_net::broadcast::Consumer,
         selection: &Selection,
         events: &mpsc::Sender<ViewEvent>,
     ) -> Self {
@@ -108,7 +108,7 @@ impl Drop for Task {
 }
 
 async fn run(
-    broadcast: moq_native::moq_net::broadcast::Consumer,
+    broadcast: moq_tokio::moq_net::broadcast::Consumer,
     selection: Selection,
     events: Events,
 ) {

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
 
-use moq_native::mdns;
+use moq_tokio::mdns;
 use url::Url;
 
 #[derive(Clone, PartialEq, Eq)]

@@ -38,7 +38,7 @@ struct Args {
 fn main() -> Result<()> {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info"))
-        .add_directive("moq_native=warn".parse().expect("valid log directive"))
+        .add_directive("moq_tokio=warn".parse().expect("valid log directive"))
         .add_directive("mdns_sd=warn".parse().expect("valid log directive"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 

@@ -7,7 +7,7 @@ mod state;
 
 use std::{collections::BTreeMap, net::SocketAddr};
 
-use moq_native::mdns;
+use moq_tokio::mdns;
 use tokio::{sync::mpsc, task::JoinHandle};
 
 pub(crate) use peer::DialError;
@@ -44,13 +44,14 @@ pub(super) enum RuntimeEvent {
 }
 
 struct Outbound {
-    connection: moq_native::Connection,
+    connection: moq_tokio::Connection,
     task: JoinHandle<()>,
 }
 
 pub(crate) struct SessionFoundation {
     advertisement: Advertisement,
-    origin: moq_native::moq_net::origin::Producer,
+    origin: moq_tokio::moq_net::origin::Producer,
+    origin_driver: JoinHandle<()>,
     events: mpsc::Sender<RuntimeEvent>,
     recv: mpsc::Receiver<RuntimeEvent>,
     listener_task: Option<JoinHandle<()>>,
@@ -67,7 +68,7 @@ impl SessionFoundation {
         &self.advertisement
     }
 
-    pub(crate) fn origin(&self) -> &moq_native::moq_net::origin::Producer {
+    pub(crate) fn origin(&self) -> &moq_tokio::moq_net::origin::Producer {
         &self.origin
     }
 
@@ -183,6 +184,8 @@ impl SessionFoundation {
             task.abort();
             let _ = task.await;
         }
+        drop(self.origin);
+        let _ = self.origin_driver.await;
     }
 
     async fn stop_outbound(&mut self, peer: &str) {
@@ -203,7 +206,10 @@ impl BoundServer {
     pub(crate) async fn start(self, credential: String) -> Result<SessionFoundation, StartError> {
         let advertisement = self.advertisement().clone();
         let listener = self.listen().await?;
-        let origin = moq_native::moq_net::Origin::random().produce();
+        let (origin, origin_driver) = moq_tokio::moq_net::origin::Producer::new(
+            moq_tokio::moq_net::origin::Info::new(moq_tokio::moq_net::Origin::random()),
+        );
+        let origin_driver = tokio::spawn(origin_driver);
         let (events, recv) = mpsc::channel(EVENT_CAPACITY);
         let listener_task = tokio::spawn(server::run_listener(
             listener,
@@ -214,6 +220,7 @@ impl BoundServer {
         Ok(SessionFoundation {
             advertisement,
             origin,
+            origin_driver,
             events,
             recv,
             listener_task: Some(listener_task),
@@ -231,7 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn disconnect_closes_current_generation() {
-        let _ = moq_native::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
         let bound = SessionFoundation::bind("127.0.0.1:0".parse().expect("bind")).expect("bound");
         let advertised = bound.advertisement().clone();
         let mut foundation = bound.start("proof".to_owned()).await.expect("started");

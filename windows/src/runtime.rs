@@ -8,7 +8,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use moq_native::{mdns, moq_net};
+use moq_tokio::{mdns, moq_net};
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 use url::Url;

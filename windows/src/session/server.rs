@@ -18,7 +18,7 @@ pub(crate) enum StartError {
     #[error("listener did not provide a certificate fingerprint")]
     MissingFingerprint,
     #[error(transparent)]
-    Native(#[from] moq_native::Error),
+    Native(#[from] moq_tokio::Error),
 }
 
 #[derive(Debug, Error)]
@@ -26,11 +26,11 @@ pub(crate) enum AcceptError {
     #[error("LAN peer did not present this listener's credential")]
     Unauthorized,
     #[error(transparent)]
-    Native(#[from] moq_native::Error),
+    Native(#[from] moq_tokio::Error),
 }
 
 pub(crate) struct BoundServer {
-    server: moq_native::Server,
+    server: moq_tokio::Server,
     advertisement: Advertisement,
 }
 
@@ -39,16 +39,16 @@ impl BoundServer {
         &self.advertisement
     }
 
-    pub(super) async fn listen(self) -> Result<moq_native::Listener, StartError> {
+    pub(super) async fn listen(self) -> Result<moq_tokio::Listener, StartError> {
         Ok(self.server.listen().await?)
     }
 }
 
 pub(crate) fn bind(bind: SocketAddr) -> Result<BoundServer, StartError> {
-    let mut config = moq_native::ServerConfig::default();
+    let mut config = moq_tokio::listen::Config::default();
     config.bind = Some(bind.to_string());
     config.tls.generate = vec!["moq-cast-windows".to_owned()];
-    let server = config.init()?;
+    let server = config.init(moq_tokio::quic::Config::default())?;
     let addr = server.local_addr()?;
     let fingerprint = server
         .certificates()
@@ -63,10 +63,10 @@ pub(crate) fn bind(bind: SocketAddr) -> Result<BoundServer, StartError> {
 }
 
 pub(crate) async fn accept(
-    request: moq_native::Request,
+    request: moq_tokio::Request,
     credential: &str,
-    origin: moq_native::moq_net::origin::Producer,
-) -> Result<moq_native::moq_net::Session, AcceptError> {
+    origin: moq_tokio::moq_net::origin::Producer,
+) -> Result<moq_tokio::moq_net::Session, AcceptError> {
     if !authorized(request.path(), credential) {
         request.close(403).await?;
         return Err(AcceptError::Unauthorized);
@@ -79,9 +79,9 @@ pub(crate) async fn accept(
 }
 
 pub(super) async fn run_listener(
-    mut listener: moq_native::Listener,
+    mut listener: moq_tokio::Listener,
     credential: String,
-    origin: moq_native::moq_net::origin::Producer,
+    origin: moq_tokio::moq_net::origin::Producer,
     events: mpsc::Sender<RuntimeEvent>,
 ) {
     let mut inbound_id = 0_u64;

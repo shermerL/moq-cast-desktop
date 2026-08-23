@@ -14,9 +14,7 @@ pub(crate) fn authorized(path: &str, expected: &str) -> bool {
         return false;
     };
 
-    !presented.is_empty()
-        && !presented.contains('/')
-        && moq_native::mdns::ct_eq(expected, presented)
+    !presented.is_empty() && !presented.contains('/') && moq_tokio::mdns::ct_eq(expected, presented)
 }
 
 #[cfg(test)]

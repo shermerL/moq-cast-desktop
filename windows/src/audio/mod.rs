@@ -339,7 +339,7 @@ impl Normalizer {
 
 #[cfg(target_os = "windows")]
 pub(crate) async fn publish(
-    mut broadcast: moq_native::moq_net::broadcast::Producer,
+    mut broadcast: moq_tokio::moq_net::broadcast::Producer,
     catalog: moq_mux::catalog::Producer,
     clock: moq_mux::Clock,
     generation: u64,
@@ -460,7 +460,7 @@ pub(crate) async fn publish(
                         for sample in samples {
                             data.extend_from_slice(&sample.to_le_bytes());
                         }
-                        let timestamp = match moq_native::moq_net::Timestamp::from_micros(
+                        let timestamp = match moq_tokio::moq_net::Timestamp::from_micros(
                             packet.timestamp_us,
                         ) {
                             Ok(timestamp) => timestamp,

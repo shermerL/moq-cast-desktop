@@ -230,7 +230,7 @@ impl Selection {
 
     async fn decoder(
         &self,
-        broadcast: &moq_native::moq_net::broadcast::Consumer,
+        broadcast: &moq_tokio::moq_net::broadcast::Consumer,
     ) -> anyhow::Result<moq_video::decode::Consumer> {
         moq_video::decode::Consumer::new(
             broadcast,
@@ -247,7 +247,7 @@ impl Selection {
 pub(crate) async fn run(
     generation: u64,
     path: String,
-    broadcast: moq_native::moq_net::broadcast::Consumer,
+    broadcast: moq_tokio::moq_net::broadcast::Consumer,
     events: mpsc::Sender<ViewEvent>,
     frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
 ) {
@@ -433,7 +433,7 @@ pub(crate) async fn run(
 pub(crate) async fn run(
     generation: u64,
     _path: String,
-    _broadcast: moq_native::moq_net::broadcast::Consumer,
+    _broadcast: moq_tokio::moq_net::broadcast::Consumer,
     events: mpsc::Sender<ViewEvent>,
     _frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
 ) {

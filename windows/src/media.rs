@@ -1,6 +1,6 @@
 //! Single-publication screen media lifecycle and Windows capture pipeline.
 
-use moq_native::moq_net;
+use moq_tokio::moq_net;
 
 use crate::{
     audio::{AudioSnapshot, StatusUpdate as AudioStatusUpdate},
