@@ -5,7 +5,7 @@ mod audio;
 
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ViewPhase {
@@ -23,13 +23,16 @@ pub(crate) enum ViewAudioPhase {
     #[default]
     Idle,
     Pending,
+    TrackSelected,
+    Decoded,
     NotPublished,
-    Playing,
+    Writing,
     Failed,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ViewAudioSnapshot {
+    pub(crate) generation: u64,
     pub(crate) phase: ViewAudioPhase,
     pub(crate) codec: Option<String>,
     pub(crate) sample_rate: Option<u32>,
@@ -96,6 +99,7 @@ impl ViewSnapshot {
         &mut self,
         generation: u64,
         path: &str,
+        audio_generation: u64,
         audio: ViewAudioSnapshot,
     ) -> bool {
         if generation != self.generation
@@ -104,7 +108,13 @@ impl ViewSnapshot {
         {
             return false;
         }
-        self.audio = audio;
+        if audio_generation < self.audio.generation {
+            return false;
+        }
+        self.audio = ViewAudioSnapshot {
+            generation: audio_generation,
+            ..audio
+        };
         true
     }
 
@@ -179,12 +189,87 @@ pub(crate) enum ViewEvent {
     AudioChanged {
         generation: u64,
         path: String,
+        audio_generation: u64,
         audio: ViewAudioSnapshot,
     },
     Ended {
         generation: u64,
         result: Result<(), String>,
     },
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AudioStatsReport {
+    frames: u64,
+    bytes: u64,
+    writes: u64,
+    write_errors: u64,
+    pts_gaps: u64,
+    pts_gap_us: u128,
+    max_pts_gap_us: u128,
+    pts_regressions: u64,
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Default)]
+struct AudioStats {
+    report: AudioStatsReport,
+    total_frames: u64,
+    total_writes: u64,
+    previous_pts_us: Option<u128>,
+    previous_end_us: Option<u128>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl AudioStats {
+    fn decoded(&mut self, pts_us: u128, bytes: usize, duration_us: u128) -> bool {
+        let first = self.total_frames == 0;
+        self.total_frames = self.total_frames.saturating_add(1);
+        self.report.frames = self.report.frames.saturating_add(1);
+        self.report.bytes = self.report.bytes.saturating_add(bytes as u64);
+        if self
+            .previous_pts_us
+            .is_some_and(|previous| pts_us < previous)
+        {
+            self.report.pts_regressions = self.report.pts_regressions.saturating_add(1);
+        }
+        if let Some(previous_end_us) = self.previous_end_us
+            && pts_us > previous_end_us
+        {
+            let gap_us = pts_us - previous_end_us;
+            self.report.pts_gaps = self.report.pts_gaps.saturating_add(1);
+            self.report.pts_gap_us = self.report.pts_gap_us.saturating_add(gap_us);
+            self.report.max_pts_gap_us = self.report.max_pts_gap_us.max(gap_us);
+        }
+        self.previous_pts_us = Some(pts_us);
+        self.previous_end_us = Some(pts_us.saturating_add(duration_us));
+        first
+    }
+
+    fn wrote(&mut self) -> bool {
+        let first = self.total_writes == 0;
+        self.total_writes = self.total_writes.saturating_add(1);
+        self.report.writes = self.report.writes.saturating_add(1);
+        first
+    }
+
+    fn write_failed(&mut self) {
+        self.report.write_errors = self.report.write_errors.saturating_add(1);
+    }
+
+    fn take_report(&mut self) -> AudioStatsReport {
+        std::mem::take(&mut self.report)
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn pcm_duration_us(bytes: usize, channels: u32, sample_rate: u32) -> u128 {
+    if channels == 0 || sample_rate == 0 {
+        return 0;
+    }
+    let frames = bytes / size_of::<f32>() / channels as usize;
+    (frames as u128 * 1_000_000) / sample_rate as u128
 }
 
 #[cfg(target_os = "windows")]
@@ -250,23 +335,48 @@ pub(crate) async fn run(
     broadcast: moq_tokio::moq_net::broadcast::Consumer,
     events: mpsc::Sender<ViewEvent>,
     frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
+    mut stop: oneshot::Receiver<()>,
 ) {
     use moq_mux::catalog::Stream;
 
-    let result = async {
-        let mut catalog = moq_mux::catalog::Consumer::<()>::new(
-            &broadcast,
-            moq_mux::catalog::CatalogFormat::Hang,
-        )
-        .await?;
-        let first = catalog
-            .next()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("remote screen catalog ended"))?;
+    enum Exit {
+        Stopped,
+    }
+
+    let result: anyhow::Result<Exit> = async {
+        let mut catalog = tokio::select! {
+            _ = &mut stop => return Ok(Exit::Stopped),
+            result = moq_mux::catalog::Consumer::<()>::new(
+                &broadcast,
+                moq_mux::catalog::CatalogFormat::Hang,
+            ) => result?,
+        };
+        let first = tokio::select! {
+            _ = &mut stop => return Ok(Exit::Stopped),
+            result = catalog.next() => result?
+                .ok_or_else(|| anyhow::anyhow!("remote screen catalog ended"))?,
+        };
         let mut selection = Selection::from_catalog(first)?;
-        let mut decoder = selection.decoder(&broadcast).await?;
-        let mut audio_task =
-            audio::Task::spawn(generation, &path, &broadcast, &selection.audio, &events);
+        let mut decoder = tokio::select! {
+            _ = &mut stop => return Ok(Exit::Stopped),
+            result = selection.decoder(&broadcast) => result?,
+        };
+        let mut audio_generation = 1_u64;
+        send_audio_pending(
+            generation,
+            audio_generation,
+            &path,
+            &events,
+        )
+        .await;
+        let mut audio_task = Some(audio::Task::spawn(
+            generation,
+            audio_generation,
+            &path,
+            &broadcast,
+            &selection.audio,
+            &events,
+        ));
         let mut decoder_generation = 1_u64;
         let mut sequence = 0_u64;
         let mut decoder_ready = false;
@@ -280,9 +390,11 @@ pub(crate) async fn run(
             "remote video decoder opened"
         );
 
-        loop {
+        let playback_result: anyhow::Result<Exit> = async {
+            loop {
             tokio::select! {
                 biased;
+                _ = &mut stop => return Ok(Exit::Stopped),
                 update = catalog.next() => {
                     let Some(update) = update? else {
                         anyhow::bail!("remote screen catalog ended");
@@ -311,22 +423,34 @@ pub(crate) async fn run(
                         "remote screen catalog changed"
                     );
                     if next.audio != selection.audio {
-                        drop(std::mem::replace(
-                            &mut audio_task,
-                            audio::Task::spawn(
-                                generation,
-                                &path,
-                                &broadcast,
-                                &next.audio,
-                                &events,
-                            ),
+                        audio_generation = audio_generation.saturating_add(1);
+                        send_audio_pending(
+                            generation,
+                            audio_generation,
+                            &path,
+                            &events,
+                        )
+                        .await;
+                        if let Some(task) = audio_task.take() {
+                            task.stop("catalog-change").await;
+                        }
+                        audio_task = Some(audio::Task::spawn(
+                            generation,
+                            audio_generation,
+                            &path,
+                            &broadcast,
+                            &next.audio,
+                            &events,
                         ));
                     }
                     if !video_changed {
                         selection = next;
                         continue;
                     }
-                    let next_decoder = next.decoder(&broadcast).await?;
+                    let next_decoder = tokio::select! {
+                        _ = &mut stop => return Ok(Exit::Stopped),
+                        result = next.decoder(&broadcast) => result?,
+                    };
                     selection = next;
                     decoder = next_decoder;
                     decoder_generation = decoder_generation.saturating_add(1);
@@ -422,11 +546,58 @@ pub(crate) async fn run(
                     }
             }
         }
-    }
-    .await
-    .map_err(|error: anyhow::Error| error.to_string());
+        }
+        .await;
 
-    let _ = events.send(ViewEvent::Ended { generation, result }).await;
+        if let Some(task) = audio_task.take() {
+            let reason = if matches!(&playback_result, Ok(Exit::Stopped)) {
+                "view-stop"
+            } else {
+                "view-ended"
+            };
+            task.stop(reason).await;
+        }
+        playback_result
+    }
+    .await;
+
+    match result {
+        Ok(Exit::Stopped) => {
+            tracing::info!(
+                view_generation = generation,
+                path = %path,
+                "remote screen playback stopped after audio teardown"
+            );
+        }
+        Err(error) => {
+            let _ = events
+                .send(ViewEvent::Ended {
+                    generation,
+                    result: Err(error.to_string()),
+                })
+                .await;
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn send_audio_pending(
+    generation: u64,
+    audio_generation: u64,
+    path: &str,
+    events: &mpsc::Sender<ViewEvent>,
+) {
+    let _ = events
+        .send(ViewEvent::AudioChanged {
+            generation,
+            path: path.to_owned(),
+            audio_generation,
+            audio: ViewAudioSnapshot {
+                phase: ViewAudioPhase::Pending,
+                ..ViewAudioSnapshot::default()
+            },
+        })
+        .await;
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -436,6 +607,7 @@ pub(crate) async fn run(
     _broadcast: moq_tokio::moq_net::broadcast::Consumer,
     events: mpsc::Sender<ViewEvent>,
     _frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
+    _stop: oneshot::Receiver<()>,
 ) {
     let _ = events
         .send(ViewEvent::Ended {
@@ -619,6 +791,7 @@ mod tests {
         assert!(!view.audio_changed(
             generation + 1,
             "moqcast.screen/peer-a",
+            1,
             ViewAudioSnapshot {
                 phase: ViewAudioPhase::Failed,
                 ..ViewAudioSnapshot::default()
@@ -627,16 +800,106 @@ mod tests {
         assert!(view.audio_changed(
             generation,
             "moqcast.screen/peer-a",
+            1,
             ViewAudioSnapshot {
-                phase: ViewAudioPhase::Playing,
+                phase: ViewAudioPhase::TrackSelected,
                 codec: Some("opus".to_owned()),
                 sample_rate: Some(48_000),
                 channels: Some(2),
                 last_error: None,
+                ..ViewAudioSnapshot::default()
+            },
+        ));
+        assert!(view.audio_changed(
+            generation,
+            "moqcast.screen/peer-a",
+            1,
+            ViewAudioSnapshot {
+                phase: ViewAudioPhase::Decoded,
+                codec: Some("opus".to_owned()),
+                sample_rate: Some(48_000),
+                channels: Some(2),
+                ..ViewAudioSnapshot::default()
+            },
+        ));
+        assert!(view.audio_changed(
+            generation,
+            "moqcast.screen/peer-a",
+            1,
+            ViewAudioSnapshot {
+                phase: ViewAudioPhase::Writing,
+                codec: Some("opus".to_owned()),
+                sample_rate: Some(48_000),
+                channels: Some(2),
+                ..ViewAudioSnapshot::default()
             },
         ));
         assert_eq!(view.phase, ViewPhase::Viewing);
-        assert_eq!(view.audio.phase, ViewAudioPhase::Playing);
+        assert_eq!(view.audio.phase, ViewAudioPhase::Writing);
+    }
+
+    #[test]
+    fn stale_audio_generation_cannot_overwrite_current_readiness() {
+        let mut view = ViewSnapshot::default();
+        let generation = view.begin("moqcast.screen/peer-a").expect("begin");
+        assert!(view.audio_changed(
+            generation,
+            "moqcast.screen/peer-a",
+            2,
+            ViewAudioSnapshot {
+                phase: ViewAudioPhase::Decoded,
+                ..ViewAudioSnapshot::default()
+            },
+        ));
+        assert!(!view.audio_changed(
+            generation,
+            "moqcast.screen/peer-a",
+            1,
+            ViewAudioSnapshot {
+                phase: ViewAudioPhase::Failed,
+                ..ViewAudioSnapshot::default()
+            },
+        ));
+        assert_eq!(view.audio.generation, 2);
+        assert_eq!(view.audio.phase, ViewAudioPhase::Decoded);
+    }
+
+    #[test]
+    fn audio_stats_report_pts_gaps_regressions_and_reset_interval_counts() {
+        let mut stats = AudioStats::default();
+        assert!(stats.decoded(0, 3_840, 20_000));
+        assert!(!stats.decoded(20_000, 3_840, 20_000));
+        assert!(!stats.decoded(55_000, 3_840, 20_000));
+        assert!(!stats.decoded(45_000, 3_840, 20_000));
+        assert!(stats.wrote());
+        assert!(!stats.wrote());
+        stats.write_failed();
+
+        assert_eq!(
+            stats.take_report(),
+            AudioStatsReport {
+                frames: 4,
+                bytes: 15_360,
+                writes: 2,
+                write_errors: 1,
+                pts_gaps: 1,
+                pts_gap_us: 15_000,
+                max_pts_gap_us: 15_000,
+                pts_regressions: 1,
+            }
+        );
+        assert_eq!(stats.take_report(), AudioStatsReport::default());
+
+        assert!(!stats.decoded(80_000, 3_840, 20_000));
+        assert_eq!(stats.take_report().pts_gaps, 1);
+    }
+
+    #[test]
+    fn pcm_duration_uses_f32_frames_and_declared_layout() {
+        assert_eq!(pcm_duration_us(7_680, 2, 48_000), 20_000);
+        assert_eq!(pcm_duration_us(1_920, 1, 48_000), 10_000);
+        assert_eq!(pcm_duration_us(3_840, 0, 48_000), 0);
+        assert_eq!(pcm_duration_us(3_840, 2, 0), 0);
     }
 
     #[test]

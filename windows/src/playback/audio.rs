@@ -1,8 +1,12 @@
 //! Remote audio selection, decode, and system-output ownership.
 
+use std::time::Duration;
+
 use tokio::{sync::mpsc, task::JoinHandle};
 
-use super::{ViewAudioPhase, ViewAudioSnapshot, ViewEvent};
+use super::{AudioStats, ViewAudioPhase, ViewAudioSnapshot, ViewEvent, pcm_duration_us};
+
+const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, PartialEq)]
 pub(super) enum Selection {
@@ -59,30 +63,32 @@ impl Playback {
         Ok(Self { consumer, sink })
     }
 
-    async fn pump(&mut self) -> anyhow::Result<bool> {
-        let Some(frame) = self.consumer.read().await? else {
-            return Ok(false);
-        };
-        self.sink.write(&frame.data)?;
-        Ok(true)
+    async fn read(&mut self) -> anyhow::Result<Option<moq_audio::Frame>> {
+        self.consumer.read().await.map_err(Into::into)
     }
 
-    fn snapshot(&self, codec: &str) -> ViewAudioSnapshot {
+    fn snapshot(&self, phase: ViewAudioPhase, codec: &str) -> ViewAudioSnapshot {
         ViewAudioSnapshot {
-            phase: ViewAudioPhase::Playing,
+            phase,
             codec: Some(codec.to_owned()),
             sample_rate: Some(self.consumer.sample_rate()),
             channels: Some(self.consumer.channels()),
-            last_error: None,
+            ..ViewAudioSnapshot::default()
         }
     }
 }
 
-pub(super) struct Task(JoinHandle<()>);
+pub(super) struct Task {
+    handle: Option<JoinHandle<()>>,
+    view_generation: u64,
+    audio_generation: u64,
+    path: String,
+}
 
 impl Task {
     pub(super) fn spawn(
-        generation: u64,
+        view_generation: u64,
+        audio_generation: u64,
         path: &str,
         broadcast: &moq_tokio::moq_net::broadcast::Consumer,
         selection: &Selection,
@@ -91,19 +97,47 @@ impl Task {
         let broadcast = broadcast.clone();
         let selection = selection.clone();
         let events = Events {
-            generation,
+            view_generation,
+            audio_generation,
             path: path.to_owned(),
             sender: events.clone(),
         };
-        Self(tokio::spawn(async move {
-            run(broadcast, selection, events).await;
-        }))
+        Self {
+            handle: Some(tokio::spawn(async move {
+                run(broadcast, selection, events).await;
+            })),
+            view_generation,
+            audio_generation,
+            path: path.to_owned(),
+        }
+    }
+
+    pub(super) async fn stop(mut self, reason: &'static str) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+        tracing::info!(
+            view_generation = self.view_generation,
+            audio_generation = self.audio_generation,
+            broadcast = ?self.path,
+            reason,
+            "remote audio task teardown completed"
+        );
     }
 }
 
 impl Drop for Task {
     fn drop(&mut self) {
-        self.0.abort();
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+            tracing::warn!(
+                view_generation = self.view_generation,
+                audio_generation = self.audio_generation,
+                broadcast = ?self.path,
+                "remote audio task dropped without awaited teardown"
+            );
+        }
     }
 }
 
@@ -112,18 +146,12 @@ async fn run(
     selection: Selection,
     events: Events,
 ) {
-    events
-        .send(ViewAudioSnapshot {
-            phase: ViewAudioPhase::Pending,
-            ..ViewAudioSnapshot::default()
-        })
-        .await;
-
     let (name, config) = match selection {
         Selection::NotPublished => {
             tracing::debug!(
                 broadcast = ?events.path,
-                view_generation = events.generation,
+                view_generation = events.view_generation,
+                audio_generation = events.audio_generation,
                 "remote screen has no audio track"
             );
             events
@@ -137,7 +165,8 @@ async fn run(
         Selection::Unsupported => {
             tracing::warn!(
                 broadcast = ?events.path,
-                view_generation = events.generation,
+                view_generation = events.view_generation,
+                audio_generation = events.audio_generation,
                 "remote screen has no supported audio track; video continues"
             );
             events
@@ -152,11 +181,36 @@ async fn run(
         Selection::Playable { name, config } => (name, config),
     };
 
+    let codec = config.codec.to_string();
+    events
+        .send(ViewAudioSnapshot {
+            phase: ViewAudioPhase::TrackSelected,
+            codec: Some(codec.clone()),
+            sample_rate: Some(config.sample_rate),
+            channels: Some(config.channel_count),
+            ..ViewAudioSnapshot::default()
+        })
+        .await;
+    tracing::info!(
+        broadcast = ?events.path,
+        view_generation = events.view_generation,
+        audio_generation = events.audio_generation,
+        track = ?name,
+        codec = %codec,
+        catalog_sample_rate = config.sample_rate,
+        catalog_channels = config.channel_count,
+        container = ?config.container,
+        output_device = "system-default",
+        "remote audio track selected"
+    );
+
     let mut playback = match Playback::open(&broadcast, &name, &config).await {
         Ok(playback) => playback,
         Err(error) => {
             tracing::warn!(
                 broadcast = ?events.path,
+                view_generation = events.view_generation,
+                audio_generation = events.audio_generation,
                 track = ?name,
                 error = %error,
                 "could not start remote audio; video continues"
@@ -165,6 +219,8 @@ async fn run(
                 .send(ViewAudioSnapshot {
                     phase: ViewAudioPhase::Failed,
                     codec: Some(config.codec.to_string()),
+                    sample_rate: Some(config.sample_rate),
+                    channels: Some(config.channel_count),
                     last_error: Some(
                         "Remote audio could not start on the default output device.".to_owned(),
                     ),
@@ -174,53 +230,152 @@ async fn run(
             return;
         }
     };
-    let codec = config.codec.to_string();
-    let audio = playback.snapshot(&codec);
     tracing::info!(
         broadcast = ?events.path,
+        view_generation = events.view_generation,
+        audio_generation = events.audio_generation,
         track = ?name,
         codec = %codec,
-        sample_rate = audio.sample_rate.unwrap_or_default(),
-        channels = audio.channels.unwrap_or_default(),
-        "playing remote audio"
+        decoded_sample_rate = playback.consumer.sample_rate(),
+        decoded_channels = playback.consumer.channels(),
+        output_device = "system-default",
+        "remote audio pipeline opened; callback readiness is not exposed"
     );
-    events.send(audio).await;
+
+    let mut stats = AudioStats::default();
+    let mut reports = tokio::time::interval(REPORT_INTERVAL);
+    reports.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    reports.tick().await;
 
     loop {
-        match playback.pump().await {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::debug!(
-                    broadcast = ?events.path,
-                    track = ?name,
-                    "remote audio track ended"
+        tokio::select! {
+            decoded = playback.read() => {
+                let frame = match decoded {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => {
+                        tracing::debug!(
+                            broadcast = ?events.path,
+                            view_generation = events.view_generation,
+                            audio_generation = events.audio_generation,
+                            track = ?name,
+                            "remote audio track ended"
+                        );
+                        let mut audio = playback.snapshot(ViewAudioPhase::Failed, &codec);
+                        audio.last_error = Some("Remote audio track ended.".to_owned());
+                        events.send(audio).await;
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            broadcast = ?events.path,
+                            view_generation = events.view_generation,
+                            audio_generation = events.audio_generation,
+                            track = ?name,
+                            error = %error,
+                            "remote audio decode failed; video continues"
+                        );
+                        let mut audio = playback.snapshot(ViewAudioPhase::Failed, &codec);
+                        audio.last_error =
+                            Some("Remote audio playback failed; video is continuing.".to_owned());
+                        events.send(audio).await;
+                        return;
+                    }
+                };
+
+                let timestamp_us = frame.timestamp.as_micros();
+                let bytes = frame.data.len();
+                let duration_us = pcm_duration_us(
+                    bytes,
+                    playback.consumer.channels(),
+                    playback.consumer.sample_rate(),
                 );
-                let mut audio = playback.snapshot(&codec);
-                audio.phase = ViewAudioPhase::Failed;
-                audio.last_error = Some("Remote audio track ended.".to_owned());
-                events.send(audio).await;
-                return;
+                if stats.decoded(timestamp_us, bytes, duration_us) {
+                    tracing::info!(
+                        broadcast = ?events.path,
+                        view_generation = events.view_generation,
+                        audio_generation = events.audio_generation,
+                        track = ?name,
+                        frame_pts_us = %timestamp_us,
+                        pcm_bytes = bytes,
+                        pcm_duration_us = %duration_us,
+                        "decoded first remote PCM frame"
+                    );
+                    events
+                        .send(playback.snapshot(ViewAudioPhase::Decoded, &codec))
+                        .await;
+                }
+
+                if let Err(error) = playback.sink.write(&frame.data) {
+                    stats.write_failed();
+                    tracing::warn!(
+                        broadcast = ?events.path,
+                        view_generation = events.view_generation,
+                        audio_generation = events.audio_generation,
+                        track = ?name,
+                        frame_pts_us = %timestamp_us,
+                        error = %error,
+                        "remote PCM sink write failed; video continues"
+                    );
+                    log_interval(&events, &name, &codec, &playback, &mut stats);
+                    let mut audio = playback.snapshot(ViewAudioPhase::Failed, &codec);
+                    audio.last_error =
+                        Some("Remote audio playback failed; video is continuing.".to_owned());
+                    events.send(audio).await;
+                    return;
+                }
+                if stats.wrote() {
+                    tracing::info!(
+                        broadcast = ?events.path,
+                        view_generation = events.view_generation,
+                        audio_generation = events.audio_generation,
+                        track = ?name,
+                        frame_pts_us = %timestamp_us,
+                        buffered_us = %playback.sink.buffered().as_micros(),
+                        "first remote PCM sink write returned successfully; callback readiness is not exposed"
+                    );
+                    events
+                        .send(playback.snapshot(ViewAudioPhase::Writing, &codec))
+                        .await;
+                }
             }
-            Err(error) => {
-                tracing::warn!(
-                    broadcast = ?events.path,
-                    track = ?name,
-                    error = %error,
-                    "remote audio playback failed; video continues"
-                );
-                let mut audio = playback.snapshot(&codec);
-                audio.phase = ViewAudioPhase::Failed;
-                audio.last_error =
-                    Some("Remote audio playback failed; video is continuing.".to_owned());
-                events.send(audio).await;
-                return;
+            _ = reports.tick() => {
+                log_interval(&events, &name, &codec, &playback, &mut stats);
             }
         }
     }
 }
 
+fn log_interval(
+    events: &Events,
+    track: &str,
+    codec: &str,
+    playback: &Playback,
+    stats: &mut AudioStats,
+) {
+    let report = stats.take_report();
+    tracing::info!(
+        broadcast = ?events.path,
+        view_generation = events.view_generation,
+        audio_generation = events.audio_generation,
+        track,
+        codec,
+        decoded_frames = report.frames,
+        decoded_bytes = report.bytes,
+        sink_writes = report.writes,
+        sink_write_errors = report.write_errors,
+        pts_gaps = report.pts_gaps,
+        pts_gap_us = %report.pts_gap_us,
+        max_pts_gap_us = %report.max_pts_gap_us,
+        pts_regressions = report.pts_regressions,
+        buffered_us = %playback.sink.buffered().as_micros(),
+        peak = playback.sink.peak(),
+        "remote audio playback interval"
+    );
+}
+
 struct Events {
-    generation: u64,
+    view_generation: u64,
+    audio_generation: u64,
     path: String,
     sender: mpsc::Sender<ViewEvent>,
 }
@@ -230,8 +385,9 @@ impl Events {
         let _ = self
             .sender
             .send(ViewEvent::AudioChanged {
-                generation: self.generation,
+                generation: self.view_generation,
                 path: self.path.clone(),
+                audio_generation: self.audio_generation,
                 audio,
             })
             .await;

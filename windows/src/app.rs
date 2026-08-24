@@ -614,12 +614,18 @@ impl MoqCastApp {
                 let audio = match self.snapshot.view.audio.phase {
                     ViewAudioPhase::Idle => "not active".to_owned(),
                     ViewAudioPhase::Pending => "pending".to_owned(),
+                    ViewAudioPhase::TrackSelected => "track selected".to_owned(),
+                    ViewAudioPhase::Decoded => {
+                        let sample_rate = self.snapshot.view.audio.sample_rate.unwrap_or_default();
+                        let channels = self.snapshot.view.audio.channels.unwrap_or_default();
+                        format!("PCM decoded · {sample_rate} Hz · {channels} ch")
+                    }
                     ViewAudioPhase::NotPublished => "not published".to_owned(),
-                    ViewAudioPhase::Playing => {
+                    ViewAudioPhase::Writing => {
                         let codec = self.snapshot.view.audio.codec.as_deref().unwrap_or("audio");
                         let sample_rate = self.snapshot.view.audio.sample_rate.unwrap_or_default();
                         let channels = self.snapshot.view.audio.channels.unwrap_or_default();
-                        format!("{codec} · {sample_rate} Hz · {channels} ch")
+                        format!("{codec} PCM submitted · {sample_rate} Hz · {channels} ch")
                     }
                     ViewAudioPhase::Failed => "unavailable (video continues)".to_owned(),
                 };

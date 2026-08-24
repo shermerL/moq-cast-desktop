@@ -10,7 +10,7 @@ use std::{
 
 use moq_tokio::{mdns, moq_net};
 use thiserror::Error;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use url::Url;
 
 use crate::{
@@ -258,6 +258,7 @@ struct PublicationOwner {
 struct ViewOwner {
     generation: u64,
     task: Option<tokio::task::JoinHandle<()>>,
+    stop: Option<oneshot::Sender<()>>,
 }
 
 impl ViewOwner {
@@ -269,23 +270,38 @@ impl ViewOwner {
         events: mpsc::Sender<ViewEvent>,
         frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
     ) {
+        let (stop, stopped) = oneshot::channel();
         self.generation = generation;
+        self.stop = Some(stop);
         self.task = Some(tokio::spawn(crate::playback::run(
-            generation, path, broadcast, events, frames,
+            generation, path, broadcast, events, frames, stopped,
         )));
     }
 
     fn finished(&mut self, generation: u64) {
         if self.generation == generation {
             self.task = None;
+            self.stop = None;
         }
     }
 
     async fn stop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-            let _ = task.await;
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
         }
+        if let Some(task) = self.task.take()
+            && let Err(error) = task.await
+        {
+            tracing::warn!(
+                view_generation = self.generation,
+                error = %error,
+                "remote screen playback task failed during teardown"
+            );
+        }
+        tracing::info!(
+            view_generation = self.generation,
+            "remote screen playback teardown completed"
+        );
     }
 }
 
@@ -546,9 +562,12 @@ async fn run(
                     ViewEvent::AudioChanged {
                         generation,
                         path,
+                        audio_generation,
                         audio,
                     } => {
-                        snapshot.view.audio_changed(generation, &path, audio);
+                        snapshot
+                            .view
+                            .audio_changed(generation, &path, audio_generation, audio);
                     }
                     ViewEvent::Ended { generation, result } => {
                         tracing::info!(
@@ -1098,6 +1117,28 @@ mod tests {
         )));
         assert_eq!(snapshot.peers["peer"].screen, ScreenAvailability::Withdrawn);
         assert_eq!(snapshot.view.phase, ViewPhase::Idle);
+    }
+
+    #[tokio::test]
+    async fn stopping_view_signals_and_awaits_task_teardown() {
+        let (stop, stopped) = oneshot::channel();
+        let completed = Arc::new(AtomicBool::new(false));
+        let observed = completed.clone();
+        let task = tokio::spawn(async move {
+            let _ = stopped.await;
+            observed.store(true, Ordering::SeqCst);
+        });
+        let mut owner = ViewOwner {
+            generation: 7,
+            task: Some(task),
+            stop: Some(stop),
+        };
+
+        owner.stop().await;
+
+        assert!(completed.load(Ordering::SeqCst));
+        assert!(owner.task.is_none());
+        assert!(owner.stop.is_none());
     }
 
     #[test]
