@@ -51,6 +51,9 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build release desktop app
         run: cargo build --locked --release
+      - name: Verify release runtime dependencies
+        shell: pwsh
+        run: ./scripts/verify-runtime-dependencies.ps1
       - name: Upload Windows desktop app
         uses: actions/upload-artifact@v4
         with:
