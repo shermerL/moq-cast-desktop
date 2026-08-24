@@ -160,8 +160,10 @@ impl LivePlayer {
                                 RichText::new(match view.audio.phase {
                                     ViewAudioPhase::Idle => "NO AUDIO",
                                     ViewAudioPhase::Pending => "AUDIO...",
+                                    ViewAudioPhase::TrackSelected => "AUDIO TRACK",
+                                    ViewAudioPhase::Decoded => "PCM READY",
                                     ViewAudioPhase::NotPublished => "NO AUDIO",
-                                    ViewAudioPhase::Playing => "AUDIO",
+                                    ViewAudioPhase::Writing => "PCM SENT",
                                     ViewAudioPhase::Failed => "AUDIO ERROR",
                                 })
                                 .small()
