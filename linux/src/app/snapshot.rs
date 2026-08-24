@@ -94,6 +94,43 @@ pub enum MediaState {
     StoppingView { path: String },
 }
 
+/// Remote audio progress for the active screen viewer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemoteAudioPhase {
+    /// No remote viewer owns audio resources.
+    #[default]
+    Idle,
+    /// The viewer is waiting for an audio catalog decision.
+    Pending,
+    /// The current catalog has no supported local audio rendition.
+    NoAudio,
+    /// A supported local audio track has been selected.
+    TrackSelected,
+    /// The decoder produced PCM for the selected track.
+    PcmDecoded,
+    /// A PCM submission call returned successfully.
+    PcmSubmitted,
+    /// Remote audio failed while video playback remained active.
+    Failed,
+}
+
+/// Latest remote audio status for the active screen viewer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteAudioSnapshot {
+    /// Current audio pipeline phase.
+    pub phase: RemoteAudioPhase,
+    /// Selected track name, when one exists.
+    pub track: Option<String>,
+    /// Selected codec string, when one exists.
+    pub codec: Option<String>,
+    /// Decoded sample rate in samples per second.
+    pub sample_rate: Option<u32>,
+    /// Decoded channel count.
+    pub channels: Option<u32>,
+    /// Most recent audio-only failure.
+    pub last_error: Option<String>,
+}
+
 /// Discovery details used to update one peer row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscoveredPeer {
@@ -152,6 +189,8 @@ pub struct AppSnapshot {
     pub remote_screens: BTreeMap<String, RemoteScreenSnapshot>,
     /// Current screen media lifecycle.
     pub media: MediaState,
+    /// Remote audio progress for the current viewer.
+    pub remote_audio: RemoteAudioSnapshot,
     /// Most recent user-facing runtime failure.
     pub last_error: Option<String>,
 }
@@ -393,8 +432,25 @@ impl AppSnapshot {
         self.media = MediaState::PreparingView {
             path: path.to_owned(),
         };
+        self.remote_audio = RemoteAudioSnapshot {
+            phase: RemoteAudioPhase::Pending,
+            ..RemoteAudioSnapshot::default()
+        };
         self.last_error = None;
         Ok(())
+    }
+
+    /// Update audio state for the current remote screen without affecting video.
+    pub fn set_remote_audio(&mut self, path: &str, audio: RemoteAudioSnapshot) -> bool {
+        let current = match &self.media {
+            MediaState::PreparingView { path } | MediaState::Viewing { path } => path,
+            _ => return false,
+        };
+        if current != path {
+            return false;
+        }
+        self.remote_audio = audio;
+        true
     }
 
     /// Mark a prepared remote playback as active.
@@ -415,6 +471,7 @@ impl AppSnapshot {
             return Err(StateError::UnexpectedCompletion);
         }
         self.media = MediaState::Idle;
+        self.remote_audio = RemoteAudioSnapshot::default();
         self.last_error = Some(error.into());
         Ok(())
     }
@@ -425,6 +482,7 @@ impl AppSnapshot {
             return Err(StateError::UnexpectedCompletion);
         }
         self.media = MediaState::Idle;
+        self.remote_audio = RemoteAudioSnapshot::default();
         Ok(())
     }
 
@@ -444,6 +502,7 @@ impl AppSnapshot {
             return Err(StateError::UnexpectedCompletion);
         }
         self.media = MediaState::Idle;
+        self.remote_audio = RemoteAudioSnapshot::default();
         Ok(())
     }
 
@@ -458,5 +517,48 @@ impl AppSnapshot {
             peer.discovery = PeerDiscoveryState::Lost;
             peer.endpoints.clear();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_audio_updates_only_the_active_view_path() {
+        let mut snapshot = AppSnapshot {
+            media: MediaState::Viewing {
+                path: "moqcast.screen/current".into(),
+            },
+            ..AppSnapshot::default()
+        };
+        let submitted = RemoteAudioSnapshot {
+            phase: RemoteAudioPhase::PcmSubmitted,
+            ..RemoteAudioSnapshot::default()
+        };
+
+        assert!(!snapshot.set_remote_audio("moqcast.screen/old", submitted.clone()));
+        assert_eq!(snapshot.remote_audio.phase, RemoteAudioPhase::Idle);
+        assert!(snapshot.set_remote_audio("moqcast.screen/current", submitted));
+        assert_eq!(snapshot.remote_audio.phase, RemoteAudioPhase::PcmSubmitted);
+    }
+
+    #[test]
+    fn stopping_view_resets_remote_audio_state() {
+        let mut snapshot = AppSnapshot {
+            media: MediaState::StoppingView {
+                path: "moqcast.screen/current".into(),
+            },
+            remote_audio: RemoteAudioSnapshot {
+                phase: RemoteAudioPhase::PcmSubmitted,
+                ..RemoteAudioSnapshot::default()
+            },
+            ..AppSnapshot::default()
+        };
+
+        snapshot.finish_stop_view().expect("view stops");
+
+        assert_eq!(snapshot.media, MediaState::Idle);
+        assert_eq!(snapshot.remote_audio, RemoteAudioSnapshot::default());
     }
 }

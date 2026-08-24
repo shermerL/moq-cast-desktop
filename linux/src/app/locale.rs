@@ -1,5 +1,7 @@
 //! Localized UI copy for the initial English and Chinese interface.
 
+use super::RemoteAudioPhase;
+
 /// A supported interface language.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Locale {
@@ -25,6 +27,23 @@ impl Locale {
         match self {
             Self::Chinese => "zh-CN",
             Self::English => "en",
+        }
+    }
+
+    pub(super) fn remote_audio_status(self, phase: RemoteAudioPhase) -> &'static str {
+        match (self, phase) {
+            (Self::Chinese, RemoteAudioPhase::Idle | RemoteAudioPhase::NoAudio) => "无音频",
+            (Self::Chinese, RemoteAudioPhase::Pending) => "等待音频",
+            (Self::Chinese, RemoteAudioPhase::TrackSelected) => "已选择音轨",
+            (Self::Chinese, RemoteAudioPhase::PcmDecoded) => "PCM 已解码",
+            (Self::Chinese, RemoteAudioPhase::PcmSubmitted) => "PCM 提交调用成功",
+            (Self::Chinese, RemoteAudioPhase::Failed) => "音频不可用",
+            (Self::English, RemoteAudioPhase::Idle | RemoteAudioPhase::NoAudio) => "NO AUDIO",
+            (Self::English, RemoteAudioPhase::Pending) => "AUDIO PENDING",
+            (Self::English, RemoteAudioPhase::TrackSelected) => "TRACK SELECTED",
+            (Self::English, RemoteAudioPhase::PcmDecoded) => "PCM DECODED",
+            (Self::English, RemoteAudioPhase::PcmSubmitted) => "PCM SUBMIT OK",
+            (Self::English, RemoteAudioPhase::Failed) => "AUDIO ERROR",
         }
     }
 

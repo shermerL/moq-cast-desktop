@@ -7,7 +7,7 @@ use eframe::egui::{
     ViewportCommand,
 };
 
-use super::Locale;
+use super::{Locale, RemoteAudioPhase, RemoteAudioSnapshot};
 
 const FALLBACK_SOURCE: egui::Vec2 = egui::vec2(16.0, 9.0);
 const CONTROLS_HIDE_AFTER: f64 = 2.8;
@@ -69,14 +69,27 @@ impl FullscreenState {
 }
 
 pub(super) enum PlayerMode<'a> {
-    Preparing { path: &'a str },
-    Viewing { path: &'a str, stopping: bool },
+    Preparing {
+        path: &'a str,
+        audio: &'a RemoteAudioSnapshot,
+    },
+    Viewing {
+        path: &'a str,
+        stopping: bool,
+        audio: &'a RemoteAudioSnapshot,
+    },
 }
 
 impl PlayerMode<'_> {
     fn path(&self) -> &str {
         match self {
-            Self::Preparing { path } | Self::Viewing { path, .. } => path,
+            Self::Preparing { path, .. } | Self::Viewing { path, .. } => path,
+        }
+    }
+
+    fn audio(&self) -> &RemoteAudioSnapshot {
+        match self {
+            Self::Preparing { audio, .. } | Self::Viewing { audio, .. } => audio,
         }
     }
 
@@ -218,6 +231,21 @@ impl LivePlayer {
                                     )
                                     .truncate(),
                                 );
+                                let audio = mode.audio();
+                                let color = if audio.phase == RemoteAudioPhase::Failed {
+                                    Color32::from_rgb(255, 174, 174)
+                                } else {
+                                    Color32::from_gray(205)
+                                };
+                                let status = ui.label(
+                                    RichText::new(locale.remote_audio_status(audio.phase))
+                                        .size(11.0)
+                                        .strong()
+                                        .color(color),
+                                );
+                                if let Some(error) = &audio.last_error {
+                                    status.on_hover_text(error);
+                                }
                             });
                             ui.add_space(4.0);
                             ui.horizontal_wrapped(|ui| {

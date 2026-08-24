@@ -10,7 +10,9 @@ use tokio::task::JoinHandle;
 
 #[cfg(target_os = "linux")]
 use crate::app::MediaState;
-use crate::app::{AppSnapshot, DialRole, DiscoveredPeer, TransportState, UserCommand};
+use crate::app::{
+    AppSnapshot, DialRole, DiscoveredPeer, RemoteAudioSnapshot, TransportState, UserCommand,
+};
 use crate::network::discovery::{PeerRecord, PeerRegistry, PeerUpdate};
 use crate::network::{peer, server, service};
 use crate::publish::session::Publication;
@@ -157,6 +159,11 @@ enum OperationEvent {
     ViewStarted {
         generation: u64,
         path: String,
+    },
+    ViewAudioChanged {
+        generation: u64,
+        path: String,
+        audio: RemoteAudioSnapshot,
     },
     ViewEnded {
         generation: u64,
@@ -313,25 +320,27 @@ struct TaskResources {
     generation: u64,
 }
 
-#[cfg(any(target_os = "linux", test))]
 #[derive(Default)]
-struct ViewStartGate {
-    started: bool,
+struct ViewResources {
+    task: Option<JoinHandle<()>>,
+    cancel: Option<watch::Sender<bool>>,
+    generation: u64,
 }
 
-#[cfg(any(target_os = "linux", test))]
-impl ViewStartGate {
-    fn frame_ready(&mut self) -> bool {
-        if self.started {
-            return false;
-        }
-        self.started = true;
-        true
+impl ViewResources {
+    fn advance(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
     }
 
-    fn ensure_started(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(self.started, "remote screen ended before its first frame");
-        Ok(())
+    async fn stop(&mut self) {
+        self.advance();
+        if let Some(cancel) = self.cancel.take() {
+            cancel.send_replace(true);
+        }
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
     }
 }
 
@@ -358,7 +367,7 @@ struct Supervisor {
     mesh: MeshResources,
     remote_screens: HashMap<String, moq_net::broadcast::Consumer>,
     publish: TaskResources,
-    view: TaskResources,
+    view: ViewResources,
     announcements: JoinHandle<()>,
     playback_tx: watch::Sender<Option<Arc<PlaybackFrame>>>,
     service_tx: mpsc::Sender<service::Event>,
@@ -383,7 +392,7 @@ impl Supervisor {
             mesh: MeshResources::default(),
             remote_screens: HashMap::new(),
             publish: TaskResources::default(),
-            view: TaskResources::default(),
+            view: ViewResources::default(),
             announcements,
             playback_tx,
             service_tx,
@@ -603,8 +612,10 @@ impl Supervisor {
         let generation = self.view.advance();
         let events = self.operation_tx.clone();
         let frames = self.playback_tx.clone();
+        let (cancel, cancelled) = watch::channel(false);
+        self.view.cancel = Some(cancel);
         self.view.task = Some(tokio::spawn(run_view(
-            generation, path, broadcast, events, frames,
+            generation, path, broadcast, cancelled, events, frames,
         )));
         LoopAction::Changed
     }
@@ -843,11 +854,26 @@ impl Supervisor {
                     .expect("remote playback was preparing");
                 LoopAction::Changed
             }
+            OperationEvent::ViewAudioChanged {
+                generation,
+                path,
+                audio,
+            } => {
+                if generation != self.view.generation {
+                    return LoopAction::Unchanged;
+                }
+                if self.state.set_remote_audio(&path, audio) {
+                    LoopAction::Changed
+                } else {
+                    LoopAction::Unchanged
+                }
+            }
             OperationEvent::ViewEnded { generation, result } => {
                 if generation != self.view.generation {
                     return LoopAction::Unchanged;
                 }
                 self.view.task = None;
+                self.view.cancel = None;
                 self.playback_tx.send_replace(None);
                 match result {
                     Ok(()) => self.state.end_view().expect("remote playback ended"),
@@ -1159,65 +1185,92 @@ async fn run_view(
     generation: u64,
     path: String,
     broadcast: moq_net::broadcast::Consumer,
+    mut cancelled: watch::Receiver<bool>,
     events: mpsc::Sender<OperationEvent>,
     frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
 ) {
-    use moq_mux::catalog::Stream;
-
-    let result = async {
-        let mut catalog = moq_mux::catalog::Consumer::<()>::new(
-            &broadcast,
-            moq_mux::catalog::CatalogFormat::Hang,
-        )
-        .await?;
-        let snapshot = catalog
-            .next()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("remote screen catalog ended"))?;
-        let (name, config) = snapshot
-            .video
-            .renditions
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("remote screen has no video rendition"))?;
-        anyhow::ensure!(
-            config.broadcast.is_none(),
-            "external rendition broadcasts are not supported yet"
-        );
-        let mut decoder = moq_video::decode::Consumer::new(
-            &broadcast,
-            &config,
-            name,
-            moq_video::decode::Config::new(),
-        )
-        .await?;
-        let mut sequence = 0_u64;
-        let mut start_gate = ViewStartGate::default();
-        while let Some(frame) = decoder.read().await? {
-            sequence = sequence.wrapping_add(1);
-            let frame = tokio::task::spawn_blocking(move || {
-                PlaybackFrame::from_video(frame, generation, sequence)
-            })
-            .await??;
-            frames.send_replace(Some(Arc::new(frame)));
-            if start_gate.frame_ready() {
-                let _ = events
-                    .send(OperationEvent::ViewStarted {
-                        generation,
-                        path: path.clone(),
-                    })
-                    .await;
+    let (playback_tx, mut playback_rx) = mpsc::channel(8);
+    let playback = super::playback::run(
+        generation,
+        path.clone(),
+        broadcast,
+        cancelled.clone(),
+        playback_tx,
+        frames,
+    );
+    tokio::pin!(playback);
+    let mut cancelling = *cancelled.borrow_and_update();
+    let result = loop {
+        tokio::select! {
+            biased;
+            result = &mut playback => break result,
+            changed = cancelled.changed(), if !cancelling => {
+                if changed.is_err() || *cancelled.borrow_and_update() {
+                    cancelling = true;
+                }
+            }
+            event = playback_rx.recv() => {
+                let Some(event) = event else {
+                    break playback.as_mut().await;
+                };
+                match event {
+                    super::playback::Event::Started { ack } => {
+                        if cancelling {
+                            let _ = ack.send(());
+                            continue;
+                        }
+                        let operation = OperationEvent::ViewStarted {
+                            generation,
+                            path: path.clone(),
+                        };
+                        tokio::select! {
+                            result = events.send(operation) => {
+                                if result.is_err() {
+                                    break Err(anyhow::anyhow!("runtime operation channel closed"));
+                                }
+                            }
+                            changed = cancelled.changed() => {
+                                if changed.is_err() || *cancelled.borrow_and_update() {
+                                    cancelling = true;
+                                }
+                            }
+                        }
+                        let _ = ack.send(());
+                    }
+                    super::playback::Event::Audio(audio) => {
+                        if cancelling {
+                            continue;
+                        }
+                        let operation = OperationEvent::ViewAudioChanged {
+                            generation,
+                            path: path.clone(),
+                            audio,
+                        };
+                        tokio::select! {
+                            result = events.send(operation) => {
+                                if result.is_err() {
+                                    break Err(anyhow::anyhow!("runtime operation channel closed"));
+                                }
+                            }
+                            changed = cancelled.changed() => {
+                                if changed.is_err() || *cancelled.borrow_and_update() {
+                                    cancelling = true;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
-        start_gate.ensure_started()?;
-        Ok::<(), anyhow::Error>(())
     }
-    .await
     .map_err(|error| error.to_string());
 
-    let _ = events
-        .send(OperationEvent::ViewEnded { generation, result })
-        .await;
+    if !cancelling && !*cancelled.borrow() {
+        tokio::select! {
+            _ = events.send(OperationEvent::ViewEnded { generation, result }) => {}
+            _ = cancelled.changed() => {}
+        }
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1225,6 +1278,7 @@ async fn run_view(
     generation: u64,
     _path: String,
     _broadcast: moq_net::broadcast::Consumer,
+    _cancelled: watch::Receiver<bool>,
     events: mpsc::Sender<OperationEvent>,
     _frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
 ) {
@@ -1239,17 +1293,20 @@ async fn run_view(
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use tokio::sync::watch;
 
     use crate::app::{
-        DialRole, DiscoveredPeer, DiscoveryState, PeerDiscoveryState, TransportState, UserCommand,
+        DialRole, DiscoveredPeer, DiscoveryState, MediaState, PeerDiscoveryState, RemoteAudioPhase,
+        RemoteAudioSnapshot, TransportState, UserCommand,
     };
     use crate::network::service;
 
     use super::{
-        DISCOVERY_RETRY_LIMIT, DiscoveryRetryBudget, PEER_RETRY_LIMIT, PeerRetryBudget, SessionKey,
-        Supervisor, ViewStartGate, reset_outbound_for,
+        DISCOVERY_RETRY_LIMIT, DiscoveryRetryBudget, OperationEvent, PEER_RETRY_LIMIT,
+        PeerRetryBudget, SessionKey, Supervisor, ViewResources, reset_outbound_for,
     };
 
     fn supervisor() -> Supervisor {
@@ -1275,14 +1332,93 @@ mod tests {
         )
     }
 
-    #[test]
-    fn viewing_starts_only_after_the_first_renderable_frame() {
-        let mut gate = ViewStartGate::default();
+    #[tokio::test]
+    async fn stopping_view_signals_and_awaits_the_owner() {
+        struct Teardown(Arc<AtomicBool>);
+        impl Drop for Teardown {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
 
-        assert!(gate.ensure_started().is_err());
-        assert!(gate.frame_ready());
-        assert!(!gate.frame_ready());
-        assert!(gate.ensure_started().is_ok());
+        let stopped = Arc::new(AtomicBool::new(false));
+        let (cancel, mut cancelled) = watch::channel(false);
+        let task_stopped = stopped.clone();
+        let task = tokio::spawn(async move {
+            let _teardown = Teardown(task_stopped);
+            while cancelled.changed().await.is_ok() {
+                if *cancelled.borrow_and_update() {
+                    return;
+                }
+            }
+        });
+        let mut resources = ViewResources {
+            task: Some(task),
+            cancel: Some(cancel),
+            generation: 4,
+        };
+
+        resources.stop().await;
+
+        assert_eq!(resources.generation, 5);
+        assert!(resources.task.is_none());
+        assert!(resources.cancel.is_none());
+        assert!(stopped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn stale_audio_generation_cannot_update_a_new_view() {
+        let mut supervisor = supervisor();
+        supervisor.view.generation = 8;
+        supervisor.state.media = MediaState::Viewing {
+            path: "moqcast.screen/new".into(),
+        };
+
+        let action = supervisor
+            .handle_operation_event(OperationEvent::ViewAudioChanged {
+                generation: 7,
+                path: "moqcast.screen/new".into(),
+                audio: RemoteAudioSnapshot {
+                    phase: RemoteAudioPhase::PcmSubmitted,
+                    ..RemoteAudioSnapshot::default()
+                },
+            })
+            .await;
+
+        assert!(matches!(action, super::LoopAction::Unchanged));
+        assert_eq!(supervisor.state.remote_audio.phase, RemoteAudioPhase::Idle);
+    }
+
+    #[tokio::test]
+    async fn audio_failure_keeps_video_viewing() {
+        let mut supervisor = supervisor();
+        supervisor.view.generation = 8;
+        supervisor.state.media = MediaState::Viewing {
+            path: "moqcast.screen/peer".into(),
+        };
+
+        let action = supervisor
+            .handle_operation_event(OperationEvent::ViewAudioChanged {
+                generation: 8,
+                path: "moqcast.screen/peer".into(),
+                audio: RemoteAudioSnapshot {
+                    phase: RemoteAudioPhase::Failed,
+                    last_error: Some("output unavailable".into()),
+                    ..RemoteAudioSnapshot::default()
+                },
+            })
+            .await;
+
+        assert!(matches!(action, super::LoopAction::Changed));
+        assert!(matches!(
+            supervisor.state.media,
+            MediaState::Viewing { ref path } if path == "moqcast.screen/peer"
+        ));
+        assert_eq!(
+            supervisor.state.remote_audio.phase,
+            RemoteAudioPhase::Failed
+        );
+        assert!(supervisor.state.last_error.is_none());
     }
 
     #[test]

@@ -1,5 +1,7 @@
 //! Background runtime and UI communication handles.
 
+#[cfg(target_os = "linux")]
+mod playback;
 mod supervisor;
 
 use std::sync::Arc;
@@ -24,13 +26,17 @@ pub(crate) struct PlaybackFrame {
 /// Identifies a decoded frame across playback sessions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PlaybackFrameIdentity {
-    pub(crate) generation: u64,
+    pub(crate) view_generation: u64,
+    pub(crate) decoder_generation: u64,
     pub(crate) sequence: u64,
 }
 
 impl PlaybackFrame {
     #[cfg(target_os = "linux")]
-    fn from_video(frame: moq_video::Frame, generation: u64, sequence: u64) -> anyhow::Result<Self> {
+    fn from_video(
+        frame: moq_video::Frame,
+        identity: PlaybackFrameIdentity,
+    ) -> anyhow::Result<Self> {
         let width = frame.surface.width() as usize;
         let height = frame.surface.height() as usize;
         anyhow::ensure!(
@@ -73,10 +79,7 @@ impl PlaybackFrame {
             }
         }
         Ok(Self {
-            identity: PlaybackFrameIdentity {
-                generation,
-                sequence,
-            },
+            identity,
             width,
             height,
             rgba,
@@ -182,11 +185,13 @@ mod tests {
     #[test]
     fn equal_sequences_from_different_view_generations_are_different_frames() {
         let previous = PlaybackFrameIdentity {
-            generation: 1,
+            view_generation: 1,
+            decoder_generation: 1,
             sequence: 1,
         };
         let next = PlaybackFrameIdentity {
-            generation: 2,
+            view_generation: 2,
+            decoder_generation: 1,
             sequence: 1,
         };
 

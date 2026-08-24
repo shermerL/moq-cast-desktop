@@ -26,6 +26,11 @@ if ! pkg-config --exists libpipewire-0.3; then
     exit 1
 fi
 
+if ! pkg-config --exists alsa; then
+    echo "ALSA development files are required for remote audio playback." >&2
+    exit 1
+fi
+
 if [[ ! $PACKAGE_VARIANT =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
     echo "Invalid package variant: $PACKAGE_VARIANT" >&2
     exit 1
@@ -48,6 +53,7 @@ BUILD_DISTRO_ID=$(sed -n 's/^ID="\{0,1\}\([^" ]*\)"\{0,1\}$/\1/p' /etc/os-releas
 BUILD_DISTRO_VERSION=$(sed -n 's/^VERSION_ID="\{0,1\}\([^" ]*\)"\{0,1\}$/\1/p' /etc/os-release | head -n 1)
 GLIBC_VERSION=$(ldd --version | sed -n '1s/.* \([0-9][0-9.]*\)$/\1/p')
 PIPEWIRE_VERSION=$(pkg-config --modversion libpipewire-0.3)
+ALSA_VERSION=$(pkg-config --modversion alsa)
 PACKAGE_ID="MoQCast-${VERSION}-${PACKAGE_VARIANT}"
 APPDIR="$OUTPUT_ROOT/${PACKAGE_ID}.AppDir"
 APPIMAGE="$OUTPUT_ROOT/${PACKAGE_ID}.AppImage"
@@ -87,14 +93,16 @@ mkdir -p "$APPDIR/usr/share/doc/moqcast"
     echo "moq_video_source=vendored"
     echo "moq_video_revision=$MOQ_VIDEO_REVISION"
     echo "libspa_source=vendored-0.10.0"
-    echo "cargo_features=moq-tokio:aws-lc-rs,mdns,quinn;moq-video:capture,nvidia,pipewire"
+    echo "cargo_features=moq-tokio:aws-lc-rs,mdns,quinn;moq-audio:playback;moq-video:capture,nvidia,pipewire"
     echo "system_audio=pipewire"
+    echo "remote_audio_output=cpal-alsa"
     echo "build_date=$BUILD_DATE"
     echo "target=x86_64-unknown-linux-gnu"
     echo "package_variant=$PACKAGE_VARIANT"
     echo "build_distribution=$BUILD_DISTRO_ID-$BUILD_DISTRO_VERSION"
     echo "glibc_version=$GLIBC_VERSION"
     echo "pipewire_build_version=$PIPEWIRE_VERSION"
+    echo "alsa_build_version=$ALSA_VERSION"
     echo "intended_targets=$INTENDED_TARGETS"
 } >"$APPDIR/usr/share/doc/moqcast/build-info.txt"
 

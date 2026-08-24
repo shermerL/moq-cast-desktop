@@ -12,7 +12,8 @@ pub use command::UserCommand;
 pub use locale::Locale;
 pub use snapshot::{
     AppSnapshot, DialRole, DiscoveredPeer, DiscoveryState, MediaState, PeerDiscoveryState,
-    PeerSnapshot, RemoteScreenSnapshot, ScreenAvailability, StateError, TransportState,
+    PeerSnapshot, RemoteAudioPhase, RemoteAudioSnapshot, RemoteScreenSnapshot, ScreenAvailability,
+    StateError, TransportState,
 };
 
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Stroke};

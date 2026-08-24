@@ -30,7 +30,16 @@ pub(in crate::app) fn show(
         MediaState::Viewing { path } | MediaState::StoppingView { path } => {
             let stopping = matches!(snapshot.media, MediaState::StoppingView { .. });
             if matches!(
-                player.show(ui, locale, PlayerMode::Viewing { path, stopping }, playback,),
+                player.show(
+                    ui,
+                    locale,
+                    PlayerMode::Viewing {
+                        path,
+                        stopping,
+                        audio: &snapshot.remote_audio,
+                    },
+                    playback,
+                ),
                 Some(PlayerAction::StopWatching)
             ) {
                 command = Some(UserCommand::StopWatching);
@@ -38,7 +47,15 @@ pub(in crate::app) fn show(
         }
         MediaState::PreparingView { path } => {
             if matches!(
-                player.show(ui, locale, PlayerMode::Preparing { path }, playback),
+                player.show(
+                    ui,
+                    locale,
+                    PlayerMode::Preparing {
+                        path,
+                        audio: &snapshot.remote_audio,
+                    },
+                    playback,
+                ),
                 Some(PlayerAction::StopWatching)
             ) {
                 command = Some(UserCommand::StopWatching);

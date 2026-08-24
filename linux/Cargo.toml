@@ -22,7 +22,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-moq-audio = { git = "https://github.com/moq-dev/moq.git", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53" }
+hang = { git = "https://github.com/moq-dev/moq.git", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53" }
+moq-audio = { git = "https://github.com/moq-dev/moq.git", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["playback"] }
 moq-mux = { git = "https://github.com/moq-dev/moq.git", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53" }
 moq-video = { path = "vendor/moq-video", default-features = false, features = ["capture", "nvidia", "pipewire"] }
 pipewire = "0.10"
