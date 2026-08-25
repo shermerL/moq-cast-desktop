@@ -68,7 +68,7 @@ fn main() -> Result<()> {
                 error = %error,
                 "MoQCast Windows startup failed"
             );
-            return Err(error);
+            return Err(error.into());
         }
     };
     let options = eframe::NativeOptions {
