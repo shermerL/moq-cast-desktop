@@ -338,9 +338,14 @@ async fn run(
                 .send(playback.snapshot(RemoteAudioPhase::PcmDecoded, &name, &codec))
                 .await;
         }
-        let end = sync::pcm_frame_end(frame.timestamp, frame.data.len(), sample_rate, channels);
+        let end =
+            playback_sync::pcm_frame_end(frame.timestamp, frame.data.len(), sample_rate, channels);
         for part in frame.data.chunks(chunk) {
-            if let Some(excess) = playback.sink.buffered().checked_sub(sync::AUDIO_BUFFER_MAX) {
+            if let Some(excess) = playback
+                .sink
+                .buffered()
+                .checked_sub(playback_sync::AUDIO_BUFFER_MAX)
+            {
                 tokio::time::sleep(excess).await;
             }
             if let Err(error) = playback.sink.write(part) {
