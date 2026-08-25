@@ -67,6 +67,8 @@ fi
 mkdir "$APPDIR"
 
 cd "$LINUX_DIR"
+MOQCAST_SOURCE_COMMIT="$SOURCE_COMMIT" \
+MOQCAST_BUILD_IDENTITY="$PACKAGE_VARIANT" \
 cargo build --locked --release
 
 install -Dm755 target/release/moq-cast-desktop "$APPDIR/usr/bin/moq-cast-desktop"

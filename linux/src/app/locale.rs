@@ -70,8 +70,8 @@ impl Locale {
 
     pub(super) fn settings_description(self) -> &'static str {
         match self {
-            Self::Chinese => "设置应用使用的语言。",
-            Self::English => "Choose the language used by the app.",
+            Self::Chinese => "设置应用语言和本地诊断。",
+            Self::English => "Configure language and local diagnostics.",
         }
     }
 
@@ -433,6 +433,143 @@ impl Locale {
         match self {
             Self::Chinese => "语言",
             Self::English => "Language",
+        }
+    }
+
+    pub(super) fn diagnostics(self) -> &'static str {
+        match self {
+            Self::Chinese => "诊断日志",
+            Self::English => "Diagnostic logs",
+        }
+    }
+
+    pub(super) fn diagnostics_local_hint(self) -> &'static str {
+        match self {
+            Self::Chinese => "日志仅保存在本机，由你选择是否导出。",
+            Self::English => "Logs stay on this device and are exported only when you choose.",
+        }
+    }
+
+    pub(super) fn detailed_diagnostics(self) -> &'static str {
+        match self {
+            Self::Chinese => "详细诊断",
+            Self::English => "Detailed diagnostics",
+        }
+    }
+
+    pub(super) fn detailed_diagnostics_hint(self) -> &'static str {
+        match self {
+            Self::Chinese => "仅提高允许模块的日志级别；网络与 mDNS 模块仍限制为警告。",
+            Self::English => {
+                "Raises only approved targets; transport and mDNS remain capped at warnings."
+            }
+        }
+    }
+
+    pub(super) fn show_logs(self) -> &'static str {
+        match self {
+            Self::Chinese => "显示应用日志",
+            Self::English => "Show application logs",
+        }
+    }
+
+    pub(super) fn log_directory(self) -> &'static str {
+        match self {
+            Self::Chinese => "日志目录",
+            Self::English => "Log directory",
+        }
+    }
+
+    pub(super) fn file_diagnostics_unavailable(self, reason: &str) -> String {
+        match self {
+            Self::Chinese => format!("文件诊断不可用：{reason}。应用仍可继续运行。"),
+            Self::English => {
+                format!("File diagnostics unavailable: {reason}. The application can continue.")
+            }
+        }
+    }
+
+    pub(super) fn dropped_diagnostics(self) -> &'static str {
+        match self {
+            Self::Chinese => "已丢弃诊断项",
+            Self::English => "Dropped diagnostics",
+        }
+    }
+
+    pub(super) fn open_log_directory(self) -> &'static str {
+        match self {
+            Self::Chinese => "打开日志目录",
+            Self::English => "Open log directory",
+        }
+    }
+
+    pub(super) fn export_logs(self) -> &'static str {
+        match self {
+            Self::Chinese => "导出本地日志",
+            Self::English => "Export local logs",
+        }
+    }
+
+    pub(super) fn application_logs(self) -> &'static str {
+        match self {
+            Self::Chinese => "应用日志",
+            Self::English => "Application logs",
+        }
+    }
+
+    pub(super) fn log_level(self) -> &'static str {
+        match self {
+            Self::Chinese => "最低级别",
+            Self::English => "Minimum level",
+        }
+    }
+
+    pub(super) fn search_logs(self) -> &'static str {
+        match self {
+            Self::Chinese => "搜索",
+            Self::English => "Search",
+        }
+    }
+
+    pub(super) fn search_logs_hint(self) -> &'static str {
+        match self {
+            Self::Chinese => "目标、线程或事件",
+            Self::English => "Target, thread, or event",
+        }
+    }
+
+    pub(super) fn pause_auto_scroll(self) -> &'static str {
+        match self {
+            Self::Chinese => "暂停自动滚动",
+            Self::English => "Pause auto-scroll",
+        }
+    }
+
+    pub(super) fn copy_visible_logs(self) -> &'static str {
+        match self {
+            Self::Chinese => "复制当前结果",
+            Self::English => "Copy visible logs",
+        }
+    }
+
+    pub(super) fn no_log_entries(self) -> &'static str {
+        match self {
+            Self::Chinese => "当前筛选条件下没有日志。",
+            Self::English => "No logs match the current filters.",
+        }
+    }
+
+    pub(super) fn export_completed(self, path: &str) -> String {
+        match self {
+            Self::Chinese => format!("本地日志已导出到 {path}"),
+            Self::English => format!("Local logs exported to {path}"),
+        }
+    }
+
+    pub(super) fn diagnostics_error(self, error: &str) -> String {
+        match self {
+            Self::Chinese => format!("本地诊断操作失败：{error}"),
+            Self::English => format!("Local diagnostics action failed: {error}"),
         }
     }
 }
