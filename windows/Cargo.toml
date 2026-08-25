@@ -11,11 +11,12 @@ publish = false
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wgpu"] }
+moqcast-diagnostics = { path = "../shared/diagnostics" }
 moq-tokio = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["aws-lc-rs", "mdns", "quinn"] }
+rfd = "0.17.2"
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 thiserror = "2"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]

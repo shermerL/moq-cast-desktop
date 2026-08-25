@@ -4,6 +4,7 @@ use eframe::egui::{self, Align, Color32, Frame, Layout, RichText, Stroke};
 
 use crate::{
     audio::AudioPhase,
+    diagnostics::DiagnosticsUi,
     media::{COMPATIBLE_MAX_SCREEN_EDGE, MediaPhase, VideoEncodingPolicy},
     playback::{PlaybackFrameIdentity, ViewAudioPhase, ViewPhase},
     player::{LivePlayer, PlayerAction},
@@ -15,6 +16,11 @@ use crate::{
 
 const CONTENT_MAX_WIDTH: f32 = 900.0;
 const CONTENT_TOP_SPACING: f32 = 18.0;
+const STORAGE_DETAILED_DIAGNOSTICS: &str = "moqcast.detailed-diagnostics";
+
+fn parse_stored_bool(value: Option<String>) -> bool {
+    value.as_deref() == Some("true")
+}
 
 fn content_rect(available: egui::Rect, page: Page, viewing: bool) -> egui::Rect {
     let width = if page == Page::ScreenShare && viewing {
@@ -72,6 +78,7 @@ impl Locale {
 pub(crate) struct MoqCastApp {
     page: Page,
     locale: Locale,
+    diagnostics: DiagnosticsUi,
     runtime: RuntimeOwner,
     snapshot: RuntimeSnapshot,
     command_error: Option<String>,
@@ -84,13 +91,23 @@ pub(crate) struct MoqCastApp {
 }
 
 impl MoqCastApp {
-    pub(crate) fn new(context: &eframe::CreationContext<'_>, mut runtime: RuntimeOwner) -> Self {
+    pub(crate) fn new(
+        context: &eframe::CreationContext<'_>,
+        mut runtime: RuntimeOwner,
+        diagnostics: moqcast_diagnostics::Handle,
+    ) -> Self {
         configure_fonts(&context.egui_ctx);
         context.egui_ctx.set_visuals(egui::Visuals::light());
+        let detailed_diagnostics = parse_stored_bool(
+            context
+                .storage
+                .and_then(|storage| storage.get_string(STORAGE_DETAILED_DIAGNOSTICS)),
+        );
         let snapshot = runtime.snapshot();
         Self {
             page: Page::Nearby,
             locale: Locale::Chinese,
+            diagnostics: DiagnosticsUi::new(diagnostics, detailed_diagnostics),
             runtime,
             snapshot,
             command_error: None,
@@ -634,6 +651,8 @@ impl MoqCastApp {
             ui.add_space(10.0);
             ui.colored_label(Color32::LIGHT_RED, error);
         }
+        ui.separator();
+        self.diagnostics.show_settings(ui, self.locale);
     }
 }
 
@@ -680,6 +699,7 @@ impl eframe::App for MoqCastApp {
                         self.send(RuntimeCommand::StopWatching);
                     }
                 });
+            self.diagnostics.show_window(&context, self.locale);
             context.request_repaint_after(std::time::Duration::from_millis(33));
             return;
         }
@@ -701,15 +721,30 @@ impl eframe::App for MoqCastApp {
                 match self.page {
                     Page::Nearby => self.nearby(ui),
                     Page::ScreenShare => self.screen_share(ui),
-                    Page::Settings => self.settings(ui),
+                    Page::Settings => {
+                        egui::ScrollArea::vertical().show(ui, |ui| self.settings(ui));
+                    }
                 }
             });
         });
+        self.diagnostics.show_window(&context, self.locale);
         context.request_repaint_after(std::time::Duration::from_millis(if viewing {
             33
         } else {
             100
         }));
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(
+            STORAGE_DETAILED_DIAGNOSTICS,
+            if self.diagnostics.detailed() {
+                "true"
+            } else {
+                "false"
+            }
+            .to_owned(),
+        );
     }
 }
 
@@ -792,6 +827,14 @@ mod tests {
         assert_eq!(page, Page::Settings);
         assert_eq!(locale.settings(), "Settings");
         assert_ne!(Page::Nearby, Page::ScreenShare);
+    }
+
+    #[test]
+    fn detailed_diagnostics_storage_is_opt_in() {
+        assert!(!parse_stored_bool(None));
+        assert!(!parse_stored_bool(Some("false".to_owned())));
+        assert!(!parse_stored_bool(Some("unexpected".to_owned())));
+        assert!(parse_stored_bool(Some("true".to_owned())));
     }
 
     #[test]

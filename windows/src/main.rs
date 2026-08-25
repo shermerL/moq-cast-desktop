@@ -1,7 +1,13 @@
 //! Native Windows desktop entry point for MoQCast.
 
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod app;
 mod audio;
+mod diagnostics;
 mod media;
 mod playback;
 mod player;
@@ -15,8 +21,8 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
+use moqcast_diagnostics::{BuildInfo, Config, Paths};
 use runtime::{RuntimeConfig, RuntimeOwner};
-use tracing_subscriber::EnvFilter;
 use url::Url;
 
 #[derive(Debug, Parser)]
@@ -36,18 +42,35 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"))
-        .add_directive("moq_tokio=warn".parse().expect("valid log directive"))
-        .add_directive("mdns_sd=warn".parse().expect("valid log directive"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    let build = BuildInfo::new(env!("CARGO_PKG_VERSION"))
+        .with_build_identity(option_env!("MOQCAST_BUILD_IDENTITY").unwrap_or("local"))
+        .with_source_identity(option_env!("MOQCAST_SOURCE_COMMIT").unwrap_or("unknown"));
+    let diagnostics_config = match Paths::discover() {
+        Ok(paths) => Config::new(paths, build),
+        Err(error) => {
+            eprintln!("MoQCast diagnostics path unavailable: {error}");
+            Config::without_file(build, error.to_string())
+        }
+    };
+    let diagnostics = moqcast_diagnostics::init(diagnostics_config);
+    let diagnostics_handle = diagnostics.handle();
 
     let args = Args::parse();
-    let runtime = RuntimeOwner::start(RuntimeConfig {
+    let runtime = match RuntimeOwner::start(RuntimeConfig {
         bind: args.bind,
         node: args.node,
         secret_file: args.secret_file,
-    })?;
+    }) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::error!(
+                stage = "runtime-owner-start",
+                error = %error,
+                "MoQCast Windows startup failed"
+            );
+            return Err(error);
+        }
+    };
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: eframe::egui::ViewportBuilder::default()
@@ -56,10 +79,27 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = match eframe::run_native(
         "MoQCast",
         options,
-        Box::new(move |context| Ok(Box::new(app::MoqCastApp::new(context, runtime)))),
-    )
-    .map_err(|error| anyhow::anyhow!(error.to_string()))
+        Box::new(move |context| {
+            Ok(Box::new(app::MoqCastApp::new(
+                context,
+                runtime,
+                diagnostics_handle,
+            )))
+        }),
+    ) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            tracing::error!(
+                stage = "eframe-run-native",
+                error = %error,
+                "MoQCast Windows startup failed"
+            );
+            Err(anyhow::anyhow!(error.to_string()))
+        }
+    };
+    drop(diagnostics);
+    result
 }
