@@ -1,6 +1,7 @@
 //! Remote audio selection, decode, and default-output ownership.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::{
     sync::{OnceCell, mpsc},
@@ -8,6 +9,8 @@ use tokio::{
 };
 
 use crate::app::{RemoteAudioPhase, RemoteAudioSnapshot};
+
+use crate::runtime::playback_sync::{self, AudioLease, MediaClock};
 
 #[derive(Clone, Debug, PartialEq)]
 struct Identity {
@@ -156,6 +159,7 @@ impl Task {
         selection: &Selection,
         updates: &mpsc::Sender<Update>,
         engine: &Arc<OnceCell<moq_audio::playback::Engine>>,
+        clock: &Arc<MediaClock>,
     ) -> Self {
         let broadcast = broadcast.clone();
         let selection = selection.clone();
@@ -165,8 +169,9 @@ impl Task {
             sender: updates.clone(),
         };
         let engine = engine.clone();
+        let clock = clock.audio(generation);
         let handle = tokio::spawn(async move {
-            run(broadcast, selection, events, engine).await;
+            run(broadcast, selection, events, engine, clock).await;
         });
         Self {
             handle: Some(handle),
@@ -194,6 +199,7 @@ async fn run(
     selection: Selection,
     events: Events,
     engine: Arc<OnceCell<moq_audio::playback::Engine>>,
+    clock: AudioLease,
 ) {
     events
         .send(RemoteAudioSnapshot {
@@ -287,6 +293,11 @@ async fn run(
 
     let mut decoded = false;
     let mut submitted = false;
+    let sample_rate = playback.consumer.sample_rate();
+    let channels = playback.consumer.channels();
+    let stride = channels as usize * size_of::<f32>();
+    // A PCM frame may exceed the sink capacity, so pace one aligned second at a time.
+    let chunk = (sample_rate as usize * stride).max(stride);
     loop {
         let frame = match playback.consumer.read().await {
             Ok(Some(frame)) => frame,
@@ -327,24 +338,36 @@ async fn run(
                 .send(playback.snapshot(RemoteAudioPhase::PcmDecoded, &name, &codec))
                 .await;
         }
-        if let Err(error) = playback.sink.write(&frame.data) {
-            tracing::warn!(
-                broadcast = %events.path,
-                track = %name,
-                audio_generation = events.generation,
-                error = %error,
-                "remote PCM submission failed; video continues"
-            );
-            events
-                .send(failed_snapshot(
-                    &playback,
-                    &name,
-                    &codec,
-                    "Remote PCM submission failed; video is continuing.",
-                ))
-                .await;
-            return;
+        let end =
+            playback_sync::pcm_frame_end(frame.timestamp, frame.data.len(), sample_rate, channels);
+        for part in frame.data.chunks(chunk) {
+            if let Some(excess) = playback
+                .sink
+                .buffered()
+                .checked_sub(playback_sync::AUDIO_BUFFER_MAX)
+            {
+                tokio::time::sleep(excess).await;
+            }
+            if let Err(error) = playback.sink.write(part) {
+                tracing::warn!(
+                    broadcast = %events.path,
+                    track = %name,
+                    audio_generation = events.generation,
+                    error = %error,
+                    "remote PCM submission failed; video continues"
+                );
+                events
+                    .send(failed_snapshot(
+                        &playback,
+                        &name,
+                        &codec,
+                        "Remote PCM submission failed; video is continuing.",
+                    ))
+                    .await;
+                return;
+            }
         }
+        clock.anchor(end, playback.sink.buffered(), Instant::now());
         if !submitted {
             submitted = true;
             events

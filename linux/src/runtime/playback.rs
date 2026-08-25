@@ -3,6 +3,7 @@
 mod audio;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use moq_mux::catalog::Stream;
 use moq_tokio::moq_net;
@@ -11,10 +12,11 @@ use tokio::task::JoinHandle;
 
 use crate::app::RemoteAudioSnapshot;
 
+use super::playback_sync as sync;
 use super::{PlaybackFrame, PlaybackFrameIdentity};
 
 const AUDIO_EVENT_CAPACITY: usize = 8;
-const VIDEO_EVENT_CAPACITY: usize = 4;
+const VIDEO_EVENT_CAPACITY: usize = 1;
 
 /// Events emitted by one playback owner to the runtime supervisor.
 pub(super) enum Event {
@@ -270,6 +272,13 @@ async fn wait_for_cancel(cancel: &mut watch::Receiver<bool>) {
     }
 }
 
+async fn wait_for_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 /// Consume one screen broadcast until its catalog or video track ends.
 pub(super) async fn run(
     view_generation: u64,
@@ -295,6 +304,7 @@ pub(super) async fn run(
     };
     let mut selection = Selection::from_catalog(first, None);
     let mut frames_sequence = FrameSequence::new(view_generation);
+    let mut video_scheduler = sync::VideoScheduler::default();
     let (video_updates_tx, mut video_updates_rx) = mpsc::channel(VIDEO_EVENT_CAPACITY);
     let mut video_task = None;
     if let Some(video) = &selection.video {
@@ -324,6 +334,7 @@ pub(super) async fn run(
     }
     let (audio_updates_tx, mut audio_updates_rx) = mpsc::channel(AUDIO_EVENT_CAPACITY);
     let audio_engine = Arc::new(tokio::sync::OnceCell::new());
+    let media_clock = Arc::new(sync::MediaClock::default());
     let mut audio_generation = 1_u64;
     let mut audio_task = audio::Task::spawn(
         audio_generation,
@@ -332,16 +343,38 @@ pub(super) async fn run(
         &selection.audio,
         &audio_updates_tx,
         &audio_engine,
+        &media_clock,
     );
 
     let result = async {
         loop {
+            let advance = video_scheduler.advance(media_clock.audio_anchor(), Instant::now());
+            if let Some(decoded) = advance.due {
+                let (identity, first_view_frame) = frames_sequence.next();
+                let frame = tokio::task::spawn_blocking(move || {
+                    PlaybackFrame::from_video(decoded, identity)
+                })
+                .await??;
+                frames.send_replace(Some(Arc::new(frame)));
+                if first_view_frame {
+                    let (ack, ready) = oneshot::channel();
+                    events
+                        .send(Event::Started { ack })
+                        .await
+                        .map_err(|_| anyhow::anyhow!("playback event receiver closed"))?;
+                    ready
+                        .await
+                        .map_err(|_| anyhow::anyhow!("playback start acknowledgement closed"))?;
+                }
+            }
             tokio::select! {
                 biased;
                 _ = wait_for_cancel(&mut cancel) => {
                     tracing::debug!(view_generation, "remote playback cancellation received");
                     break Ok(());
                 }
+                _ = wait_for_deadline(advance.deadline), if advance.deadline.is_some() => {}
+                _ = media_clock.changed() => {}
                 update = catalog.next() => {
                     let Some(update) = update? else {
                         anyhow::bail!("remote screen catalog ended");
@@ -371,6 +404,7 @@ pub(super) async fn run(
                     );
 
                     if changes.audio {
+                        video_scheduler.reset_fallback();
                         audio_task.stop().await;
                         audio_generation = audio_generation.wrapping_add(1);
                         audio_task = audio::Task::spawn(
@@ -380,6 +414,7 @@ pub(super) async fn run(
                             &next.audio,
                             &audio_updates_tx,
                             &audio_engine,
+                            &media_clock,
                         );
                     }
                     if changes.video {
@@ -389,6 +424,7 @@ pub(super) async fn run(
                             task.stop().await;
                         }
                         frames_sequence.replace_decoder();
+                        video_scheduler.reset();
                         if let Some(video) = &next.video {
                             let decoder = tokio::select! {
                                 biased;
@@ -428,7 +464,7 @@ pub(super) async fn run(
                             .map_err(|_| anyhow::anyhow!("playback event receiver closed"))?;
                     }
                 }
-                update = video_updates_rx.recv() => {
+                update = video_updates_rx.recv(), if video_scheduler.has_capacity() => {
                     let Some(update) = update else {
                         anyhow::bail!("remote video event channel closed");
                     };
@@ -443,28 +479,15 @@ pub(super) async fn run(
                             let VideoEvent::Frame(decoded) = event else {
                                 unreachable!("frame disposition carries a frame")
                             };
-                            let (identity, first_view_frame) = frames_sequence.next();
-                            let frame = tokio::task::spawn_blocking(move || {
-                                PlaybackFrame::from_video(decoded, identity)
-                            })
-                            .await??;
-                            frames.send_replace(Some(Arc::new(frame)));
-                            if first_view_frame {
-                                let (ack, ready) = oneshot::channel();
-                                events
-                                    .send(Event::Started { ack })
-                                    .await
-                                    .map_err(|_| anyhow::anyhow!("playback event receiver closed"))?;
-                                ready.await.map_err(|_| {
-                                    anyhow::anyhow!("playback start acknowledgement closed")
-                                })?;
-                            }
+                            let _ =
+                                video_scheduler.push(sync::timestamp(decoded.timestamp), decoded);
                         }
                         VideoEventDisposition::WaitForCatalog => {
                             if let Some(mut task) = video_task.take() {
                                 task.stop().await;
                             }
                             frames_sequence.replace_decoder();
+                            video_scheduler.reset();
                             tracing::debug!(
                                 view_generation,
                                 decoder_generation = frames_sequence.decoder_generation,
