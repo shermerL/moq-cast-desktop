@@ -280,9 +280,9 @@ impl MoqCastApp {
             if matches!(
                 self.player.show(
                     ui,
+                    self.locale,
                     &self.snapshot.view,
                     self.playback_texture.as_ref(),
-                    false,
                 ),
                 Some(PlayerAction::Stop)
             ) {
@@ -671,7 +671,9 @@ impl eframe::App for MoqCastApp {
             self.snapshot.view.phase,
             ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping
         );
-        let viewport_fullscreen = LivePlayer::fullscreen(&context);
+        let viewport_fullscreen = self
+            .player
+            .reconcile_fullscreen(&context, self.snapshot.view.phase == ViewPhase::Viewing);
         if viewport_fullscreen != self.viewport_fullscreen {
             tracing::info!(
                 fullscreen = viewport_fullscreen,
@@ -684,10 +686,7 @@ impl eframe::App for MoqCastApp {
             );
             self.viewport_fullscreen = viewport_fullscreen;
         }
-        if viewport_fullscreen && !viewing {
-            context.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-        }
-        let fullscreen = viewing && viewport_fullscreen;
+        let fullscreen = viewport_fullscreen && self.snapshot.view.phase == ViewPhase::Viewing;
 
         if fullscreen {
             egui::CentralPanel::default()
@@ -696,9 +695,9 @@ impl eframe::App for MoqCastApp {
                     if matches!(
                         self.player.show(
                             ui,
+                            self.locale,
                             &self.snapshot.view,
                             self.playback_texture.as_ref(),
-                            true,
                         ),
                         Some(PlayerAction::Stop)
                     ) {
