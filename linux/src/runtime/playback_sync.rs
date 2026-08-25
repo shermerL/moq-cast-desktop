@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 
-pub(super) const AUDIO_BUFFER_MAX: Duration = Duration::from_secs(1);
+// This ceiling paces a writer that runs ahead; it is not startup prebuffering or target latency.
+pub(super) const AUDIO_PACING_CEILING: Duration = Duration::from_secs(1);
 pub(super) const MAX_VIDEO_FRAMES: usize = 30;
 
 const VIDEO_EARLY_TOLERANCE: Duration = Duration::from_millis(2);
@@ -250,7 +251,7 @@ mod tests {
 
     #[test]
     fn audio_position_is_frame_end_less_buffered_audio() {
-        assert_eq!(AUDIO_BUFFER_MAX, Duration::from_secs(1));
+        assert_eq!(AUDIO_PACING_CEILING, Duration::from_secs(1));
         assert_eq!(
             audio_media_position(at(2_000_000), at(125_000)),
             at(1_875_000)
