@@ -10,6 +10,10 @@ use tokio::{
 
 use crate::app::{RemoteAudioPhase, RemoteAudioSnapshot};
 
+pub(super) use crate::runtime::playback_audio_continuity::OwnerTeardownReason;
+use crate::runtime::playback_audio_continuity::{
+    FrameTiming, TeardownControl, TeardownReason, Tracker as ContinuityTracker, pacing_delay,
+};
 use crate::runtime::playback_sync::{self, AudioLease, MediaClock};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +100,18 @@ impl Selection {
     }
 }
 
+pub(super) fn transition_teardown_reason(
+    current: &Selection,
+    next: &Selection,
+) -> OwnerTeardownReason {
+    match (current, next) {
+        (Selection::Playable { .. }, Selection::NotPublished | Selection::Unsupported) => {
+            OwnerTeardownReason::Withdraw
+        }
+        _ => OwnerTeardownReason::Replacement,
+    }
+}
+
 fn supported_audio(config: &hang::catalog::AudioConfig) -> bool {
     config.broadcast.is_none()
         && matches!(
@@ -149,6 +165,10 @@ impl Playback {
 
 pub(super) struct Task {
     handle: Option<JoinHandle<()>>,
+    generation: u64,
+    path: String,
+    track: Option<String>,
+    teardown: Arc<TeardownControl>,
 }
 
 impl Task {
@@ -163,6 +183,7 @@ impl Task {
     ) -> Self {
         let broadcast = broadcast.clone();
         let selection = selection.clone();
+        let track = selection.name().map(str::to_owned);
         let events = Events {
             generation,
             path: path.to_owned(),
@@ -170,18 +191,35 @@ impl Task {
         };
         let engine = engine.clone();
         let clock = clock.audio(generation);
+        let teardown = Arc::new(TeardownControl::default());
+        let task_teardown = teardown.clone();
         let handle = tokio::spawn(async move {
-            run(broadcast, selection, events, engine, clock).await;
+            run(broadcast, selection, events, engine, clock, task_teardown).await;
         });
         Self {
             handle: Some(handle),
+            generation,
+            path: path.to_owned(),
+            track,
+            teardown,
         }
     }
 
-    pub(super) async fn stop(&mut self) {
+    pub(super) async fn stop(&mut self, reason: OwnerTeardownReason) {
         if let Some(handle) = self.handle.take() {
+            self.teardown.set_owner_reason(reason);
             handle.abort();
-            let _ = handle.await;
+            if handle.await.is_err_and(|error| error.is_cancelled())
+                && !self.teardown.summary_emitted()
+            {
+                tracing::info!(
+                    broadcast = %self.path,
+                    track = ?self.track,
+                    audio_generation = self.generation,
+                    teardown_reason = TeardownReason::from(reason).as_str(),
+                    "remote audio generation stopped by playback owner"
+                );
+            }
         }
     }
 }
@@ -200,6 +238,7 @@ async fn run(
     events: Events,
     engine: Arc<OnceCell<moq_audio::playback::Engine>>,
     clock: AudioLease,
+    teardown: Arc<TeardownControl>,
 ) {
     events
         .send(RemoteAudioSnapshot {
@@ -244,6 +283,15 @@ async fn run(
     };
 
     let codec = config.codec.to_string();
+    let selected_at = Instant::now();
+    let mut continuity = ContinuityTracker::new(
+        events.generation,
+        &events.path,
+        &name,
+        &codec,
+        selected_at,
+        teardown,
+    );
     events
         .send(RemoteAudioSnapshot {
             phase: RemoteAudioPhase::TrackSelected,
@@ -277,6 +325,7 @@ async fn run(
                     ),
                 })
                 .await;
+            continuity.finish(TeardownReason::StartError);
             return;
         }
     };
@@ -310,6 +359,7 @@ async fn run(
                         "Remote audio track ended.",
                     ))
                     .await;
+                continuity.finish(TeardownReason::Ended);
                 return;
             }
             Err(error) => {
@@ -328,9 +378,18 @@ async fn run(
                         "Remote audio decode failed; video is continuing.",
                     ))
                     .await;
+                continuity.finish(TeardownReason::DecodeError);
                 return;
             }
         };
+
+        let timing = FrameTiming::new(
+            playback_sync::timestamp(frame.timestamp),
+            frame.data.len(),
+            sample_rate,
+            channels,
+        );
+        let _ = continuity.observe_frame(timing, Instant::now);
 
         if !decoded {
             decoded = true;
@@ -338,17 +397,22 @@ async fn run(
                 .send(playback.snapshot(RemoteAudioPhase::PcmDecoded, &name, &codec))
                 .await;
         }
-        let end =
-            playback_sync::pcm_frame_end(frame.timestamp, frame.data.len(), sample_rate, channels);
+        let end = timing.end();
         for part in frame.data.chunks(chunk) {
-            if let Some(excess) = playback
-                .sink
-                .buffered()
-                .checked_sub(playback_sync::AUDIO_BUFFER_MAX)
-            {
-                tokio::time::sleep(excess).await;
+            let buffered = playback.sink.buffered();
+            continuity.observe_buffered(buffered);
+            if let Some(delay) = pacing_delay(buffered) {
+                continuity.observe_pacing_delay_requested(delay);
+                tokio::time::sleep(delay).await;
             }
             if let Err(error) = playback.sink.write(part) {
+                let _ = continuity.observe_write(
+                    part.len(),
+                    sample_rate,
+                    channels,
+                    false,
+                    Instant::now,
+                );
                 tracing::warn!(
                     broadcast = %events.path,
                     track = %name,
@@ -364,22 +428,23 @@ async fn run(
                         "Remote PCM submission failed; video is continuing.",
                     ))
                     .await;
+                continuity.finish(TeardownReason::SinkError);
                 return;
             }
+            // Success only means Sink::write returned Ok; output readiness is not exposed.
+            let _ = continuity.observe_write(part.len(), sample_rate, channels, true, Instant::now);
         }
-        clock.anchor(end, playback.sink.buffered(), Instant::now());
+        let buffered = playback.sink.buffered();
+        continuity.observe_buffered(buffered);
+        let frame_end_now = Instant::now();
+        clock.anchor(end, buffered, frame_end_now);
         if !submitted {
             submitted = true;
             events
                 .send(playback.snapshot(RemoteAudioPhase::PcmSubmitted, &name, &codec))
                 .await;
-            tracing::info!(
-                broadcast = %events.path,
-                track = %name,
-                audio_generation = events.generation,
-                "remote PCM sink write returned successfully"
-            );
         }
+        continuity.maybe_log_summary(frame_end_now);
     }
 }
 
@@ -508,6 +573,32 @@ mod tests {
         assert_ne!(first, Selection::NotPublished);
     }
 
+    #[test]
+    fn playable_audio_replacement_and_withdraw_have_distinct_teardown_reasons() {
+        let playable = |name: &str| {
+            let mut audio = hang::catalog::Audio::default();
+            audio.renditions.insert(
+                name.to_owned(),
+                hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+            );
+            Selection::from_catalog(audio, None)
+        };
+
+        let current = playable("audio-a");
+        assert_eq!(
+            transition_teardown_reason(&current, &playable("audio-b")),
+            OwnerTeardownReason::Replacement
+        );
+        assert_eq!(
+            transition_teardown_reason(&current, &Selection::NotPublished),
+            OwnerTeardownReason::Withdraw
+        );
+        assert_eq!(
+            transition_teardown_reason(&current, &Selection::Unsupported),
+            OwnerTeardownReason::Withdraw
+        );
+    }
+
     #[tokio::test]
     async fn stop_aborts_and_awaits_task_teardown() {
         struct Teardown(Arc<AtomicBool>);
@@ -528,11 +619,16 @@ mod tests {
         started_rx.await.expect("test task started");
         let mut task = Task {
             handle: Some(handle),
+            generation: 7,
+            path: "screen".into(),
+            track: Some("audio".into()),
+            teardown: Arc::new(TeardownControl::default()),
         };
 
-        task.stop().await;
+        task.stop(OwnerTeardownReason::Stop).await;
 
         assert!(stopped.load(Ordering::Acquire));
         assert!(task.handle.is_none());
+        assert!(!task.teardown.summary_emitted());
     }
 }

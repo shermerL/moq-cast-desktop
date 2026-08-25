@@ -3,6 +3,8 @@
 #[cfg(target_os = "linux")]
 mod playback;
 #[cfg(any(target_os = "linux", test))]
+mod playback_audio_continuity;
+#[cfg(any(target_os = "linux", test))]
 mod playback_sync;
 mod supervisor;
 

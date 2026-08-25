@@ -405,7 +405,11 @@ pub(super) async fn run(
 
                     if changes.audio {
                         video_scheduler.reset_fallback();
-                        audio_task.stop().await;
+                        let teardown_reason = audio::transition_teardown_reason(
+                            &selection.audio,
+                            &next.audio,
+                        );
+                        audio_task.stop(teardown_reason).await;
                         audio_generation = audio_generation.wrapping_add(1);
                         audio_task = audio::Task::spawn(
                             audio_generation,
@@ -510,7 +514,7 @@ pub(super) async fn run(
     if let Some(mut task) = video_task {
         task.stop().await;
     }
-    audio_task.stop().await;
+    audio_task.stop(audio::OwnerTeardownReason::Stop).await;
     drop(audio_engine);
     result
 }
