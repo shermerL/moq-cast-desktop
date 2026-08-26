@@ -124,7 +124,7 @@ mod tests {
     }
 
     async fn find_available(
-        announcements: &mut moq_net::origin::AnnounceConsumer,
+        announcements: &mut moq_net::announce::Consumer,
         path: &str,
     ) -> Option<moq_net::broadcast::Consumer> {
         while let Some(update) = announcements.next().await {
@@ -136,7 +136,7 @@ mod tests {
     }
 
     async fn expect_available(
-        announcements: &mut moq_net::origin::AnnounceConsumer,
+        announcements: &mut moq_net::announce::Consumer,
         path: &str,
     ) -> moq_net::broadcast::Consumer {
         tokio::time::timeout(Duration::from_secs(3), find_available(announcements, path))
