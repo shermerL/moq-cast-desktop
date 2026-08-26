@@ -1,8 +1,19 @@
 //! Remote audio selection, decode, and system-output ownership.
 
+use std::time::Duration;
+
 use tokio::{sync::mpsc, task::JoinHandle};
 
 use super::{ViewAudioPhase, ViewAudioSnapshot, ViewEvent};
+
+const REMOTE_AUDIO_LIVE_EDGE_BUDGET: Duration = Duration::from_millis(80);
+
+fn remote_audio_decode_config() -> moq_audio::decode::Config {
+    let mut config = moq_audio::decode::Config::new();
+    config.format = moq_audio::Format::F32;
+    config.max_age = REMOTE_AUDIO_LIVE_EDGE_BUDGET;
+    config
+}
 
 #[derive(Clone, PartialEq)]
 pub(super) enum Selection {
@@ -47,8 +58,7 @@ impl Playback {
         name: &str,
         config: &hang::catalog::AudioConfig,
     ) -> anyhow::Result<Self> {
-        let mut decode = moq_audio::decode::Config::new();
-        decode.format = moq_audio::Format::F32;
+        let decode = remote_audio_decode_config();
         let consumer = moq_audio::decode::Consumer::new(broadcast, config, name, decode).await?;
         let engine = moq_audio::playback::Engine::open(Default::default()).await?;
         let sink = engine.sink(moq_audio::playback::Input {
@@ -182,6 +192,7 @@ async fn run(
         codec = %codec,
         sample_rate = audio.sample_rate.unwrap_or_default(),
         channels = audio.channels.unwrap_or_default(),
+        live_edge_budget_ms = REMOTE_AUDIO_LIVE_EDGE_BUDGET.as_millis() as u64,
         "playing remote audio"
     );
     events.send(audio).await;
@@ -235,5 +246,18 @@ impl Events {
                 audio,
             })
             .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_audio_decode_config_uses_f32_and_80ms_live_edge_budget() {
+        let config = remote_audio_decode_config();
+
+        assert_eq!(config.format, moq_audio::Format::F32);
+        assert_eq!(config.max_age, Duration::from_millis(80));
     }
 }
