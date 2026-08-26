@@ -48,10 +48,21 @@ struct Outbound {
     task: JoinHandle<()>,
 }
 
+#[derive(Clone)]
+struct SessionOrigins {
+    publish: moq_tokio::moq_net::origin::Producer,
+    receive: moq_tokio::moq_net::origin::Producer,
+}
+
+struct OriginDrivers {
+    publish: JoinHandle<()>,
+    receive: JoinHandle<()>,
+}
+
 pub(crate) struct SessionFoundation {
     advertisement: Advertisement,
-    origin: moq_tokio::moq_net::origin::Producer,
-    origin_driver: JoinHandle<()>,
+    origins: SessionOrigins,
+    origin_drivers: OriginDrivers,
     events: mpsc::Sender<RuntimeEvent>,
     recv: mpsc::Receiver<RuntimeEvent>,
     listener_task: Option<JoinHandle<()>>,
@@ -68,8 +79,12 @@ impl SessionFoundation {
         &self.advertisement
     }
 
-    pub(crate) fn origin(&self) -> &moq_tokio::moq_net::origin::Producer {
-        &self.origin
+    pub(crate) fn publish_origin(&self) -> &moq_tokio::moq_net::origin::Producer {
+        &self.origins.publish
+    }
+
+    pub(crate) fn receive_origin(&self) -> &moq_tokio::moq_net::origin::Producer {
+        &self.origins.receive
     }
 
     pub(crate) async fn connect(
@@ -87,7 +102,7 @@ impl SessionFoundation {
     ) -> Result<TransportUpdate, DialError> {
         self.stop_outbound(peer_id).await;
         let state = self.states.begin(peer_id);
-        let connection = match peer::dial(record, self.origin.clone()) {
+        let connection = match peer::dial(record, self.origins.clone()) {
             Ok(connection) => connection,
             Err(error) => {
                 self.states
@@ -184,8 +199,9 @@ impl SessionFoundation {
             task.abort();
             let _ = task.await;
         }
-        drop(self.origin);
-        let _ = self.origin_driver.await;
+        drop(self.origins);
+        let _ = self.origin_drivers.publish.await;
+        let _ = self.origin_drivers.receive.await;
     }
 
     async fn stop_outbound(&mut self, peer: &str) {
@@ -206,21 +222,23 @@ impl BoundServer {
     pub(crate) async fn start(self, credential: String) -> Result<SessionFoundation, StartError> {
         let advertisement = self.advertisement().clone();
         let listener = self.listen().await?;
-        let (origin, origin_driver) = moq_tokio::moq_net::origin::Producer::new(
-            moq_tokio::moq_net::origin::Info::new(moq_tokio::moq_net::Origin::random()),
-        );
-        let origin_driver = tokio::spawn(origin_driver);
+        let (publish, publish_driver) = spawn_origin();
+        let (receive, receive_driver) = spawn_origin();
+        let origins = SessionOrigins { publish, receive };
         let (events, recv) = mpsc::channel(EVENT_CAPACITY);
         let listener_task = tokio::spawn(server::run_listener(
             listener,
             credential,
-            origin.clone(),
+            origins.clone(),
             events.clone(),
         ));
         Ok(SessionFoundation {
             advertisement,
-            origin,
-            origin_driver,
+            origins,
+            origin_drivers: OriginDrivers {
+                publish: publish_driver,
+                receive: receive_driver,
+            },
             events,
             recv,
             listener_task: Some(listener_task),
@@ -228,6 +246,13 @@ impl BoundServer {
             states: PeerStates::default(),
         })
     }
+}
+
+fn spawn_origin() -> (moq_tokio::moq_net::origin::Producer, JoinHandle<()>) {
+    let (origin, driver) = moq_tokio::moq_net::origin::Producer::new(
+        moq_tokio::moq_net::origin::Info::new(moq_tokio::moq_net::Origin::random()),
+    );
+    (origin, tokio::spawn(driver))
 }
 
 #[cfg(test)]
