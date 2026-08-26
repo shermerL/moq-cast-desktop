@@ -27,7 +27,8 @@ pub(crate) fn authorized_request(request: &moq_tokio::Request, credential: &str)
 pub(crate) async fn accept(
     request: moq_tokio::Request,
     credential: &str,
-    origin: moq_net::origin::Producer,
+    publish_origin: &moq_net::origin::Producer,
+    receive_origin: moq_net::origin::Producer,
 ) -> Result<moq_net::Session, AcceptError> {
     if !authorized_request(&request, credential) {
         request.close(403).await?;
@@ -35,8 +36,8 @@ pub(crate) async fn accept(
     }
 
     Ok(request
-        .with_publisher(&origin)
-        .with_subscriber(origin)
+        .with_publisher(publish_origin)
+        .with_subscriber(receive_origin)
         .ok()
         .await?)
 }

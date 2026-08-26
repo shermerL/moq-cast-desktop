@@ -361,8 +361,10 @@ impl TaskResources {
 
 struct Supervisor {
     state: AppSnapshot,
-    origin: moq_net::origin::Producer,
-    origin_driver: JoinHandle<()>,
+    publish_origin: moq_net::origin::Producer,
+    publish_origin_driver: JoinHandle<()>,
+    receive_origin: moq_net::origin::Producer,
+    receive_origin_driver: JoinHandle<()>,
     discovery: DiscoveryResources,
     mesh: MeshResources,
     remote_screens: HashMap<String, moq_net::broadcast::Consumer>,
@@ -380,14 +382,19 @@ impl Supervisor {
     fn new(playback_tx: watch::Sender<Option<Arc<PlaybackFrame>>>) -> Self {
         let (service_tx, service_rx) = mpsc::channel(EVENT_CAPACITY);
         let (operation_tx, operation_rx) = mpsc::channel(EVENT_CAPACITY);
-        let (origin, origin_driver) =
+        let (publish_origin, publish_origin_driver) =
             moq_net::origin::Producer::new(moq_net::origin::Info::new(moq_net::Origin::random()));
-        let origin_driver = tokio::spawn(origin_driver);
-        let announcements = watch_announcements(origin.clone(), operation_tx.clone());
+        let publish_origin_driver = tokio::spawn(publish_origin_driver);
+        let (receive_origin, receive_origin_driver) =
+            moq_net::origin::Producer::new(moq_net::origin::Info::new(moq_net::Origin::random()));
+        let receive_origin_driver = tokio::spawn(receive_origin_driver);
+        let announcements = watch_announcements(receive_origin.clone(), operation_tx.clone());
         Self {
             state: AppSnapshot::default(),
-            origin,
-            origin_driver,
+            publish_origin,
+            publish_origin_driver,
+            receive_origin,
+            receive_origin_driver,
             discovery: DiscoveryResources::default(),
             mesh: MeshResources::default(),
             remote_screens: HashMap::new(),
@@ -436,9 +443,12 @@ impl Supervisor {
         self.discovery.stop();
         self.announcements.abort();
         let _ = self.announcements.await;
+        self.remote_screens.clear();
         self.playback_tx.send_replace(None);
-        drop(self.origin);
-        let _ = self.origin_driver.await;
+        drop(self.publish_origin);
+        drop(self.receive_origin);
+        let _ = self.publish_origin_driver.await;
+        let _ = self.receive_origin_driver.await;
         tracing::info!(stage = "runtime", "desktop runtime stopped");
     }
 
@@ -527,10 +537,11 @@ impl Supervisor {
         self.state
             .set_transport(peer_id, TransportState::Connecting);
         let key = SessionKey::Outbound(peer_id.to_owned());
-        let origin = self.origin.clone();
+        let publish_origin = self.publish_origin.clone();
+        let receive_origin = self.receive_origin.clone();
         let events = self.operation_tx.clone();
         peer_resources.pending = Some(tokio::spawn(async move {
-            let result = match peer::dial(&record, origin) {
+            let result = match peer::dial(&record, &publish_origin, receive_origin) {
                 Ok(connection) => connection
                     .established()
                     .await
@@ -561,7 +572,7 @@ impl Supervisor {
         };
 
         let publication =
-            match Publication::prepare(&self.origin, &local_peer_id, None, system_audio) {
+            match Publication::prepare(&self.publish_origin, &local_peer_id, None, system_audio) {
                 Ok(publication) => publication,
                 Err(error) => {
                     self.state
@@ -731,10 +742,11 @@ impl Supervisor {
         };
         let resources = self.mesh.inbound.entry(id).or_default();
         let generation = resources.advance();
-        let origin = self.origin.clone();
+        let publish_origin = self.publish_origin.clone();
+        let receive_origin = self.receive_origin.clone();
         let events = self.operation_tx.clone();
         resources.pending = Some(tokio::spawn(async move {
-            let result = server::accept(request, &credential, origin)
+            let result = server::accept(request, &credential, &publish_origin, receive_origin)
                 .await
                 .map(PeerSession::Inbound)
                 .map_err(|error| error.to_string());
@@ -1160,11 +1172,11 @@ fn watch_session(
 }
 
 fn watch_announcements(
-    origin: moq_net::origin::Producer,
+    receive_origin: moq_net::origin::Producer,
     events: mpsc::Sender<OperationEvent>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut announcements = origin.consume().announced();
+        let mut announcements = receive_origin.consume().announced();
         while let Some(update) = announcements.next().await {
             if events
                 .send(OperationEvent::ScreenAnnouncement {
