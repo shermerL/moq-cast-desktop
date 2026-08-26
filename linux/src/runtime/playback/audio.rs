@@ -10,6 +10,9 @@ use tokio::{
 
 use crate::app::{RemoteAudioPhase, RemoteAudioSnapshot};
 
+use crate::runtime::playback_audio_config::{
+    REMOTE_AUDIO_LIVE_EDGE_BUDGET, remote_audio_decode_config,
+};
 pub(super) use crate::runtime::playback_audio_continuity::OwnerTeardownReason;
 use crate::runtime::playback_audio_continuity::{
     FrameTiming, TeardownControl, TeardownReason, Tracker as ContinuityTracker, pacing_delay,
@@ -137,8 +140,7 @@ impl Playback {
         config: &hang::catalog::AudioConfig,
         engine: &OnceCell<moq_audio::playback::Engine>,
     ) -> anyhow::Result<Self> {
-        let mut decode = moq_audio::decode::Config::new();
-        decode.format = moq_audio::Format::F32;
+        let decode = remote_audio_decode_config();
         let consumer = moq_audio::decode::Consumer::new(broadcast, config, name, decode).await?;
         let engine = engine
             .get_or_try_init(|| moq_audio::playback::Engine::open(Default::default()))
@@ -336,8 +338,9 @@ async fn run(
         codec = %codec,
         sample_rate = playback.consumer.sample_rate(),
         channels = playback.consumer.channels(),
+        live_edge_budget_ms = REMOTE_AUDIO_LIVE_EDGE_BUDGET.as_millis() as u64,
         audio_generation = events.generation,
-        "remote audio decoder and output sink opened"
+        "remote audio decoder and output sink opened with a live-edge budget"
     );
 
     let mut decoded = false;
