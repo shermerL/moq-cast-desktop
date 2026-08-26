@@ -4,6 +4,22 @@
 
 This file documents notable changes to MoQCast Desktop.
 
+## 0.4.1-dev.3 - 2026-08-26
+
+### 中文
+
+- 改善 Linux 远端音频播放的音画同步、短时抖动容忍与播放器布局
+- 改善 Windows 远端音频在短时网络抖动下的连续性
+- Linux 和 Windows 增加本地诊断日志
+- Linux 和 Windows 观看端不再转发远端媒体，避免多个播放端相互影响
+
+### English
+
+- Improve Linux remote audio/video synchronization, brief jitter tolerance, and player layout
+- Improve Windows remote audio continuity during brief network jitter
+- Add local diagnostic logs on Linux and Windows
+- Prevent Linux and Windows viewers from forwarding remote media to avoid interference between viewers
+
 ## 0.4.1-dev.2 - 2026-08-24
 
 ### 中文
