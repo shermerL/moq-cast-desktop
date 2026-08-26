@@ -425,7 +425,7 @@ async fn run(
     let (media_events, mut media_recv) = mpsc::channel(MEDIA_EVENT_CAPACITY);
     let (audio_updates, mut audio_recv) = watch::channel(None::<AudioStatusUpdate>);
     let mut remote = RemoteDirectory::start(
-        sessions.origin().clone(),
+        sessions.receive_origin().clone(),
         snapshot
             .local_id
             .clone()
@@ -718,7 +718,7 @@ async fn start_publication(
         return;
     };
     let policy = snapshot.media.video_encoding;
-    let prepared = match Publication::prepare(sessions.origin(), &local_id) {
+    let prepared = match Publication::prepare(sessions.publish_origin(), &local_id) {
         Ok(prepared) => prepared,
         Err(error) => {
             tracing::warn!(stage = "publish", %error, "screen publication preparation failed");

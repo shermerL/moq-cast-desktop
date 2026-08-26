@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use thiserror::Error;
 use tokio::{sync::mpsc, task::JoinSet};
 
-use super::{RuntimeEvent, TransportPhase, security::authorized};
+use super::{RuntimeEvent, SessionOrigins, TransportPhase, security::authorized};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Advertisement {
@@ -62,18 +62,18 @@ pub(crate) fn bind(bind: SocketAddr) -> Result<BoundServer, StartError> {
     })
 }
 
-pub(crate) async fn accept(
+pub(super) async fn accept(
     request: moq_tokio::Request,
     credential: &str,
-    origin: moq_tokio::moq_net::origin::Producer,
+    origins: SessionOrigins,
 ) -> Result<moq_tokio::moq_net::Session, AcceptError> {
     if !authorized(request.path(), credential) {
         request.close(403).await?;
         return Err(AcceptError::Unauthorized);
     }
     Ok(request
-        .with_publisher(&origin)
-        .with_subscriber(origin)
+        .with_publisher(&origins.publish)
+        .with_subscriber(origins.receive)
         .ok()
         .await?)
 }
@@ -81,7 +81,7 @@ pub(crate) async fn accept(
 pub(super) async fn run_listener(
     mut listener: moq_tokio::Listener,
     credential: String,
-    origin: moq_tokio::moq_net::origin::Producer,
+    origins: SessionOrigins,
     events: mpsc::Sender<RuntimeEvent>,
 ) {
     let mut inbound_id = 0_u64;
@@ -91,9 +91,9 @@ pub(super) async fn run_listener(
         let id = inbound_id;
         let events = events.clone();
         let credential = credential.clone();
-        let origin = origin.clone();
+        let origins = origins.clone();
         sessions.spawn(async move {
-            match accept(request, &credential, origin).await {
+            match accept(request, &credential, origins).await {
                 Ok(session) => {
                     let _ = events
                         .send(RuntimeEvent::Inbound {
