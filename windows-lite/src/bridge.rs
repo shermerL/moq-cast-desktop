@@ -116,11 +116,12 @@ impl BridgeOwner {
     }
 
     fn stop_and_join(&mut self) {
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
         let _ = self.stop.try_send(());
         let _ = TcpStream::connect_timeout(&self.wake, IO_TIMEOUT);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+        let _ = worker.join();
     }
 }
 
@@ -1194,6 +1195,27 @@ mod tests {
                 .unwrap_or("empty response")
         );
         second.stop();
+    }
+
+    #[test]
+    fn repeated_shutdown_does_not_open_another_wake_connection() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind listener");
+        listener.set_nonblocking(true).expect("set nonblocking");
+        let (stop, stop_rx) = mpsc::sync_channel(1);
+        let mut bridge = BridgeOwner {
+            stop,
+            wake: listener.local_addr().expect("listener address"),
+            worker: None,
+        };
+
+        bridge.stop_and_join();
+
+        assert!(matches!(stop_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        match listener.accept() {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Ok(_) => panic!("stopped bridge opened another wake connection"),
+            Err(error) => panic!("unexpected accept error: {error}"),
+        }
     }
 
     #[test]
