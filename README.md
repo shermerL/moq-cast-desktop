@@ -37,6 +37,12 @@ cargo run --locked --release
 
 See the platform notes for [Linux](linux/README.md) and [Windows](windows/README.md).
 
+## MoQTCast Lite for Windows
+
+[`windows-lite/`](windows-lite/README.md) 是独立的轻量 notification-area 应用，只浏览局域网中的 MoQ 设备在线状态，并通过进程期授权的 loopback API 把清洗后 presence 交给 MoQTCast Connect 页面。它不发布服务，不处理或代理媒体。
+
+[`windows-lite/`](windows-lite/README.md) is a separate lightweight notification-area application. It browses MoQ device presence on the LAN and exposes only sanitized presence to the MoQTCast Connect page through a process-authorized loopback API. It does not advertise a service or handle or proxy media.
+
 ## License
 
 Licensed under either [Apache License 2.0](LICENSE-APACHE) or [MIT License](LICENSE-MIT), at your option.
