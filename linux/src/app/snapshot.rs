@@ -34,7 +34,7 @@ impl DiscoveryState {
 pub enum PeerDiscoveryState {
     /// The peer is currently advertised.
     Found,
-    /// The most recent advertisement was withdrawn or discovery restarted.
+    /// The advertisement was withdrawn while an exact outbound session remains active.
     #[default]
     Lost,
 }
@@ -181,7 +181,7 @@ pub struct AppSnapshot {
     pub discovery: DiscoveryState,
     /// Current local mDNS peer id, when services are active.
     pub local_peer_id: Option<String>,
-    /// Known peers keyed by stable mDNS id.
+    /// Currently discovered or connected peers keyed by the current mDNS id.
     pub peers: BTreeMap<String, PeerSnapshot>,
     /// Authorized inbound sessions whose remote mDNS identity is unavailable.
     pub inbound_session_count: usize,
@@ -228,7 +228,7 @@ impl AppSnapshot {
         self.last_error = None;
     }
 
-    /// Stop discovery while retaining transport and historical device rows.
+    /// Stop discovery while retaining only exact connected peer rows.
     pub fn stop_discovery(&mut self) {
         self.discovery = DiscoveryState::Idle;
         self.mark_all_peers_lost();
@@ -277,12 +277,13 @@ impl AppSnapshot {
         }
     }
 
-    /// Mark one peer absent from discovery without changing its transport.
+    /// Mark one peer absent and remove it unless an exact outbound session remains active.
     pub fn mark_peer_lost(&mut self, peer_id: &str) {
         if let Some(peer) = self.peers.get_mut(peer_id) {
             peer.discovery = PeerDiscoveryState::Lost;
             peer.endpoints.clear();
         }
+        self.prune_inactive_peer(peer_id);
         if self.discovery.is_active() && !self.has_found_peers() {
             self.discovery = DiscoveryState::Empty;
         }
@@ -300,6 +301,7 @@ impl AppSnapshot {
         if let Some(peer) = self.peers.get_mut(peer_id) {
             peer.transport = transport;
         }
+        self.prune_inactive_peer(peer_id);
     }
 
     /// Update the aggregate count of authorized inbound sessions.
@@ -517,7 +519,30 @@ impl AppSnapshot {
             peer.discovery = PeerDiscoveryState::Lost;
             peer.endpoints.clear();
         }
+        self.prune_inactive_peers();
     }
+
+    fn prune_inactive_peer(&mut self, peer_id: &str) {
+        let keep = self.peers.get(peer_id).is_some_and(peer_remains_visible);
+        if keep {
+            return;
+        }
+
+        self.peers.remove(peer_id);
+        self.remote_screens
+            .retain(|_, screen| screen.peer_id != peer_id);
+    }
+
+    fn prune_inactive_peers(&mut self) {
+        self.peers.retain(|_, peer| peer_remains_visible(peer));
+        self.remote_screens
+            .retain(|_, screen| self.peers.contains_key(&screen.peer_id));
+    }
+}
+
+fn peer_remains_visible(peer: &PeerSnapshot) -> bool {
+    peer.discovery == PeerDiscoveryState::Found
+        || (peer.dial_role == DialRole::Outbound && peer.transport == TransportState::Connected)
 }
 
 #[cfg(test)]

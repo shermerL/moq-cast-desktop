@@ -1311,7 +1311,7 @@ mod tests {
     use tokio::sync::watch;
 
     use crate::app::{
-        DialRole, DiscoveredPeer, DiscoveryState, MediaState, PeerDiscoveryState, RemoteAudioPhase,
+        DialRole, DiscoveredPeer, DiscoveryState, MediaState, RemoteAudioPhase,
         RemoteAudioSnapshot, TransportState, UserCommand,
     };
     use crate::network::service;
@@ -1573,10 +1573,7 @@ mod tests {
             .state
             .set_transport("peer-b", TransportState::Failed);
 
-        assert_eq!(
-            supervisor.state.peers["peer-a"].discovery,
-            PeerDiscoveryState::Lost
-        );
+        assert!(!supervisor.state.peers.contains_key("peer-a"));
         assert_eq!(
             supervisor.state.peers["peer-b"].transport,
             TransportState::Failed
