@@ -1,2 +1,16 @@
+# Operating system files
 .DS_Store
+*.dmp
+
+# Editor settings
 .idea/
+.vscode/
+
+# Rust build output
+target/
+
+# Local diagnostics
+*.log
+
+# Local LAN credentials
+lan-secret.txt
