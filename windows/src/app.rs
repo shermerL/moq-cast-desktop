@@ -144,7 +144,9 @@ impl MoqCastApp {
             ui.selectable_value(&mut self.page, Page::Settings, self.locale.settings());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let text = match self.snapshot.discovery {
-                    DiscoveryState::Ready => format!("{} peers", self.snapshot.peers.len()),
+                    DiscoveryState::Ready => {
+                        format!("{} peers", self.snapshot.present_peer_count())
+                    }
                     DiscoveryState::Empty => "LAN ready".to_owned(),
                     DiscoveryState::Starting => "Starting".to_owned(),
                     DiscoveryState::Failed => "Discovery error".to_owned(),
@@ -156,7 +158,38 @@ impl MoqCastApp {
     }
 
     fn nearby(&mut self, ui: &mut egui::Ui) {
-        ui.heading(self.locale.nearby());
+        let scan_active = self.snapshot.discovery.is_active();
+        let scan_label = match (self.locale, scan_active) {
+            (Locale::Chinese, true) => "停止扫描",
+            (Locale::Chinese, false) => "开始扫描",
+            (Locale::English, true) => "Stop scan",
+            (Locale::English, false) => "Start scan",
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.heading(self.locale.nearby());
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button(scan_label).clicked() {
+                    self.send(if scan_active {
+                        RuntimeCommand::StopScan
+                    } else {
+                        RuntimeCommand::StartScan
+                    });
+                }
+                let session = self
+                    .snapshot
+                    .lan_session_id
+                    .as_deref()
+                    .unwrap_or("--------");
+                let session_label = match self.locale {
+                    Locale::Chinese => "LAN 会话",
+                    Locale::English => "LAN session",
+                };
+                ui.small(format!(
+                    "{} · {session_label} {session}",
+                    self.snapshot.local_device_name,
+                ));
+            });
+        });
         ui.label(match self.locale {
             Locale::Chinese => "发现与连接保持分层。只有确定的拨号侧可以发起安全直连。",
             Locale::English => {
@@ -827,6 +860,35 @@ mod tests {
         assert_eq!(page, Page::Settings);
         assert_eq!(locale.settings(), "Settings");
         assert_ne!(Page::Nearby, Page::ScreenShare);
+    }
+
+    #[test]
+    fn nearby_count_uses_presence_instead_of_historical_rows() {
+        let mut snapshot = RuntimeSnapshot::default();
+        snapshot.peers.insert(
+            "present".to_owned(),
+            PeerView {
+                id: "present".to_owned(),
+                candidates: Vec::new(),
+                should_dial: true,
+                authenticated_discovery: false,
+                tls_pinned: true,
+                present: true,
+                transport: Default::default(),
+                screen: ScreenAvailability::Unavailable,
+            },
+        );
+        let historical = snapshot.peers["present"].clone();
+        snapshot.peers.insert(
+            "historical".to_owned(),
+            PeerView {
+                id: "historical".to_owned(),
+                present: false,
+                ..historical
+            },
+        );
+
+        assert_eq!(snapshot.present_peer_count(), 1);
     }
 
     #[test]

@@ -27,6 +27,8 @@ use crate::{
 const COMMAND_CAPACITY: usize = 32;
 const MEDIA_EVENT_CAPACITY: usize = 4;
 const VIEW_EVENT_CAPACITY: usize = 8;
+const MAX_DEVICE_NAME_CHARS: usize = 64;
+const SHORT_SESSION_ID_CHARS: usize = 8;
 
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeConfig {
@@ -43,6 +45,12 @@ pub(crate) enum DiscoveryState {
     Empty,
     Failed,
     Stopped,
+}
+
+impl DiscoveryState {
+    pub(crate) fn is_active(self) -> bool {
+        matches!(self, Self::Starting | Self::Ready | Self::Empty)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +99,8 @@ pub(crate) struct RuntimeSnapshot {
     pub(crate) inbound_sessions: usize,
     pub(crate) listener: Option<String>,
     pub(crate) local_id: Option<String>,
+    pub(crate) local_device_name: String,
+    pub(crate) lan_session_id: Option<String>,
     pub(crate) version: &'static str,
     pub(crate) last_error: Option<&'static str>,
     pub(crate) stopping: bool,
@@ -107,6 +117,8 @@ impl Default for RuntimeSnapshot {
             inbound_sessions: 0,
             listener: None,
             local_id: None,
+            local_device_name: local_device_name(),
+            lan_session_id: None,
             version: env!("CARGO_PKG_VERSION"),
             last_error: None,
             stopping: false,
@@ -115,13 +127,53 @@ impl Default for RuntimeSnapshot {
 }
 
 impl RuntimeSnapshot {
+    fn begin_scan(&mut self) {
+        self.discovery = DiscoveryState::Starting;
+        self.last_error = None;
+    }
+
+    fn started_scan(&mut self, listener: String, local_id: String) {
+        self.discovery = DiscoveryState::Empty;
+        self.listener = Some(listener);
+        self.lan_session_id = Some(short_lan_session_id(&local_id));
+        self.local_id = Some(local_id);
+        self.last_error = None;
+    }
+
+    fn stopped_scan(&mut self) {
+        self.clear_lan_state();
+        self.discovery = DiscoveryState::Stopped;
+        self.last_error = None;
+    }
+
+    fn failed_scan(&mut self, message: &'static str) {
+        self.clear_lan_state();
+        self.discovery = DiscoveryState::Failed;
+        self.last_error = Some(message);
+    }
+
+    fn clear_lan_state(&mut self) {
+        self.peers.clear();
+        self.remote_screens.clear();
+        self.inbound_sessions = 0;
+        self.listener = None;
+        self.local_id = None;
+        self.lan_session_id = None;
+    }
+
     fn apply_registry(&mut self, change: RegistryChange) {
         match change {
             RegistryChange::Added(peer) | RegistryChange::Updated(peer) => self.upsert(peer),
             RegistryChange::Removed { id } => {
-                if let Some(peer) = self.peers.get_mut(&id) {
+                if self.has_exact_outbound_connection(&id) {
+                    let peer = self
+                        .peers
+                        .get_mut(&id)
+                        .expect("connected peer remains in the snapshot");
                     peer.present = false;
                     peer.candidates.clear();
+                } else {
+                    self.remove_peer(&id);
                 }
             }
             RegistryChange::Unchanged | RegistryChange::IgnoredSelf => return,
@@ -131,6 +183,23 @@ impl RuntimeSnapshot {
         } else {
             DiscoveryState::Empty
         };
+    }
+
+    pub(crate) fn present_peer_count(&self) -> usize {
+        self.peers.values().filter(|peer| peer.present).count()
+    }
+
+    fn has_exact_outbound_connection(&self, peer: &str) -> bool {
+        self.peers.get(peer).is_some_and(|peer| {
+            peer.transport.direction == Some(TransportDirectionView::Outbound)
+                && peer.transport.phase == TransportPhaseView::Connected
+        })
+    }
+
+    fn remove_peer(&mut self, peer: &str) {
+        self.peers.remove(peer);
+        self.remote_screens
+            .retain(|_, screen| screen.peer_id != peer);
     }
 
     fn upsert(&mut self, summary: PeerSummary) {
@@ -223,16 +292,24 @@ impl RuntimeSnapshot {
             return;
         }
         current.transport = update;
+        if !(current.present
+            || current.transport.direction == Some(TransportDirectionView::Outbound)
+                && current.transport.phase == TransportPhaseView::Connected)
+        {
+            self.remove_peer(peer);
+        }
     }
 
     fn shutdown(&mut self) {
         self.stopping = true;
-        self.discovery = DiscoveryState::Stopped;
+        self.stopped_scan();
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RuntimeCommand {
+    StartScan,
+    StopScan,
     SetVideoEncodingPolicy(VideoEncodingPolicy),
     ShareScreen,
     StopSharing,
@@ -403,6 +480,125 @@ impl Drop for RuntimeOwner {
     }
 }
 
+#[derive(Default)]
+struct ServiceLifecycle {
+    generation: u64,
+    active: bool,
+}
+
+impl ServiceLifecycle {
+    fn begin_start(&mut self) -> Option<u64> {
+        if self.active {
+            return None;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        self.active = true;
+        Some(self.generation)
+    }
+
+    fn fail(&mut self, generation: u64) {
+        if self.generation == generation {
+            self.active = false;
+        }
+    }
+
+    fn stop(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.active = false;
+    }
+
+    fn accepts(&self, generation: u64) -> bool {
+        self.active && self.generation == generation
+    }
+}
+
+struct LanServices {
+    generation: u64,
+    discovery: mdns::Discovery,
+    registry: PeerRegistry,
+    sessions: SessionFoundation,
+    remote: RemoteDirectory,
+    raw_peers: BTreeMap<String, mdns::Peer>,
+}
+
+impl LanServices {
+    async fn shutdown(self) {
+        self.remote.stop().await;
+        self.sessions.shutdown().await;
+        drop(self.discovery);
+    }
+}
+
+#[derive(Default)]
+struct ServiceOwner {
+    lifecycle: ServiceLifecycle,
+    services: Option<LanServices>,
+}
+
+impl ServiceOwner {
+    async fn start(
+        &mut self,
+        config: &RuntimeConfig,
+        snapshot: &mut RuntimeSnapshot,
+        snapshots: &watch::Sender<RuntimeSnapshot>,
+    ) {
+        let Some(generation) = self.lifecycle.begin_start() else {
+            return;
+        };
+        snapshot.begin_scan();
+        let _ = snapshots.send(snapshot.clone());
+        match start_services(config, generation).await {
+            Ok(services) if self.lifecycle.accepts(generation) => {
+                let listener = services.sessions.advertisement().addr.to_string();
+                let local_id = sanitize_identity(services.discovery.id());
+                snapshot.started_scan(listener, local_id);
+                self.services = Some(services);
+            }
+            Ok(services) => services.shutdown().await,
+            Err(message) => {
+                self.lifecycle.fail(generation);
+                snapshot.failed_scan(message);
+            }
+        }
+    }
+
+    async fn stop(&mut self, snapshot: &mut RuntimeSnapshot) {
+        self.lifecycle.stop();
+        if let Some(services) = self.services.take() {
+            services.shutdown().await;
+        }
+        snapshot.stopped_scan();
+    }
+
+    async fn fail(&mut self, snapshot: &mut RuntimeSnapshot, message: &'static str) {
+        let generation = self.lifecycle.generation;
+        self.lifecycle.fail(generation);
+        if let Some(services) = self.services.take() {
+            services.shutdown().await;
+        }
+        snapshot.failed_scan(message);
+    }
+}
+
+enum RuntimeInput {
+    Command(Option<RuntimeCommand>),
+    Discovery {
+        generation: u64,
+        event: Option<mdns::Event>,
+    },
+    Session {
+        generation: u64,
+        update: Option<TransportUpdate>,
+    },
+    Remote {
+        generation: u64,
+        update: Option<crate::remote::Update>,
+    },
+    Media(Option<MediaEvent>),
+    View(Option<ViewEvent>),
+    Audio(Result<(), watch::error::RecvError>),
+}
+
 async fn run(
     config: RuntimeConfig,
     mut commands: mpsc::Receiver<RuntimeCommand>,
@@ -410,116 +606,153 @@ async fn run(
     playback: watch::Sender<Option<Arc<PlaybackFrame>>>,
 ) {
     let mut snapshot = RuntimeSnapshot::default();
-    let Some((mut discovery, mut registry, mut sessions)) =
-        start_services(&config, &mut snapshot).await
-    else {
-        let _ = snapshots.send(snapshot);
-        while let Some(command) = commands.recv().await {
-            if command == RuntimeCommand::Shutdown {
-                break;
-            }
-        }
-        return;
-    };
-    let mut raw_peers = BTreeMap::<String, mdns::Peer>::new();
     let (media_events, mut media_recv) = mpsc::channel(MEDIA_EVENT_CAPACITY);
     let (audio_updates, mut audio_recv) = watch::channel(None::<AudioStatusUpdate>);
-    let mut remote = RemoteDirectory::start(
-        sessions.receive_origin().clone(),
-        snapshot
-            .local_id
-            .clone()
-            .expect("services set the local peer id"),
-    );
     let (view_events, mut view_recv) = mpsc::channel(VIEW_EVENT_CAPACITY);
     let mut publication = PublicationOwner::default();
     let mut view = ViewOwner::default();
+    let mut service_owner = ServiceOwner::default();
+    service_owner
+        .start(&config, &mut snapshot, &snapshots)
+        .await;
     let _ = snapshots.send(snapshot.clone());
 
     loop {
-        tokio::select! {
-            command = commands.recv() => {
+        let input = if let Some(services) = service_owner.services.as_mut() {
+            let generation = services.generation;
+            tokio::select! {
+                command = commands.recv() => RuntimeInput::Command(command),
+                event = services.discovery.recv() => RuntimeInput::Discovery { generation, event },
+                update = services.sessions.recv() => RuntimeInput::Session { generation, update },
+                update = services.remote.recv() => RuntimeInput::Remote { generation, update },
+                event = media_recv.recv() => RuntimeInput::Media(event),
+                event = view_recv.recv() => RuntimeInput::View(event),
+                changed = audio_recv.changed() => RuntimeInput::Audio(changed),
+            }
+        } else {
+            tokio::select! {
+                command = commands.recv() => RuntimeInput::Command(command),
+                event = media_recv.recv() => RuntimeInput::Media(event),
+                event = view_recv.recv() => RuntimeInput::View(event),
+                changed = audio_recv.changed() => RuntimeInput::Audio(changed),
+            }
+        };
+
+        match input {
+            RuntimeInput::Command(command) => {
                 let Some(command) = command else { break };
                 if handle_command(
                     command,
-                    CommandContext {
+                    RuntimeContext {
+                        config: &config,
+                        snapshots: &snapshots,
                         snapshot: &mut snapshot,
-                        sessions: &mut sessions,
+                        services: &mut service_owner,
                         publication: &mut publication,
                         media_events: &media_events,
                         view: &mut view,
                         view_events: &view_events,
                         playback: &playback,
-                        remote: &remote,
                         audio_updates: &audio_updates,
                     },
-                ).await {
-                    let _ = snapshots.send(snapshot.clone());
+                )
+                .await
+                {
                     break;
                 }
-                let _ = snapshots.send(snapshot.clone());
             }
-            event = discovery.recv() => {
+            RuntimeInput::Discovery { generation, event } => {
+                if !service_owner.lifecycle.accepts(generation) {
+                    continue;
+                }
                 let Some(event) = event else {
-                    snapshot.discovery = DiscoveryState::Failed;
-                    snapshot.last_error = Some("LAN discovery stopped unexpectedly.");
+                    stop_active_media(&mut snapshot, &mut publication, &mut view, &playback).await;
+                    service_owner
+                        .fail(&mut snapshot, "LAN discovery stopped unexpectedly.")
+                        .await;
                     let _ = snapshots.send(snapshot.clone());
-                    break;
+                    continue;
                 };
+                let services = service_owner
+                    .services
+                    .as_mut()
+                    .expect("current discovery generation owns services");
                 match event {
                     mdns::Event::Found(peer) => {
-                        let should_dial = discovery.should_dial(&peer.id);
+                        let should_dial = services.discovery.should_dial(&peer.id);
                         let raw_id = peer.id.clone();
                         let key = sanitize_identity(&raw_id);
-                        let change = registry.found(&peer, should_dial);
-                        raw_peers.insert(key.clone(), peer);
+                        let change = services.registry.found(&peer, should_dial);
+                        services.raw_peers.insert(key.clone(), peer);
                         snapshot.apply_registry(change);
                         if should_dial {
-                            auto_connect(&key, &mut snapshot, &raw_peers, &mut sessions).await;
-                        } else if let Some(update) = sessions.disconnect(&raw_id).await {
+                            auto_connect(
+                                &key,
+                                &mut snapshot,
+                                &services.raw_peers,
+                                &mut services.sessions,
+                            )
+                            .await;
+                        } else if let Some(update) = services.sessions.disconnect(&raw_id).await {
                             apply_session_update(&mut snapshot, update);
                         }
                     }
                     mdns::Event::Lost(raw_id) => {
                         let key = sanitize_identity(&raw_id);
-                        raw_peers.remove(&key);
-                        snapshot.apply_registry(registry.lost(&raw_id));
+                        let keep_session = snapshot.has_exact_outbound_connection(&key);
+                        services.raw_peers.remove(&key);
+                        snapshot.apply_registry(services.registry.lost(&raw_id));
+                        if !keep_session
+                            && let Some(update) = services.sessions.disconnect(&raw_id).await
+                        {
+                            apply_session_update(&mut snapshot, update);
+                        }
                     }
                     _ => {}
                 }
-                let _ = snapshots.send(snapshot.clone());
             }
-            update = sessions.recv() => {
+            RuntimeInput::Session { generation, update } => {
+                if !service_owner.lifecycle.accepts(generation) {
+                    continue;
+                }
                 let Some(update) = update else {
-                    snapshot.last_error = Some("The direct session listener stopped unexpectedly.");
+                    stop_active_media(&mut snapshot, &mut publication, &mut view, &playback).await;
+                    service_owner
+                        .fail(
+                            &mut snapshot,
+                            "The direct session listener stopped unexpectedly.",
+                        )
+                        .await;
                     let _ = snapshots.send(snapshot.clone());
-                    break;
+                    continue;
                 };
                 apply_session_update(&mut snapshot, update);
-                let _ = snapshots.send(snapshot.clone());
             }
-            event = media_recv.recv() => {
-                let Some(MediaEvent::Ended {
-                    generation,
-                    result,
-                }) = event else {
+            RuntimeInput::Media(event) => {
+                let Some(MediaEvent::Ended { generation, result }) = event else {
                     continue;
                 };
                 publication.finished(generation);
                 snapshot.media.ended(generation, result);
-                let _ = snapshots.send(snapshot.clone());
             }
-            update = remote.recv() => {
-                let Some(update) = update else {
-                    snapshot.last_error = Some("The remote screen directory stopped unexpectedly.");
-                    let _ = snapshots.send(snapshot.clone());
-                    break;
-                };
-                if snapshot.update_remote_screen(update) {
-                    let _ = snapshots.send(snapshot.clone());
+            RuntimeInput::Remote { generation, update } => {
+                if !service_owner.lifecycle.accepts(generation) {
+                    continue;
                 }
+                let Some(update) = update else {
+                    stop_active_media(&mut snapshot, &mut publication, &mut view, &playback).await;
+                    service_owner
+                        .fail(
+                            &mut snapshot,
+                            "The remote screen directory stopped unexpectedly.",
+                        )
+                        .await;
+                    let _ = snapshots.send(snapshot.clone());
+                    continue;
+                };
+                snapshot.update_remote_screen(update);
             }
-            event = view_recv.recv() => {
+            RuntimeInput::View(event) => {
                 let Some(event) = event else {
                     continue;
                 };
@@ -561,38 +794,33 @@ async fn run(
                         snapshot.view.ended(generation, result);
                     }
                 }
-                let _ = snapshots.send(snapshot.clone());
             }
-            changed = audio_recv.changed() => {
+            RuntimeInput::Audio(changed) => {
                 if changed.is_err() {
                     continue;
                 }
                 let Some(update) = *audio_recv.borrow_and_update() else {
                     continue;
                 };
-                if snapshot.media.audio.apply(update) {
-                    let _ = snapshots.send(snapshot.clone());
-                }
+                snapshot.media.audio.apply(update);
             }
         }
+        let _ = snapshots.send(snapshot.clone());
     }
 
-    view.stop().await;
-    playback.send_replace(None);
-    publication.stop().await;
-    remote.stop().await;
+    stop_active_media(&mut snapshot, &mut publication, &mut view, &playback).await;
+    service_owner.stop(&mut snapshot).await;
     snapshot.shutdown();
     let _ = snapshots.send(snapshot);
-    sessions.shutdown().await;
 }
 
 async fn start_services(
     config: &RuntimeConfig,
-    snapshot: &mut RuntimeSnapshot,
-) -> Option<(mdns::Discovery, PeerRegistry, SessionFoundation)> {
+    generation: u64,
+) -> Result<LanServices, &'static str> {
     let bound = match SessionFoundation::bind(config.bind) {
         Ok(bound) => bound,
-        Err(_) => return fail(snapshot, "The direct session listener could not bind."),
+        Err(_) => return Err("The direct session listener could not bind."),
     };
     let advertisement = bound.advertisement().clone();
     let authenticated = config.secret_file.is_some();
@@ -604,62 +832,141 @@ async fn start_services(
     if let Some(path) = &config.secret_file {
         let secret = match mdns::Secret::load(path.to_string_lossy().as_ref()) {
             Ok(secret) => secret,
-            Err(_) => return fail(snapshot, "The LAN discovery secret could not be loaded."),
+            Err(_) => return Err("The LAN discovery secret could not be loaded."),
         };
         discovery_config = discovery_config.with_secret(secret);
     }
     let discovery = match discovery_config.advertise().await {
         Ok(discovery) => discovery,
-        Err(_) => return fail(snapshot, "LAN discovery could not start."),
+        Err(_) => return Err("LAN discovery could not start."),
     };
     let registry = PeerRegistry::new(discovery.id(), authenticated);
     let sessions = match bound.start(discovery.credential().to_owned()).await {
         Ok(sessions) => sessions,
-        Err(_) => return fail(snapshot, "The direct session listener could not start."),
+        Err(_) => return Err("The direct session listener could not start."),
     };
-    snapshot.discovery = DiscoveryState::Empty;
-    snapshot.listener = Some(sessions.advertisement().addr.to_string());
-    snapshot.local_id = Some(sanitize_identity(discovery.id()));
-    Some((discovery, registry, sessions))
+    let local_id = sanitize_identity(discovery.id());
+    let remote = RemoteDirectory::start(sessions.receive_origin().clone(), local_id);
+    Ok(LanServices {
+        generation,
+        discovery,
+        registry,
+        sessions,
+        remote,
+        raw_peers: BTreeMap::new(),
+    })
 }
 
-fn fail<T>(snapshot: &mut RuntimeSnapshot, message: &'static str) -> Option<T> {
-    snapshot.discovery = DiscoveryState::Failed;
-    snapshot.last_error = Some(message);
-    None
+fn sanitize_device_name(raw: &str) -> String {
+    let normalized = raw
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let bounded = normalized
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(MAX_DEVICE_NAME_CHARS)
+        .collect::<String>();
+    if bounded.is_empty() {
+        "Windows device".to_owned()
+    } else {
+        bounded
+    }
 }
 
-struct CommandContext<'a> {
+fn short_lan_session_id(id: &str) -> String {
+    id.chars().take(SHORT_SESSION_ID_CHARS).collect()
+}
+
+#[cfg(target_os = "windows")]
+fn local_device_name() -> String {
+    use windows::{
+        Win32::System::SystemInformation::{ComputerNameDnsHostname, GetComputerNameExW},
+        core::PWSTR,
+    };
+
+    let mut buffer = [0_u16; 256];
+    let mut length = buffer.len() as u32;
+    let result = unsafe {
+        GetComputerNameExW(
+            ComputerNameDnsHostname,
+            Some(PWSTR(buffer.as_mut_ptr())),
+            &mut length,
+        )
+    };
+    if result.is_ok() {
+        sanitize_device_name(&String::from_utf16_lossy(&buffer[..length as usize]))
+    } else {
+        "Windows device".to_owned()
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn local_device_name() -> String {
+    sanitize_device_name(&std::env::var("HOSTNAME").unwrap_or_default())
+}
+
+struct RuntimeContext<'a> {
+    config: &'a RuntimeConfig,
+    snapshots: &'a watch::Sender<RuntimeSnapshot>,
     snapshot: &'a mut RuntimeSnapshot,
-    sessions: &'a mut SessionFoundation,
+    services: &'a mut ServiceOwner,
     publication: &'a mut PublicationOwner,
     media_events: &'a mpsc::Sender<MediaEvent>,
     view: &'a mut ViewOwner,
     view_events: &'a mpsc::Sender<ViewEvent>,
     playback: &'a watch::Sender<Option<Arc<PlaybackFrame>>>,
-    remote: &'a RemoteDirectory,
     audio_updates: &'a watch::Sender<Option<AudioStatusUpdate>>,
 }
 
-async fn handle_command(command: RuntimeCommand, context: CommandContext<'_>) -> bool {
-    let CommandContext {
+async fn handle_command(command: RuntimeCommand, context: RuntimeContext<'_>) -> bool {
+    let RuntimeContext {
+        config,
+        snapshots,
         snapshot,
-        sessions,
+        services,
         publication,
         media_events,
         view,
         view_events,
         playback,
-        remote,
         audio_updates,
     } = context;
     match command {
+        RuntimeCommand::StartScan => {
+            services.start(config, snapshot, snapshots).await;
+            false
+        }
+        RuntimeCommand::StopScan => {
+            stop_active_media(snapshot, publication, view, playback).await;
+            services.stop(snapshot).await;
+            false
+        }
         RuntimeCommand::SetVideoEncodingPolicy(policy) => {
             snapshot.media.set_video_encoding_policy(policy);
             false
         }
         RuntimeCommand::ShareScreen => {
-            start_publication(snapshot, sessions, publication, media_events, audio_updates).await;
+            if let Some(active) = services.services.as_ref() {
+                start_publication(
+                    snapshot,
+                    &active.sessions,
+                    publication,
+                    media_events,
+                    audio_updates,
+                )
+                .await;
+            } else {
+                snapshot.last_error = Some("Start LAN discovery before sharing.");
+            }
             false
         }
         RuntimeCommand::StopSharing => {
@@ -671,7 +978,11 @@ async fn handle_command(command: RuntimeCommand, context: CommandContext<'_>) ->
             false
         }
         RuntimeCommand::WatchScreen { path } => {
-            start_view(path, snapshot, remote, view, view_events, playback);
+            if let Some(active) = services.services.as_ref() {
+                start_view(path, snapshot, &active.remote, view, view_events, playback);
+            } else {
+                snapshot.last_error = Some("Start LAN discovery before watching.");
+            }
             false
         }
         RuntimeCommand::StopWatching => {
@@ -683,19 +994,29 @@ async fn handle_command(command: RuntimeCommand, context: CommandContext<'_>) ->
             snapshot.view.stopped(generation);
             false
         }
-        RuntimeCommand::Shutdown => {
-            if let Some(generation) = snapshot.view.begin_stop() {
-                view.stop().await;
-                playback.send_replace(None);
-                snapshot.view.stopped(generation);
-            }
-            if let Some(generation) = snapshot.media.begin_stop() {
-                publication.stop().await;
-                snapshot.media.stopped(generation);
-            }
-            snapshot.shutdown();
-            true
-        }
+        RuntimeCommand::Shutdown => true,
+    }
+}
+
+async fn stop_active_media(
+    snapshot: &mut RuntimeSnapshot,
+    publication: &mut PublicationOwner,
+    view: &mut ViewOwner,
+    playback: &watch::Sender<Option<Arc<PlaybackFrame>>>,
+) {
+    if let Some(generation) = snapshot.view.begin_stop() {
+        view.stop().await;
+        playback.send_replace(None);
+        snapshot.view.stopped(generation);
+    } else {
+        view.stop().await;
+        playback.send_replace(None);
+    }
+    if let Some(generation) = snapshot.media.begin_stop() {
+        publication.stop().await;
+        snapshot.media.stopped(generation);
+    } else {
+        publication.stop().await;
     }
 }
 
@@ -909,11 +1230,167 @@ mod tests {
         snapshot.apply_registry(RegistryChange::Removed {
             id: "peer".to_owned(),
         });
-        assert!(!snapshot.peers["peer"].present);
+        assert!(!snapshot.peers.contains_key("peer"));
         assert_eq!(snapshot.discovery, DiscoveryState::Empty);
+    }
+
+    #[test]
+    fn lost_keeps_only_an_exact_outbound_connected_peer_until_disconnect() {
+        let mut snapshot = RuntimeSnapshot::default();
+        snapshot.apply_registry(RegistryChange::Added(peer("peer", "moqt://one:4443")));
+        let generation = snapshot.begin_auto_connect("peer").expect("connect");
+        snapshot.apply_transport(
+            "peer",
+            TransportView {
+                generation,
+                direction: Some(TransportDirectionView::Outbound),
+                phase: TransportPhaseView::Connected,
+            },
+        );
+        assert!(snapshot.update_remote_screen(crate::remote::Update {
+            path: "moqcast.screen/peer".to_owned(),
+            view: RemoteScreenView {
+                peer_id: "peer".to_owned(),
+                availability: ScreenAvailability::Available,
+            },
+        }));
+
+        snapshot.apply_registry(RegistryChange::Removed {
+            id: "peer".to_owned(),
+        });
+        assert!(!snapshot.peers["peer"].present);
+        assert!(snapshot.remote_screens.contains_key("moqcast.screen/peer"));
+
+        snapshot.apply_transport(
+            "peer",
+            TransportView {
+                generation,
+                direction: Some(TransportDirectionView::Outbound),
+                phase: TransportPhaseView::Disconnected,
+            },
+        );
+        assert!(!snapshot.peers.contains_key("peer"));
+        assert!(!snapshot.remote_screens.contains_key("moqcast.screen/peer"));
+    }
+
+    #[test]
+    fn lost_does_not_keep_an_inbound_connected_peer() {
+        let mut snapshot = RuntimeSnapshot::default();
+        snapshot.apply_registry(RegistryChange::Added(peer("peer", "moqt://one:4443")));
+        snapshot.apply_transport(
+            "peer",
+            TransportView {
+                generation: 1,
+                direction: Some(TransportDirectionView::Inbound),
+                phase: TransportPhaseView::Connected,
+            },
+        );
+
+        snapshot.apply_registry(RegistryChange::Removed {
+            id: "peer".to_owned(),
+        });
+        assert!(!snapshot.peers.contains_key("peer"));
+    }
+
+    #[test]
+    fn peer_count_only_includes_present_devices() {
+        let mut snapshot = RuntimeSnapshot::default();
+        snapshot.apply_registry(RegistryChange::Added(peer("connected", "moqt://one:4443")));
+        let generation = snapshot.begin_auto_connect("connected").expect("connect");
+        snapshot.apply_transport(
+            "connected",
+            TransportView {
+                generation,
+                direction: Some(TransportDirectionView::Outbound),
+                phase: TransportPhaseView::Connected,
+            },
+        );
+        snapshot.apply_registry(RegistryChange::Added(peer("present", "moqt://two:4443")));
+        snapshot.apply_registry(RegistryChange::Removed {
+            id: "connected".to_owned(),
+        });
+
+        assert_eq!(snapshot.present_peer_count(), 1);
+        assert_eq!(snapshot.peers.len(), 2);
+    }
+
+    #[test]
+    fn local_device_name_is_sanitized_and_bounded() {
+        assert_eq!(sanitize_device_name("  Desk\0top\n  "), "Desk top");
+        assert_eq!(sanitize_device_name("\u{0000}\n"), "Windows device");
+        assert_eq!(sanitize_device_name(&"a".repeat(80)).chars().count(), 64);
+    }
+
+    #[test]
+    fn lan_session_id_is_short_and_not_a_stable_device_label() {
+        assert_eq!(short_lan_session_id("0123456789abcdef"), "01234567");
+        assert_eq!(short_lan_session_id("tiny"), "tiny");
+    }
+
+    #[test]
+    fn service_generation_supports_start_stop_start() {
+        let mut lifecycle = ServiceLifecycle::default();
+        let first = lifecycle.begin_start().expect("first start");
+        assert!(lifecycle.accepts(first));
+
+        lifecycle.stop();
+        assert!(!lifecycle.accepts(first));
+        let second = lifecycle.begin_start().expect("second start");
+
+        assert!(second > first);
+        assert!(lifecycle.accepts(second));
+    }
+
+    #[test]
+    fn failed_service_generation_can_retry_without_accepting_stale_events() {
+        let mut lifecycle = ServiceLifecycle::default();
+        let failed = lifecycle.begin_start().expect("failed start");
+        lifecycle.fail(failed);
+        assert!(!lifecycle.accepts(failed));
+
+        let retry = lifecycle.begin_start().expect("retry start");
+        assert!(lifecycle.accepts(retry));
+        assert!(!lifecycle.accepts(failed));
+    }
+
+    #[test]
+    fn stale_service_generation_cannot_pollute_a_new_snapshot() {
+        let mut lifecycle = ServiceLifecycle::default();
+        let stale = lifecycle.begin_start().expect("first start");
+        lifecycle.stop();
+        let current = lifecycle.begin_start().expect("second start");
+        let mut snapshot = RuntimeSnapshot::default();
+
+        if lifecycle.accepts(stale) {
+            snapshot.apply_registry(RegistryChange::Added(peer("stale", "moqt://old:4443")));
+        }
+        if lifecycle.accepts(current) {
+            snapshot.apply_registry(RegistryChange::Added(peer("current", "moqt://new:4443")));
+        }
+
+        assert!(!snapshot.peers.contains_key("stale"));
+        assert!(snapshot.peers.contains_key("current"));
+    }
+
+    #[test]
+    fn stopping_scan_clears_lan_state_but_keeps_media_policy() {
+        let mut snapshot = RuntimeSnapshot::default();
+        snapshot.started_scan("[::]:4443".to_owned(), "local-session".to_owned());
+        snapshot.apply_registry(RegistryChange::Added(peer("peer", "moqt://one:4443")));
+        snapshot
+            .media
+            .set_video_encoding_policy(VideoEncodingPolicy::NativeQhdHardware);
+
+        snapshot.stopped_scan();
+
+        assert_eq!(snapshot.discovery, DiscoveryState::Stopped);
+        assert!(snapshot.peers.is_empty());
+        assert!(snapshot.remote_screens.is_empty());
+        assert!(snapshot.local_id.is_none());
+        assert!(snapshot.lan_session_id.is_none());
         assert_eq!(
-            snapshot.peers["peer"].transport.phase,
-            TransportPhaseView::Connecting
+            snapshot.media.video_encoding,
+            VideoEncodingPolicy::NativeQhdHardware
         );
     }
 
