@@ -96,7 +96,7 @@ mod platform {
 
     use windows::{
         Win32::{
-            Foundation::PROPERTYKEY,
+            Foundation::{ERROR_NO_UNICODE_TRANSLATION, PROPERTYKEY},
             Media::Audio::{
                 AudioSessionState, AudioSessionStateActive, AudioSessionStateExpired,
                 AudioSessionStateInactive, DEVICE_STATE, DEVICE_STATE_ACTIVE,
@@ -225,13 +225,13 @@ mod platform {
                 .GetDefaultAudioEndpoint(eRender, eConsole)
                 .map_err(|error| ("default_console_endpoint", error))?
         };
-        let endpoint_id = unsafe { endpoint_id(&console) }
+        let console_endpoint_id = unsafe { endpoint_id(&console) }
             .map_err(|error| ("default_console_endpoint_id", error))?;
         let multimedia = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia) }.ok();
         let console_multimedia_same = multimedia.and_then(|device| {
             unsafe { endpoint_id(&device) }
                 .ok()
-                .map(|id| id == endpoint_id)
+                .map(|id| id == console_endpoint_id)
         });
         let endpoint_name = unsafe { endpoint_name(&console) }
             .map(|name| sanitize_endpoint_name(&name, std::env::var("USERNAME").ok().as_deref()))
@@ -252,7 +252,7 @@ mod platform {
         let session = unsafe { session_snapshot(&console) };
 
         Ok(Snapshot {
-            endpoint_identity: redact_endpoint_identity(&endpoint_id),
+            endpoint_identity: redact_endpoint_identity(&console_endpoint_id),
             endpoint_name,
             endpoint_state,
             console_multimedia_same,
@@ -368,7 +368,12 @@ mod platform {
 
     unsafe fn endpoint_id(device: &IMMDevice) -> windows::core::Result<String> {
         let value = OwnedPwstr(unsafe { device.GetId()? });
-        value.0.to_string()
+        value.0.to_string().map_err(|error| {
+            windows::core::Error::new(
+                ERROR_NO_UNICODE_TRANSLATION.to_hresult(),
+                format!("default audio endpoint ID contained invalid UTF-16: {error}"),
+            )
+        })
     }
 
     struct OwnedPwstr(PWSTR);
@@ -388,7 +393,7 @@ mod platform {
     }
 
     unsafe fn propvariant_string(value: &PROPVARIANT) -> Option<String> {
-        let value = &value.Anonymous.Anonymous;
+        let value = unsafe { &value.Anonymous.Anonymous };
         if value.vt != VT_LPWSTR {
             return None;
         }
