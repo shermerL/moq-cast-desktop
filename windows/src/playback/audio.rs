@@ -203,7 +203,6 @@ async fn run(
                     last_error: Some(
                         "Remote audio could not start on the default output device.".to_owned(),
                     ),
-                    ..ViewAudioSnapshot::default()
                 })
                 .await;
             return;
