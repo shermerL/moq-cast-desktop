@@ -1,12 +1,12 @@
 //! Remote audio selection, decode, and system-output ownership.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::{sync::mpsc, task::JoinHandle};
 
 use super::{
     AudioStats, ViewAudioPhase, ViewAudioSnapshot, ViewEvent, callback_consumed_nonzero,
-    pcm_duration_us, pcm_has_nonzero_f32,
+    output_diagnostics, pcm_duration_us, pcm_has_nonzero_f32,
 };
 
 const REMOTE_AUDIO_LIVE_EDGE_BUDGET: Duration = Duration::from_millis(80);
@@ -122,6 +122,7 @@ async fn run(
     selection: Selection,
     events: Events,
 ) {
+    let started_at = Instant::now();
     events
         .send(ViewAudioSnapshot {
             phase: ViewAudioPhase::Pending,
@@ -203,7 +204,6 @@ async fn run(
                     last_error: Some(
                         "Remote audio could not start on the default output device.".to_owned(),
                     ),
-                    ..ViewAudioSnapshot::default()
                 })
                 .await;
             return;
@@ -217,9 +217,11 @@ async fn run(
         decoded_sample_rate = playback.consumer.sample_rate(),
         decoded_channels = playback.consumer.channels(),
         live_edge_budget_ms = REMOTE_AUDIO_LIVE_EDGE_BUDGET.as_millis() as u64,
+        elapsed_ms = elapsed_ms(started_at),
         output_device = "system-default",
         "remote audio pipeline opened; output callback has not been observed"
     );
+    output_diagnostics::spawn("pipeline_open", events.generation, elapsed_ms(started_at));
 
     let mut stats = AudioStats::default();
     let mut reports = tokio::time::interval(REPORT_INTERVAL);
@@ -279,6 +281,7 @@ async fn run(
                         pcm_bytes = bytes,
                         pcm_duration_us = %duration_us,
                         nonzero_pcm,
+                        elapsed_ms = elapsed_ms(started_at),
                         "decoded first remote PCM frame"
                     );
                     events
@@ -292,6 +295,7 @@ async fn run(
                         track = ?name,
                         frame_pts_us = %timestamp_us,
                         pcm_bytes = bytes,
+                        elapsed_ms = elapsed_ms(started_at),
                         "decoded first nonzero remote PCM frame"
                     );
                 }
@@ -314,14 +318,17 @@ async fn run(
                     return;
                 }
                 if stats.wrote() {
+                    let elapsed_ms = elapsed_ms(started_at);
                     tracing::info!(
                         broadcast = ?events.path,
                         view_generation = events.generation,
                         track = ?name,
                         frame_pts_us = %timestamp_us,
                         buffered_us = %playback.sink.buffered().as_micros(),
+                        elapsed_ms,
                         "first remote PCM sink write returned successfully; output callback has not been observed"
                     );
+                    output_diagnostics::spawn("first_sink_write", events.generation, elapsed_ms);
                     events
                         .send(playback.snapshot(ViewAudioPhase::Writing, &codec))
                         .await;
@@ -331,12 +338,19 @@ async fn run(
                 let peak = log_interval(&events, &name, &codec, &playback, &mut stats);
                 if !callback_nonzero_observed && callback_consumed_nonzero(peak) {
                     callback_nonzero_observed = true;
+                    let elapsed_ms = elapsed_ms(started_at);
                     tracing::info!(
                         broadcast = ?events.path,
                         view_generation = events.generation,
                         track = ?name,
                         peak,
+                        elapsed_ms,
                         "audio output callback consumed nonzero PCM; audible output is not proven"
+                    );
+                    output_diagnostics::spawn(
+                        "first_nonzero_callback",
+                        events.generation,
+                        elapsed_ms,
                     );
                     events
                         .send(playback.snapshot(ViewAudioPhase::CallbackConsumed, &codec))
@@ -345,6 +359,14 @@ async fn run(
             }
         }
     }
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn log_interval(
