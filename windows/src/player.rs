@@ -159,9 +159,12 @@ impl LivePlayer {
                             ui.label(
                                 RichText::new(match view.audio.phase {
                                     ViewAudioPhase::Idle => "NO AUDIO",
-                                    ViewAudioPhase::Pending => "AUDIO...",
+                                    ViewAudioPhase::Pending
+                                    | ViewAudioPhase::TrackSelected
+                                    | ViewAudioPhase::Decoded
+                                    | ViewAudioPhase::Writing => "AUDIO...",
                                     ViewAudioPhase::NotPublished => "NO AUDIO",
-                                    ViewAudioPhase::Playing => "AUDIO",
+                                    ViewAudioPhase::CallbackConsumed => "AUDIO",
                                     ViewAudioPhase::Failed => "AUDIO ERROR",
                                 })
                                 .small()

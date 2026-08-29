@@ -23,8 +23,11 @@ pub(crate) enum ViewAudioPhase {
     #[default]
     Idle,
     Pending,
+    TrackSelected,
+    Decoded,
     NotPublished,
-    Playing,
+    Writing,
+    CallbackConsumed,
     Failed,
 }
 
@@ -185,6 +188,106 @@ pub(crate) enum ViewEvent {
         generation: u64,
         result: Result<(), String>,
     },
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AudioStatsReport {
+    decoded_frames: u64,
+    nonzero_pcm_frames: u64,
+    decoded_bytes: u64,
+    sink_writes: u64,
+    sink_write_errors: u64,
+    first_pts_us: Option<u128>,
+    last_pts_us: Option<u128>,
+    pts_gaps: u64,
+    max_pts_gap_us: u128,
+    pts_regressions: u64,
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Default)]
+struct AudioStats {
+    report: AudioStatsReport,
+    total_decoded_frames: u64,
+    total_nonzero_pcm_frames: u64,
+    total_sink_writes: u64,
+    previous_pts_us: Option<u128>,
+    previous_end_us: Option<u128>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl AudioStats {
+    fn decoded(
+        &mut self,
+        pts_us: u128,
+        bytes: usize,
+        duration_us: u128,
+        nonzero_pcm: bool,
+    ) -> (bool, bool) {
+        let first_frame = self.total_decoded_frames == 0;
+        let first_nonzero_pcm = nonzero_pcm && self.total_nonzero_pcm_frames == 0;
+        self.total_decoded_frames = self.total_decoded_frames.saturating_add(1);
+        self.report.decoded_frames = self.report.decoded_frames.saturating_add(1);
+        self.report.decoded_bytes = self.report.decoded_bytes.saturating_add(bytes as u64);
+        if nonzero_pcm {
+            self.total_nonzero_pcm_frames = self.total_nonzero_pcm_frames.saturating_add(1);
+            self.report.nonzero_pcm_frames = self.report.nonzero_pcm_frames.saturating_add(1);
+        }
+        self.report.first_pts_us.get_or_insert(pts_us);
+        self.report.last_pts_us = Some(pts_us);
+        if self
+            .previous_pts_us
+            .is_some_and(|previous| pts_us < previous)
+        {
+            self.report.pts_regressions = self.report.pts_regressions.saturating_add(1);
+        }
+        if let Some(previous_end_us) = self.previous_end_us
+            && pts_us > previous_end_us
+        {
+            let gap_us = pts_us - previous_end_us;
+            self.report.pts_gaps = self.report.pts_gaps.saturating_add(1);
+            self.report.max_pts_gap_us = self.report.max_pts_gap_us.max(gap_us);
+        }
+        self.previous_pts_us = Some(pts_us);
+        self.previous_end_us = Some(pts_us.saturating_add(duration_us));
+        (first_frame, first_nonzero_pcm)
+    }
+
+    fn wrote(&mut self) -> bool {
+        let first = self.total_sink_writes == 0;
+        self.total_sink_writes = self.total_sink_writes.saturating_add(1);
+        self.report.sink_writes = self.report.sink_writes.saturating_add(1);
+        first
+    }
+
+    fn write_failed(&mut self) {
+        self.report.sink_write_errors = self.report.sink_write_errors.saturating_add(1);
+    }
+
+    fn take_report(&mut self) -> AudioStatsReport {
+        std::mem::take(&mut self.report)
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn pcm_duration_us(bytes: usize, channels: u32, sample_rate: u32) -> u128 {
+    if channels == 0 || sample_rate == 0 {
+        return 0;
+    }
+    let frames = bytes / std::mem::size_of::<f32>() / channels as usize;
+    (frames as u128 * 1_000_000) / sample_rate as u128
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn pcm_has_nonzero_f32(data: &[u8]) -> bool {
+    data.chunks_exact(std::mem::size_of::<f32>())
+        .any(|bytes| f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]).abs() > 0.0)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn callback_consumed_nonzero(peak: f32) -> bool {
+    peak.is_finite() && peak > 0.0
 }
 
 #[cfg(target_os = "windows")]
@@ -628,7 +731,7 @@ mod tests {
             generation,
             "moqcast.screen/peer-a",
             ViewAudioSnapshot {
-                phase: ViewAudioPhase::Playing,
+                phase: ViewAudioPhase::CallbackConsumed,
                 codec: Some("opus".to_owned()),
                 sample_rate: Some(48_000),
                 channels: Some(2),
@@ -636,7 +739,49 @@ mod tests {
             },
         ));
         assert_eq!(view.phase, ViewPhase::Viewing);
-        assert_eq!(view.audio.phase, ViewAudioPhase::Playing);
+        assert_eq!(view.audio.phase, ViewAudioPhase::CallbackConsumed);
+    }
+
+    #[test]
+    fn audio_stats_distinguish_pcm_writes_and_callback_evidence() {
+        let mut stats = AudioStats::default();
+        let silence = vec![0_u8; 480 * 2 * std::mem::size_of::<f32>()];
+        let mut nonzero = silence.clone();
+        nonzero[..4].copy_from_slice(&0.25_f32.to_ne_bytes());
+
+        assert_eq!(
+            stats.decoded(10_000, silence.len(), 10_000, pcm_has_nonzero_f32(&silence)),
+            (true, false)
+        );
+        assert!(stats.wrote());
+        assert_eq!(
+            stats.decoded(21_000, nonzero.len(), 10_000, pcm_has_nonzero_f32(&nonzero),),
+            (false, true)
+        );
+        assert!(!stats.wrote());
+        stats.write_failed();
+
+        let report = stats.take_report();
+        assert_eq!(report.decoded_frames, 2);
+        assert_eq!(report.nonzero_pcm_frames, 1);
+        assert_eq!(report.sink_writes, 2);
+        assert_eq!(report.sink_write_errors, 1);
+        assert_eq!(report.first_pts_us, Some(10_000));
+        assert_eq!(report.last_pts_us, Some(21_000));
+        assert_eq!(report.pts_gaps, 1);
+        assert_eq!(report.max_pts_gap_us, 1_000);
+        assert!(!callback_consumed_nonzero(0.0));
+        assert!(callback_consumed_nonzero(0.25));
+        assert!(!callback_consumed_nonzero(f32::NAN));
+
+        assert_eq!(
+            stats.decoded(20_000, nonzero.len(), 10_000, true),
+            (false, false)
+        );
+        assert!(!stats.wrote());
+        let next = stats.take_report();
+        assert_eq!(next.pts_regressions, 1);
+        assert_eq!(next.decoded_frames, 1);
     }
 
     #[test]
