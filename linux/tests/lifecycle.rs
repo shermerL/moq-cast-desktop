@@ -146,22 +146,51 @@ fn same_identity_reappearing_preserves_a_healthy_transport() {
 }
 
 #[test]
-fn stop_and_failure_retain_peer_history_but_mark_discovery_lost() {
+fn lost_peer_without_a_healthy_session_is_removed_with_its_screen() {
     let mut snapshot = AppSnapshot::default();
     snapshot.start_discovery();
     snapshot.upsert_peer(peer("android-living-room"));
+    snapshot.update_remote_screen("moqcast.screen/android-living-room".into(), true);
+
+    snapshot.mark_peer_lost("android-living-room");
+
+    assert_eq!(snapshot.discovery, DiscoveryState::Empty);
+    assert!(!snapshot.peers.contains_key("android-living-room"));
+    assert!(snapshot.remote_screens.is_empty());
+}
+
+#[test]
+fn a_lost_connected_peer_is_removed_when_its_session_ends() {
+    let mut snapshot = connected_snapshot();
+    snapshot.start_discovery();
+
+    snapshot.mark_peer_lost("android-living-room");
+    assert!(snapshot.peers.contains_key("android-living-room"));
+
+    snapshot.set_transport("android-living-room", TransportState::Failed);
+
+    assert!(!snapshot.peers.contains_key("android-living-room"));
+}
+
+#[test]
+fn stop_and_failure_keep_only_exact_connected_peers() {
+    let mut snapshot = connected_snapshot();
+    snapshot.start_discovery();
+    snapshot.upsert_peer(peer("android-idle"));
 
     snapshot.stop_discovery();
     assert_eq!(snapshot.discovery, DiscoveryState::Idle);
+    assert!(!snapshot.peers.contains_key("android-idle"));
     assert_eq!(
         snapshot.peers["android-living-room"].discovery,
         PeerDiscoveryState::Lost
     );
 
     snapshot.start_discovery();
-    snapshot.upsert_peer(peer("android-living-room"));
+    snapshot.upsert_peer(peer("android-idle"));
     snapshot.fail_discovery("listener stopped");
     assert_eq!(snapshot.discovery, DiscoveryState::Error);
+    assert!(!snapshot.peers.contains_key("android-idle"));
     assert_eq!(
         snapshot.peers["android-living-room"].discovery,
         PeerDiscoveryState::Lost

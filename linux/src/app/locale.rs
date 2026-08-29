@@ -397,6 +397,20 @@ impl Locale {
         }
     }
 
+    pub(super) fn this_device(self) -> &'static str {
+        match self {
+            Self::Chinese => "本机",
+            Self::English => "This device",
+        }
+    }
+
+    pub(super) fn lan_session(self) -> &'static str {
+        match self {
+            Self::Chinese => "LAN 会话",
+            Self::English => "LAN session",
+        }
+    }
+
     pub(super) fn network_endpoints(self) -> &'static str {
         match self {
             Self::Chinese => "网络地址",

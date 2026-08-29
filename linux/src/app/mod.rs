@@ -2,6 +2,7 @@
 
 mod command;
 mod components;
+mod device;
 mod diagnostics;
 mod locale;
 mod pages;
@@ -109,6 +110,7 @@ pub struct MoqCastApp {
     selected_peer: Option<String>,
     locale: Locale,
     system_audio: bool,
+    local_device_name: String,
     diagnostics: diagnostics::DiagnosticsUi,
     runtime: RuntimeHandle,
     command_error: Option<String>,
@@ -146,6 +148,7 @@ impl MoqCastApp {
             selected_peer: None,
             locale,
             system_audio,
+            local_device_name: device::name(),
             diagnostics: diagnostics::DiagnosticsUi::new(diagnostics, detailed_diagnostics),
             runtime: RuntimeHandle::start()?,
             command_error: None,
@@ -392,6 +395,7 @@ impl eframe::App for MoqCastApp {
                             ui,
                             self.locale,
                             &snapshot,
+                            &self.local_device_name,
                             &mut self.selected_peer,
                             layout.device_workspace,
                             self.system_audio,
