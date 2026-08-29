@@ -1,19 +1,14 @@
 //! Best-effort Windows output-device diagnostics for remote audio playback.
 
-use std::{
-    collections::hash_map::RandomState,
-    hash::{BuildHasher, Hash, Hasher},
-    sync::OnceLock,
-};
+use std::{collections::hash_map::RandomState, hash::BuildHasher, sync::OnceLock};
 
 const MAX_ENDPOINT_NAME_CHARS: usize = 96;
 
 fn redact_endpoint_identity(identity: &str) -> String {
     static HASHER: OnceLock<RandomState> = OnceLock::new();
 
-    let mut hasher = HASHER.get_or_init(RandomState::new).build_hasher();
-    identity.hash(&mut hasher);
-    format!("endpoint-{:016x}", hasher.finish())
+    let hash = HASHER.get_or_init(RandomState::new).hash_one(identity);
+    format!("endpoint-{hash:016x}")
 }
 
 fn sanitize_endpoint_name(name: &str, current_username: Option<&str>) -> String {
@@ -354,11 +349,14 @@ mod platform {
     }
 
     fn session_state(state: AudioSessionState) -> &'static str {
-        match state {
-            AudioSessionStateActive => "active",
-            AudioSessionStateInactive => "inactive",
-            AudioSessionStateExpired => "expired",
-            _ => "unknown",
+        if state == AudioSessionStateActive {
+            "active"
+        } else if state == AudioSessionStateInactive {
+            "inactive"
+        } else if state == AudioSessionStateExpired {
+            "expired"
+        } else {
+            "unknown"
         }
     }
 
@@ -368,7 +366,7 @@ mod platform {
 
     unsafe fn endpoint_id(device: &IMMDevice) -> windows::core::Result<String> {
         let value = OwnedPwstr(unsafe { device.GetId()? });
-        value.0.to_string().map_err(|error| {
+        unsafe { value.0.to_string() }.map_err(|error| {
             windows::core::Error::new(
                 ERROR_NO_UNICODE_TRANSLATION.to_hresult(),
                 format!("default audio endpoint ID contained invalid UTF-16: {error}"),
