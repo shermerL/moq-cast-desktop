@@ -37,3 +37,6 @@ windows = { version = "0.62", features = [
     "Win32_System_Variant",
     "Win32_UI_Shell_PropertiesSystem",
 ] }
+
+[dev-dependencies]
+toml_edit = { version = "0.25.13", default-features = false, features = ["parse"] }

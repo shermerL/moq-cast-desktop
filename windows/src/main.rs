@@ -7,6 +7,7 @@
 
 mod app;
 mod audio;
+mod build_info;
 mod diagnostics;
 mod media;
 mod playback;
@@ -44,7 +45,8 @@ struct Args {
 fn main() -> Result<()> {
     let build = BuildInfo::new(env!("CARGO_PKG_VERSION"))
         .with_build_identity(option_env!("MOQCAST_BUILD_IDENTITY").unwrap_or("local"))
-        .with_source_identity(option_env!("MOQCAST_SOURCE_COMMIT").unwrap_or("unknown"));
+        .with_source_identity(option_env!("MOQCAST_SOURCE_COMMIT").unwrap_or("unknown"))
+        .with_dependency_identity(build_info::dependency_identity());
     let diagnostics_config = match Paths::discover() {
         Ok(paths) => Config::new(paths, build),
         Err(error) => {

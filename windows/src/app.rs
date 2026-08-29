@@ -633,6 +633,9 @@ impl MoqCastApp {
                 ui.label("Version");
                 ui.monospace(self.snapshot.version);
                 ui.end_row();
+                ui.label("MoQ baseline");
+                ui.monospace(crate::build_info::moq_baseline());
+                ui.end_row();
                 ui.label("Discovery");
                 ui.monospace(format!("{:?}", self.snapshot.discovery));
                 ui.end_row();

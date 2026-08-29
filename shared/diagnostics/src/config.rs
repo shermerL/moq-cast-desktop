@@ -136,6 +136,7 @@ pub struct BuildInfo {
     pub(crate) app_version: String,
     pub(crate) build_identity: String,
     pub(crate) source_identity: String,
+    pub(crate) dependency_identity: String,
     pub(crate) os: String,
 }
 
@@ -146,6 +147,7 @@ impl BuildInfo {
             app_version: app_version.into(),
             build_identity: "local".to_owned(),
             source_identity: "unknown".to_owned(),
+            dependency_identity: "unknown".to_owned(),
             os: format!("{}-{}", env::consts::OS, env::consts::ARCH),
         }
     }
@@ -159,6 +161,12 @@ impl BuildInfo {
     /// Set the source revision identity.
     pub fn with_source_identity(mut self, identity: impl Into<String>) -> Self {
         self.source_identity = identity.into();
+        self
+    }
+
+    /// Set the dependency baseline identity used by this build.
+    pub fn with_dependency_identity(mut self, identity: impl Into<String>) -> Self {
+        self.dependency_identity = identity.into();
         self
     }
 
@@ -299,5 +307,14 @@ mod tests {
     fn defaults_define_eight_mib_and_five_total_log_files() {
         assert_eq!(DEFAULT_MAX_FILE_BYTES, 8 * 1024 * 1024);
         assert_eq!(DEFAULT_MAX_LOG_FILES, 5);
+    }
+
+    #[test]
+    fn build_info_has_a_safe_dependency_default_and_builder() {
+        let default = BuildInfo::new("test");
+        assert_eq!(default.dependency_identity, "unknown");
+
+        let identified = default.with_dependency_identity("moq-dev/moq@abcdef");
+        assert_eq!(identified.dependency_identity, "moq-dev/moq@abcdef");
     }
 }

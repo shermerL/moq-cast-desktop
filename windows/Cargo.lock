@@ -3314,6 +3314,7 @@ dependencies = [
  "rfd",
  "thiserror 2.0.20",
  "tokio",
+ "toml_edit",
  "tracing",
  "url",
  "windows",

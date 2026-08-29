@@ -178,10 +178,11 @@ fn environment(
         now.second()
     );
     format!(
-        "app_version={}\nbuild_identity={}\nsource_identity={}\nos={}\nutc_time={}\nactive_filter={}\ndropped_diagnostics={}\n",
+        "app_version={}\nbuild_identity={}\nsource_identity={}\ndependency_identity={}\nos={}\nutc_time={}\nactive_filter={}\ndropped_diagnostics={}\n",
         one_line(&build.app_version),
         one_line(&build.build_identity),
         one_line(&build.source_identity),
+        one_line(&build.dependency_identity),
         one_line(&build.os),
         timestamp,
         one_line(active_filter),
@@ -211,6 +212,7 @@ mod tests {
         let build = BuildInfo::new("0.4.1-dev.2")
             .with_build_identity("ubuntu22.04")
             .with_source_identity("abcdef123456")
+            .with_dependency_identity("moq-dev/moq@81d39f7bf04c82aae324a9ee4251b7f8aa08fb53")
             .with_os("linux-x86_64");
 
         let result = export(
@@ -233,6 +235,11 @@ mod tests {
             .read_to_string(&mut environment)
             .unwrap();
         assert!(environment.contains("app_version=0.4.1-dev.2"));
+        assert!(
+            environment.contains(
+                "dependency_identity=moq-dev/moq@81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
+            )
+        );
         assert!(environment.contains("active_filter=base=info; detailed=off"));
         assert!(environment.contains("dropped_diagnostics=3"));
         for forbidden in ["credential", "fingerprint", "authorization", "token="] {
