@@ -2,6 +2,8 @@
 
 #[cfg(target_os = "windows")]
 mod audio;
+#[cfg(any(target_os = "windows", test))]
+mod output_diagnostics;
 
 use std::sync::Arc;
 
