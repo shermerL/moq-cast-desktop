@@ -4,6 +4,16 @@
 
 This file documents notable changes to MoQCast Desktop.
 
+## 0.4.1-dev.4 - 2026-08-30
+
+### 中文
+
+- 改进 Linux 和 Windows 的附近设备扫描、离线设备清理和本机身份显示
+
+### English
+
+- Improve Nearby scanning, offline device cleanup, and local device identity on Linux and Windows
+
 ## 0.4.1-dev.3 - 2026-08-26
 
 ### 中文
