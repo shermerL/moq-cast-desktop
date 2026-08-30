@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use moq_native::moq_net;
+use moq_tokio::moq_net;
 use tokio::{sync::mpsc, task::JoinHandle};
 
 const EVENT_CAPACITY: usize = 32;

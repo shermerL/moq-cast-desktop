@@ -17,11 +17,12 @@ pub(in crate::app) fn show(
     ui: &mut egui::Ui,
     locale: Locale,
     snapshot: &AppSnapshot,
+    local_device_name: &str,
     selected_peer: &mut Option<String>,
     layout: DeviceWorkspaceLayout,
     system_audio: bool,
 ) -> Option<UserCommand> {
-    let mut command = workspace_toolbar(ui, locale, snapshot, system_audio);
+    let mut command = workspace_toolbar(ui, locale, snapshot, local_device_name, system_audio);
 
     if snapshot.inbound_session_count > 0 {
         ui.add_space(12.0);
@@ -72,6 +73,7 @@ fn workspace_toolbar(
     ui: &mut egui::Ui,
     locale: Locale,
     snapshot: &AppSnapshot,
+    local_device_name: &str,
     system_audio: bool,
 ) -> Option<UserCommand> {
     let discovery_active = snapshot.discovery.is_active();
@@ -85,6 +87,26 @@ fn workspace_toolbar(
             DiscoveryState::Error => (locale.discovery_error(), BadgeTone::Error),
         };
         status_line(ui, status, tone);
+        ui.label(
+            RichText::new(format!(
+                "{}: Linux · {local_device_name}",
+                locale.this_device()
+            ))
+            .size(12.0)
+            .color(MUTED),
+        );
+        if let Some(peer_id) = snapshot.local_peer_id.as_deref() {
+            ui.label(
+                RichText::new(format!(
+                    "{}: {}",
+                    locale.lan_session(),
+                    short_peer_id(peer_id)
+                ))
+                .monospace()
+                .size(11.0)
+                .color(MUTED),
+            );
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let share_enabled = snapshot.has_mesh_session() && snapshot.media == MediaState::Idle;
             if primary_button(ui, locale.share_local_screen(), share_enabled).clicked() {
@@ -105,6 +127,10 @@ fn workspace_toolbar(
         });
     });
     command
+}
+
+fn short_peer_id(peer_id: &str) -> String {
+    peer_id.chars().take(8).collect()
 }
 
 fn show_split_workspace(

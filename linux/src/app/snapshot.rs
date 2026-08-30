@@ -34,7 +34,7 @@ impl DiscoveryState {
 pub enum PeerDiscoveryState {
     /// The peer is currently advertised.
     Found,
-    /// The most recent advertisement was withdrawn or discovery restarted.
+    /// The advertisement was withdrawn while an exact outbound session remains active.
     #[default]
     Lost,
 }
@@ -94,6 +94,43 @@ pub enum MediaState {
     StoppingView { path: String },
 }
 
+/// Remote audio progress for the active screen viewer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemoteAudioPhase {
+    /// No remote viewer owns audio resources.
+    #[default]
+    Idle,
+    /// The viewer is waiting for an audio catalog decision.
+    Pending,
+    /// The current catalog has no supported local audio rendition.
+    NoAudio,
+    /// A supported local audio track has been selected.
+    TrackSelected,
+    /// The decoder produced PCM for the selected track.
+    PcmDecoded,
+    /// A PCM submission call returned successfully.
+    PcmSubmitted,
+    /// Remote audio failed while video playback remained active.
+    Failed,
+}
+
+/// Latest remote audio status for the active screen viewer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteAudioSnapshot {
+    /// Current audio pipeline phase.
+    pub phase: RemoteAudioPhase,
+    /// Selected track name, when one exists.
+    pub track: Option<String>,
+    /// Selected codec string, when one exists.
+    pub codec: Option<String>,
+    /// Decoded sample rate in samples per second.
+    pub sample_rate: Option<u32>,
+    /// Decoded channel count.
+    pub channels: Option<u32>,
+    /// Most recent audio-only failure.
+    pub last_error: Option<String>,
+}
+
 /// Discovery details used to update one peer row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscoveredPeer {
@@ -144,7 +181,7 @@ pub struct AppSnapshot {
     pub discovery: DiscoveryState,
     /// Current local mDNS peer id, when services are active.
     pub local_peer_id: Option<String>,
-    /// Known peers keyed by stable mDNS id.
+    /// Currently discovered or connected peers keyed by the current mDNS id.
     pub peers: BTreeMap<String, PeerSnapshot>,
     /// Authorized inbound sessions whose remote mDNS identity is unavailable.
     pub inbound_session_count: usize,
@@ -152,6 +189,8 @@ pub struct AppSnapshot {
     pub remote_screens: BTreeMap<String, RemoteScreenSnapshot>,
     /// Current screen media lifecycle.
     pub media: MediaState,
+    /// Remote audio progress for the current viewer.
+    pub remote_audio: RemoteAudioSnapshot,
     /// Most recent user-facing runtime failure.
     pub last_error: Option<String>,
 }
@@ -189,7 +228,7 @@ impl AppSnapshot {
         self.last_error = None;
     }
 
-    /// Stop discovery while retaining transport and historical device rows.
+    /// Stop discovery while retaining only exact connected peer rows.
     pub fn stop_discovery(&mut self) {
         self.discovery = DiscoveryState::Idle;
         self.mark_all_peers_lost();
@@ -238,12 +277,13 @@ impl AppSnapshot {
         }
     }
 
-    /// Mark one peer absent from discovery without changing its transport.
+    /// Mark one peer absent and remove it unless an exact outbound session remains active.
     pub fn mark_peer_lost(&mut self, peer_id: &str) {
         if let Some(peer) = self.peers.get_mut(peer_id) {
             peer.discovery = PeerDiscoveryState::Lost;
             peer.endpoints.clear();
         }
+        self.prune_inactive_peer(peer_id);
         if self.discovery.is_active() && !self.has_found_peers() {
             self.discovery = DiscoveryState::Empty;
         }
@@ -261,6 +301,7 @@ impl AppSnapshot {
         if let Some(peer) = self.peers.get_mut(peer_id) {
             peer.transport = transport;
         }
+        self.prune_inactive_peer(peer_id);
     }
 
     /// Update the aggregate count of authorized inbound sessions.
@@ -393,8 +434,25 @@ impl AppSnapshot {
         self.media = MediaState::PreparingView {
             path: path.to_owned(),
         };
+        self.remote_audio = RemoteAudioSnapshot {
+            phase: RemoteAudioPhase::Pending,
+            ..RemoteAudioSnapshot::default()
+        };
         self.last_error = None;
         Ok(())
+    }
+
+    /// Update audio state for the current remote screen without affecting video.
+    pub fn set_remote_audio(&mut self, path: &str, audio: RemoteAudioSnapshot) -> bool {
+        let current = match &self.media {
+            MediaState::PreparingView { path } | MediaState::Viewing { path } => path,
+            _ => return false,
+        };
+        if current != path {
+            return false;
+        }
+        self.remote_audio = audio;
+        true
     }
 
     /// Mark a prepared remote playback as active.
@@ -415,6 +473,7 @@ impl AppSnapshot {
             return Err(StateError::UnexpectedCompletion);
         }
         self.media = MediaState::Idle;
+        self.remote_audio = RemoteAudioSnapshot::default();
         self.last_error = Some(error.into());
         Ok(())
     }
@@ -425,6 +484,7 @@ impl AppSnapshot {
             return Err(StateError::UnexpectedCompletion);
         }
         self.media = MediaState::Idle;
+        self.remote_audio = RemoteAudioSnapshot::default();
         Ok(())
     }
 
@@ -444,6 +504,7 @@ impl AppSnapshot {
             return Err(StateError::UnexpectedCompletion);
         }
         self.media = MediaState::Idle;
+        self.remote_audio = RemoteAudioSnapshot::default();
         Ok(())
     }
 
@@ -458,5 +519,71 @@ impl AppSnapshot {
             peer.discovery = PeerDiscoveryState::Lost;
             peer.endpoints.clear();
         }
+        self.prune_inactive_peers();
+    }
+
+    fn prune_inactive_peer(&mut self, peer_id: &str) {
+        let keep = self.peers.get(peer_id).is_some_and(peer_remains_visible);
+        if keep {
+            return;
+        }
+
+        self.peers.remove(peer_id);
+        self.remote_screens
+            .retain(|_, screen| screen.peer_id != peer_id);
+    }
+
+    fn prune_inactive_peers(&mut self) {
+        self.peers.retain(|_, peer| peer_remains_visible(peer));
+        self.remote_screens
+            .retain(|_, screen| self.peers.contains_key(&screen.peer_id));
+    }
+}
+
+fn peer_remains_visible(peer: &PeerSnapshot) -> bool {
+    peer.discovery == PeerDiscoveryState::Found
+        || (peer.dial_role == DialRole::Outbound && peer.transport == TransportState::Connected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_audio_updates_only_the_active_view_path() {
+        let mut snapshot = AppSnapshot {
+            media: MediaState::Viewing {
+                path: "moqcast.screen/current".into(),
+            },
+            ..AppSnapshot::default()
+        };
+        let submitted = RemoteAudioSnapshot {
+            phase: RemoteAudioPhase::PcmSubmitted,
+            ..RemoteAudioSnapshot::default()
+        };
+
+        assert!(!snapshot.set_remote_audio("moqcast.screen/old", submitted.clone()));
+        assert_eq!(snapshot.remote_audio.phase, RemoteAudioPhase::Idle);
+        assert!(snapshot.set_remote_audio("moqcast.screen/current", submitted));
+        assert_eq!(snapshot.remote_audio.phase, RemoteAudioPhase::PcmSubmitted);
+    }
+
+    #[test]
+    fn stopping_view_resets_remote_audio_state() {
+        let mut snapshot = AppSnapshot {
+            media: MediaState::StoppingView {
+                path: "moqcast.screen/current".into(),
+            },
+            remote_audio: RemoteAudioSnapshot {
+                phase: RemoteAudioPhase::PcmSubmitted,
+                ..RemoteAudioSnapshot::default()
+            },
+            ..AppSnapshot::default()
+        };
+
+        snapshot.finish_stop_view().expect("view stops");
+
+        assert_eq!(snapshot.media, MediaState::Idle);
+        assert_eq!(snapshot.remote_audio, RemoteAudioSnapshot::default());
     }
 }

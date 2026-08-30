@@ -1,6 +1,6 @@
 use eframe::egui;
 use moq_cast_desktop::app::MoqCastApp;
-use tracing_subscriber::EnvFilter;
+use moqcast_diagnostics::{BuildInfo, Config, Paths};
 
 fn main() -> anyhow::Result<()> {
     if std::env::args()
@@ -11,11 +11,23 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    let build = BuildInfo::new(env!("CARGO_PKG_VERSION"))
+        .with_build_identity(option_env!("MOQCAST_BUILD_IDENTITY").unwrap_or("local"))
+        .with_source_identity(option_env!("MOQCAST_SOURCE_COMMIT").unwrap_or("unknown"));
+    let diagnostics_config = match Paths::discover() {
+        Ok(paths) => Config::new(paths, build),
+        Err(error) => {
+            eprintln!("MoQCast file diagnostics unavailable: {error}");
+            Config::without_file(build, error.to_string())
+        }
+    };
+    let diagnostics = moqcast_diagnostics::init(diagnostics_config);
+    let diagnostics_handle = diagnostics.handle();
+    tracing::info!(
+        stage = "startup",
+        version = env!("CARGO_PKG_VERSION"),
+        "local diagnostics initialized"
+    );
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -29,7 +41,12 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "MoQCast",
         options,
-        Box::new(|creation_context| Ok(Box::new(MoqCastApp::new(creation_context)?))),
+        Box::new(move |creation_context| {
+            Ok(Box::new(MoqCastApp::new(
+                creation_context,
+                diagnostics_handle.clone(),
+            )?))
+        }),
     )
     .map_err(anyhow::Error::from)
 }

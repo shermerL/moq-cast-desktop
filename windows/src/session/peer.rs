@@ -2,11 +2,11 @@
 
 use std::time::Duration;
 
-use moq_native::{Addrs, ClientConfig, mdns, moq_net};
+use moq_tokio::{Addrs, mdns, moq_net};
 use thiserror::Error;
 use url::Url;
 
-use super::security::peer_path;
+use super::{SessionOrigins, security::peer_path};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONNECT_BUDGET: Duration = Duration::from_secs(3);
@@ -18,7 +18,7 @@ pub(crate) enum DialError {
     #[error("peer did not advertise a reachable address")]
     NoAddresses,
     #[error(transparent)]
-    Native(#[from] moq_native::Error),
+    Native(#[from] moq_tokio::Error),
 }
 
 #[derive(Clone)]
@@ -40,10 +40,10 @@ impl From<&mdns::Peer> for PeerRecord {
     }
 }
 
-pub(crate) fn dial(
+pub(super) fn dial(
     peer: &PeerRecord,
-    origin: moq_net::origin::Producer,
-) -> Result<moq_native::Connection, DialError> {
+    origins: SessionOrigins,
+) -> Result<moq_tokio::Connection, DialError> {
     let fingerprint = peer
         .fingerprint
         .as_ref()
@@ -56,9 +56,9 @@ pub(crate) fn dial(
     });
     let addrs = Addrs::collect(urls).ok_or(DialError::NoAddresses)?;
 
-    let mut config = ClientConfig::default();
-    config.bind.set_port(0);
-    config.reconnect = Some(true);
+    let mut config = moq_tokio::connect::Config::default();
+    config.bind = Some("[::]:0".parse().expect("valid ephemeral bind"));
+    config.once = Some(false);
     config.backoff.timeout = Some(RECONNECT_BUDGET);
     config.timeout = Some(CONNECT_TIMEOUT);
     config.version = config
@@ -67,13 +67,13 @@ pub(crate) fn dial(
         .filter(|version| carries_request_path(version))
         .copied()
         .collect();
-    config.tls = moq_native::tls::Client::default();
+    config.tls = moq_tokio::tls::Connect::default();
     config.tls.fingerprint = vec![fingerprint.clone()];
 
     let client = config
-        .init()?
-        .with_publisher(&origin)
-        .with_subscriber(origin);
+        .init(moq_tokio::quic::Config::default())?
+        .with_publisher(&origins.publish)
+        .with_subscriber(origins.receive);
     Ok(client.connect(addrs))
 }
 
@@ -85,10 +85,10 @@ fn carries_request_path(version: &moq_net::Version) -> bool {
 mod tests {
     use std::{net::SocketAddr, time::Duration};
 
-    use moq_native::moq_net;
+    use moq_tokio::moq_net;
 
     use super::{PeerRecord, dial};
-    use crate::session::server;
+    use crate::session::{SessionOrigins, server};
 
     fn peer(addr: SocketAddr, fingerprint: String, credential: &str) -> PeerRecord {
         PeerRecord {
@@ -99,12 +99,19 @@ mod tests {
         }
     }
 
-    async fn listener() -> (moq_native::Listener, SocketAddr, String) {
-        let _ = moq_native::rustls::crypto::aws_lc_rs::default_provider().install_default();
+    async fn listener() -> (moq_tokio::Listener, SocketAddr, String) {
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
         let server = server::bind("127.0.0.1:0".parse().expect("bind")).expect("server");
         let advertised = server.advertisement().clone();
         let listener = server.listen().await.expect("listen");
         (listener, advertised.addr, advertised.fingerprint)
+    }
+
+    fn origins() -> SessionOrigins {
+        SessionOrigins {
+            publish: moq_tokio::origin::spawn(moq_net::Origin::random()),
+            receive: moq_tokio::origin::spawn(moq_net::Origin::random()),
+        }
     }
 
     #[tokio::test]
@@ -112,17 +119,14 @@ mod tests {
         let (mut listener, addr, fingerprint) = listener().await;
         let accept = tokio::spawn(async move {
             let request = listener.accept().await.expect("request");
-            server::accept(request, "proof", moq_net::Origin::random().produce()).await
+            server::accept(request, "proof", origins()).await
         });
 
-        let connection = dial(
-            &peer(addr, fingerprint, "proof"),
-            moq_net::Origin::random().produce(),
-        )
-        .expect("dial")
-        .established()
-        .await
-        .expect("established");
+        let connection = dial(&peer(addr, fingerprint, "proof"), origins())
+            .expect("dial")
+            .established()
+            .await
+            .expect("established");
         let session = accept.await.expect("accept task").expect("accepted");
 
         assert!(connection.connected());
@@ -135,14 +139,10 @@ mod tests {
         let (mut listener, addr, fingerprint) = listener().await;
         let accept = tokio::spawn(async move {
             let request = listener.accept().await.expect("request");
-            server::accept(request, "expected", moq_net::Origin::random().produce()).await
+            server::accept(request, "expected", origins()).await
         });
 
-        let connection = dial(
-            &peer(addr, fingerprint, "wrong"),
-            moq_net::Origin::random().produce(),
-        )
-        .expect("dial");
+        let connection = dial(&peer(addr, fingerprint, "wrong"), origins()).expect("dial");
         let established = tokio::time::timeout(Duration::from_secs(4), connection.established())
             .await
             .expect("credential rejection stays bounded");
@@ -162,11 +162,7 @@ mod tests {
         let (mut listener, addr, _) = listener().await;
         let accept = tokio::spawn(async move { listener.accept().await });
 
-        let connection = dial(
-            &peer(addr, "00".repeat(32), "proof"),
-            moq_net::Origin::random().produce(),
-        )
-        .expect("dial");
+        let connection = dial(&peer(addr, "00".repeat(32), "proof"), origins()).expect("dial");
         let result = tokio::time::timeout(Duration::from_secs(4), connection.established())
             .await
             .expect("bounded connection attempt");
@@ -180,14 +176,14 @@ mod tests {
         let (mut listener, addr, fingerprint) = listener().await;
         let accept = tokio::spawn(async move {
             let request = listener.accept().await.expect("request");
-            server::accept(request, "proof", moq_net::Origin::random().produce()).await
+            server::accept(request, "proof", origins()).await
         });
 
         let mut record = peer(addr, fingerprint, "proof");
         record
             .urls
             .insert(0, "moqt://127.0.0.1:9".parse().expect("candidate"));
-        let connection = dial(&record, moq_net::Origin::random().produce())
+        let connection = dial(&record, origins())
             .expect("dial")
             .established()
             .await
@@ -200,59 +196,107 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_session_shares_broadcasts_in_both_directions() {
+    async fn three_peer_mesh_does_not_forward_remote_broadcasts() {
         let (mut listener, addr, fingerprint) = listener().await;
-        let server_origin = moq_net::Origin::random().produce();
-        let client_origin = moq_net::Origin::random().produce();
-        let _from_server = server_origin
-            .create_broadcast(
-                "moqcast.screen/server",
-                moq_net::broadcast::Route::new().with_announce(true),
-            )
-            .expect("server broadcast");
-        let _from_client = client_origin
-            .create_broadcast(
-                "moqcast.screen/client",
-                moq_net::broadcast::Route::new().with_announce(true),
-            )
-            .expect("client broadcast");
-        let mut server_announcements = server_origin.consume().announced();
-        let mut client_announcements = client_origin.consume().announced();
-        let accepted_origin = server_origin.clone();
+        let a = origins();
+        let b = origins();
+        let c = origins();
+        let a_publish = a.publish.clone();
+        let b_publish = b.publish.clone();
+        let mut a_announcements = a.receive.consume().announced();
+        let mut b_announcements = b.receive.consume().announced();
+        let mut c_announcements = c.receive.consume().announced();
+        let accepted_origins = b.clone();
         let accept = tokio::spawn(async move {
-            let request = listener.accept().await.expect("request");
-            server::accept(request, "proof", accepted_origin).await
+            let request = listener.accept().await.expect("A request");
+            let a_session = server::accept(request, "proof", accepted_origins.clone())
+                .await
+                .expect("A accepted");
+            let request = listener.accept().await.expect("C request");
+            let c_session = server::accept(request, "proof", accepted_origins)
+                .await
+                .expect("C accepted");
+            (a_session, c_session)
         });
 
-        let connection = dial(&peer(addr, fingerprint, "proof"), client_origin)
-            .expect("dial")
+        let a_connection = dial(&peer(addr, fingerprint.clone(), "proof"), a)
+            .expect("A dial")
             .established()
             .await
-            .expect("established");
-        let session = accept.await.expect("accept task").expect("accepted");
+            .expect("A established");
+        let c_connection = dial(&peer(addr, fingerprint, "proof"), c)
+            .expect("C dial")
+            .established()
+            .await
+            .expect("C established");
+        let (a_session, c_session) = tokio::time::timeout(Duration::from_secs(5), accept)
+            .await
+            .expect("both sessions accepted")
+            .expect("accept task");
 
+        let _from_a = a_publish
+            .create_broadcast(
+                "moqcast.screen/a",
+                moq_net::broadcast::Route::new().with_announce(true),
+            )
+            .expect("A broadcast");
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let update = server_announcements.next().await.expect("server origin");
-                if update.path.as_str() == "moqcast.screen/client" {
+                let update = b_announcements.next().await.expect("B receive origin");
+                if update.path.as_str() == "moqcast.screen/a" {
                     break;
                 }
             }
         })
         .await
-        .expect("client broadcast reached server origin");
+        .expect("A broadcast reached B locally");
+
+        let _from_b = b_publish
+            .create_broadcast(
+                "moqcast.screen/b",
+                moq_net::broadcast::Route::new().with_announce(true),
+            )
+            .expect("B broadcast");
+
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let update = client_announcements.next().await.expect("client origin");
-                if update.path.as_str() == "moqcast.screen/server" {
+                let update = a_announcements.next().await.expect("A receive origin");
+                if update.path.as_str() == "moqcast.screen/b" {
                     break;
                 }
             }
         })
         .await
-        .expect("server broadcast reached client origin");
+        .expect("B broadcast reached A");
 
-        connection.close();
-        session.abort(moq_net::Error::Cancel);
+        let c_saw_a_before_b = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let update = c_announcements.next().await.expect("C receive origin");
+                match update.path.as_str() {
+                    "moqcast.screen/a" => break true,
+                    "moqcast.screen/b" => break false,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("B broadcast reached C");
+        assert!(!c_saw_a_before_b, "C received A through B");
+
+        let forwarded = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let update = c_announcements.next().await.expect("C receive origin");
+                if update.path.as_str() == "moqcast.screen/a" {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(forwarded.is_err(), "C received A through B");
+
+        a_connection.close();
+        c_connection.close();
+        a_session.abort(moq_net::Error::Cancel);
+        c_session.abort(moq_net::Error::Cancel);
     }
 }

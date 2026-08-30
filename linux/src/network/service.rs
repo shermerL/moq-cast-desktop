@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use moq_native::mdns;
+use moq_tokio::mdns;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -22,7 +22,7 @@ pub(crate) enum EventKind {
     InitialScanFinished,
     DiscoveryStopped,
     ListenerStopped,
-    Inbound(moq_native::Request),
+    Inbound(moq_tokio::Request),
 }
 
 #[derive(Debug, Error)]
@@ -30,7 +30,7 @@ pub(crate) enum StartError {
     #[error("listener did not provide a certificate fingerprint")]
     MissingFingerprint,
     #[error(transparent)]
-    Native(#[from] moq_native::Error),
+    Native(#[from] moq_tokio::Error),
     #[error(transparent)]
     Mdns(#[from] mdns::Error),
 }
@@ -39,7 +39,7 @@ pub(crate) struct Services {
     pub(crate) local_id: String,
     pub(crate) credential: String,
     discovery: Option<mdns::Discovery>,
-    listener: Option<moq_native::Listener>,
+    listener: Option<moq_tokio::Listener>,
     _tasks: JoinSet<()>,
 }
 
@@ -124,7 +124,7 @@ async fn run_discovery(
 
 async fn run_listener(
     generation: u64,
-    mut listener: moq_native::Listener,
+    mut listener: moq_tokio::Listener,
     events: mpsc::Sender<Event>,
 ) {
     while let Some(request) = listener.accept().await {

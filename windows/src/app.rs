@@ -4,6 +4,7 @@ use eframe::egui::{self, Align, Color32, Frame, Layout, RichText, Stroke};
 
 use crate::{
     audio::AudioPhase,
+    diagnostics::DiagnosticsUi,
     media::{COMPATIBLE_MAX_SCREEN_EDGE, MediaPhase, VideoEncodingPolicy},
     playback::{PlaybackFrameIdentity, ViewAudioPhase, ViewPhase},
     player::{LivePlayer, PlayerAction},
@@ -15,6 +16,11 @@ use crate::{
 
 const CONTENT_MAX_WIDTH: f32 = 900.0;
 const CONTENT_TOP_SPACING: f32 = 18.0;
+const STORAGE_DETAILED_DIAGNOSTICS: &str = "moqcast.detailed-diagnostics";
+
+fn parse_stored_bool(value: Option<String>) -> bool {
+    value.as_deref() == Some("true")
+}
 
 fn content_rect(available: egui::Rect, page: Page, viewing: bool) -> egui::Rect {
     let width = if page == Page::ScreenShare && viewing {
@@ -72,6 +78,7 @@ impl Locale {
 pub(crate) struct MoqCastApp {
     page: Page,
     locale: Locale,
+    diagnostics: DiagnosticsUi,
     runtime: RuntimeOwner,
     snapshot: RuntimeSnapshot,
     command_error: Option<String>,
@@ -84,13 +91,23 @@ pub(crate) struct MoqCastApp {
 }
 
 impl MoqCastApp {
-    pub(crate) fn new(context: &eframe::CreationContext<'_>, mut runtime: RuntimeOwner) -> Self {
+    pub(crate) fn new(
+        context: &eframe::CreationContext<'_>,
+        mut runtime: RuntimeOwner,
+        diagnostics: moqcast_diagnostics::Handle,
+    ) -> Self {
         configure_fonts(&context.egui_ctx);
         context.egui_ctx.set_visuals(egui::Visuals::light());
+        let detailed_diagnostics = parse_stored_bool(
+            context
+                .storage
+                .and_then(|storage| storage.get_string(STORAGE_DETAILED_DIAGNOSTICS)),
+        );
         let snapshot = runtime.snapshot();
         Self {
             page: Page::Nearby,
             locale: Locale::Chinese,
+            diagnostics: DiagnosticsUi::new(diagnostics, detailed_diagnostics),
             runtime,
             snapshot,
             command_error: None,
@@ -127,7 +144,9 @@ impl MoqCastApp {
             ui.selectable_value(&mut self.page, Page::Settings, self.locale.settings());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let text = match self.snapshot.discovery {
-                    DiscoveryState::Ready => format!("{} peers", self.snapshot.peers.len()),
+                    DiscoveryState::Ready => {
+                        format!("{} peers", self.snapshot.present_peer_count())
+                    }
                     DiscoveryState::Empty => "LAN ready".to_owned(),
                     DiscoveryState::Starting => "Starting".to_owned(),
                     DiscoveryState::Failed => "Discovery error".to_owned(),
@@ -139,7 +158,38 @@ impl MoqCastApp {
     }
 
     fn nearby(&mut self, ui: &mut egui::Ui) {
-        ui.heading(self.locale.nearby());
+        let scan_active = self.snapshot.discovery.is_active();
+        let scan_label = match (self.locale, scan_active) {
+            (Locale::Chinese, true) => "停止扫描",
+            (Locale::Chinese, false) => "开始扫描",
+            (Locale::English, true) => "Stop scan",
+            (Locale::English, false) => "Start scan",
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.heading(self.locale.nearby());
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button(scan_label).clicked() {
+                    self.send(if scan_active {
+                        RuntimeCommand::StopScan
+                    } else {
+                        RuntimeCommand::StartScan
+                    });
+                }
+                let session = self
+                    .snapshot
+                    .lan_session_id
+                    .as_deref()
+                    .unwrap_or("--------");
+                let session_label = match self.locale {
+                    Locale::Chinese => "LAN 会话",
+                    Locale::English => "LAN session",
+                };
+                ui.small(format!(
+                    "{} · {session_label} {session}",
+                    self.snapshot.local_device_name,
+                ));
+            });
+        });
         ui.label(match self.locale {
             Locale::Chinese => "发现与连接保持分层。只有确定的拨号侧可以发起安全直连。",
             Locale::English => {
@@ -583,6 +633,9 @@ impl MoqCastApp {
                 ui.label("Version");
                 ui.monospace(self.snapshot.version);
                 ui.end_row();
+                ui.label("MoQ baseline");
+                ui.monospace(crate::build_info::moq_baseline());
+                ui.end_row();
                 ui.label("Discovery");
                 ui.monospace(format!("{:?}", self.snapshot.discovery));
                 ui.end_row();
@@ -614,12 +667,17 @@ impl MoqCastApp {
                 let audio = match self.snapshot.view.audio.phase {
                     ViewAudioPhase::Idle => "not active".to_owned(),
                     ViewAudioPhase::Pending => "pending".to_owned(),
+                    ViewAudioPhase::TrackSelected => "track selected".to_owned(),
+                    ViewAudioPhase::Decoded => "PCM decoded".to_owned(),
                     ViewAudioPhase::NotPublished => "not published".to_owned(),
-                    ViewAudioPhase::Playing => {
+                    ViewAudioPhase::Writing => "sink write accepted".to_owned(),
+                    ViewAudioPhase::CallbackConsumed => {
                         let codec = self.snapshot.view.audio.codec.as_deref().unwrap_or("audio");
                         let sample_rate = self.snapshot.view.audio.sample_rate.unwrap_or_default();
                         let channels = self.snapshot.view.audio.channels.unwrap_or_default();
-                        format!("{codec} · {sample_rate} Hz · {channels} ch")
+                        format!(
+                            "output callback consumed non-zero PCM · {codec} · {sample_rate} Hz · {channels} ch"
+                        )
                     }
                     ViewAudioPhase::Failed => "unavailable (video continues)".to_owned(),
                 };
@@ -634,6 +692,8 @@ impl MoqCastApp {
             ui.add_space(10.0);
             ui.colored_label(Color32::LIGHT_RED, error);
         }
+        ui.separator();
+        self.diagnostics.show_settings(ui, self.locale);
     }
 }
 
@@ -680,6 +740,7 @@ impl eframe::App for MoqCastApp {
                         self.send(RuntimeCommand::StopWatching);
                     }
                 });
+            self.diagnostics.show_window(&context, self.locale);
             context.request_repaint_after(std::time::Duration::from_millis(33));
             return;
         }
@@ -701,15 +762,30 @@ impl eframe::App for MoqCastApp {
                 match self.page {
                     Page::Nearby => self.nearby(ui),
                     Page::ScreenShare => self.screen_share(ui),
-                    Page::Settings => self.settings(ui),
+                    Page::Settings => {
+                        egui::ScrollArea::vertical().show(ui, |ui| self.settings(ui));
+                    }
                 }
             });
         });
+        self.diagnostics.show_window(&context, self.locale);
         context.request_repaint_after(std::time::Duration::from_millis(if viewing {
             33
         } else {
             100
         }));
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(
+            STORAGE_DETAILED_DIAGNOSTICS,
+            if self.diagnostics.detailed() {
+                "true"
+            } else {
+                "false"
+            }
+            .to_owned(),
+        );
     }
 }
 
@@ -792,6 +868,43 @@ mod tests {
         assert_eq!(page, Page::Settings);
         assert_eq!(locale.settings(), "Settings");
         assert_ne!(Page::Nearby, Page::ScreenShare);
+    }
+
+    #[test]
+    fn nearby_count_uses_presence_instead_of_historical_rows() {
+        let mut snapshot = RuntimeSnapshot::default();
+        snapshot.peers.insert(
+            "present".to_owned(),
+            PeerView {
+                id: "present".to_owned(),
+                candidates: Vec::new(),
+                should_dial: true,
+                authenticated_discovery: false,
+                tls_pinned: true,
+                present: true,
+                transport: Default::default(),
+                screen: ScreenAvailability::Unavailable,
+            },
+        );
+        let historical = snapshot.peers["present"].clone();
+        snapshot.peers.insert(
+            "historical".to_owned(),
+            PeerView {
+                id: "historical".to_owned(),
+                present: false,
+                ..historical
+            },
+        );
+
+        assert_eq!(snapshot.present_peer_count(), 1);
+    }
+
+    #[test]
+    fn detailed_diagnostics_storage_is_opt_in() {
+        assert!(!parse_stored_bool(None));
+        assert!(!parse_stored_bool(Some("false".to_owned())));
+        assert!(!parse_stored_bool(Some("unexpected".to_owned())));
+        assert!(parse_stored_bool(Some("true".to_owned())));
     }
 
     #[test]

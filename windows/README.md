@@ -1,6 +1,6 @@
 # MoQCast Windows
 
-本目录是 `moq-cast-desktop` 单一桌面仓库的 Windows 平台实现，与同级 `linux/` 保持平台代码隔离。Windows 产品包含完整 MoQCast Windows 桌面端，以及只向本机浏览器提供设备发现结果的 Browser LAN Bridge；本目录不包含 Linux 或 Android 平台代码。
+本目录是 `moq-cast-desktop` 单一桌面仓库的完整 Windows 桌面端实现，与同级 `linux/` 保持平台代码隔离。独立的轻量 discovery tray 与 loopback presence bridge 位于 [`windows-lite/`](../windows-lite/README.md)。本目录不包含 Linux 或 Android 平台代码。
 
 当前 Windows 桌面端已经包含 W1/W2 发现与安全会话基础、deterministic mesh、共享 Origin、单路屏幕发布，以及远端 screen catalog 订阅和 Live Player。Nearby 根据上游 `should_dial` 自动直连，不提供手动 Connect/Disconnect；短暂 mDNS Lost 不会拆除健康 QUIC session。屏幕发布固定使用 `moqcast.screen/<local-peer-id>`，观看与发布互斥，停止媒体不会拆除 mesh。
 
@@ -30,7 +30,7 @@ cargo run -- --bind "[::]:0" --secret-file C:\path\to\lan-secret.txt
 
 文件内容必须是 32 字节 secret 的 64 位十六进制编码。应用日志和 UI snapshot 不会输出 secret、peer credential 或完整 TLS fingerprint。
 
-即使 `RUST_LOG` 请求 debug/trace，应用也会把 `moq_native` 与 `mdns_sd` 限制到 warn，防止底层 DNS-SD 调试日志打印 TXT fingerprint、nonce 或 credential 派生材料。
+即使 `RUST_LOG` 请求 debug/trace，应用也会把 `moq_tokio` 与 `mdns_sd` 限制到 warn，防止底层 DNS-SD 调试日志打印 TXT fingerprint、nonce 或 credential 派生材料。
 
 ## 验证
 

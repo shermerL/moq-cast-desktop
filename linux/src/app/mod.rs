@@ -2,6 +2,8 @@
 
 mod command;
 mod components;
+mod device;
+mod diagnostics;
 mod locale;
 mod pages;
 mod player;
@@ -12,7 +14,8 @@ pub use command::UserCommand;
 pub use locale::Locale;
 pub use snapshot::{
     AppSnapshot, DialRole, DiscoveredPeer, DiscoveryState, MediaState, PeerDiscoveryState,
-    PeerSnapshot, RemoteScreenSnapshot, ScreenAvailability, StateError, TransportState,
+    PeerSnapshot, RemoteAudioPhase, RemoteAudioSnapshot, RemoteScreenSnapshot, ScreenAvailability,
+    StateError, TransportState,
 };
 
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Stroke};
@@ -21,6 +24,7 @@ use crate::runtime::{PlaybackFrameIdentity, RuntimeHandle, RuntimeStartError};
 
 const STORAGE_LOCALE: &str = "moqcast.locale";
 const STORAGE_SYSTEM_AUDIO: &str = "moqcast.system-audio";
+const STORAGE_DETAILED_DIAGNOSTICS: &str = "moqcast.detailed-diagnostics";
 const CONTENT_MAX_WIDTH: f32 = 1040.0;
 const DEVICE_WORKSPACE_SPLIT_WIDTH: f32 = 900.0;
 
@@ -53,7 +57,7 @@ fn shell_layout(window_width: f32) -> ShellLayout {
     }
 }
 
-fn parse_system_audio(value: Option<String>) -> bool {
+fn parse_stored_bool(value: Option<String>) -> bool {
     value.as_deref() == Some("true")
 }
 
@@ -106,6 +110,8 @@ pub struct MoqCastApp {
     selected_peer: Option<String>,
     locale: Locale,
     system_audio: bool,
+    local_device_name: String,
+    diagnostics: diagnostics::DiagnosticsUi,
     runtime: RuntimeHandle,
     command_error: Option<String>,
     playback_texture: Option<egui::TextureHandle>,
@@ -115,7 +121,10 @@ pub struct MoqCastApp {
 
 impl MoqCastApp {
     /// Create the UI and its owned background runtime.
-    pub fn new(creation_context: &eframe::CreationContext<'_>) -> Result<Self, RuntimeStartError> {
+    pub fn new(
+        creation_context: &eframe::CreationContext<'_>,
+        diagnostics: moqcast_diagnostics::Handle,
+    ) -> Result<Self, RuntimeStartError> {
         configure_fonts(&creation_context.egui_ctx);
         theme::configure(&creation_context.egui_ctx);
         let locale = creation_context
@@ -123,10 +132,15 @@ impl MoqCastApp {
             .and_then(|storage| storage.get_string(STORAGE_LOCALE))
             .and_then(|value| Locale::parse(&value))
             .unwrap_or_default();
-        let system_audio = parse_system_audio(
+        let system_audio = parse_stored_bool(
             creation_context
                 .storage
                 .and_then(|storage| storage.get_string(STORAGE_SYSTEM_AUDIO)),
+        );
+        let detailed_diagnostics = parse_stored_bool(
+            creation_context
+                .storage
+                .and_then(|storage| storage.get_string(STORAGE_DETAILED_DIAGNOSTICS)),
         );
 
         Ok(Self {
@@ -134,6 +148,8 @@ impl MoqCastApp {
             selected_peer: None,
             locale,
             system_audio,
+            local_device_name: device::name(),
+            diagnostics: diagnostics::DiagnosticsUi::new(diagnostics, detailed_diagnostics),
             runtime: RuntimeHandle::start()?,
             command_error: None,
             playback_texture: None,
@@ -379,6 +395,7 @@ impl eframe::App for MoqCastApp {
                             ui,
                             self.locale,
                             &snapshot,
+                            &self.local_device_name,
                             &mut self.selected_peer,
                             layout.device_workspace,
                             self.system_audio,
@@ -392,7 +409,9 @@ impl eframe::App for MoqCastApp {
                             &mut self.system_audio,
                         ),
                         Page::Settings => {
-                            if let Some(locale) = pages::settings::show(ui, self.locale) {
+                            if let Some(locale) =
+                                pages::settings::show(ui, self.locale, &mut self.diagnostics)
+                            {
                                 self.locale = locale;
                             }
                             None
@@ -413,6 +432,8 @@ impl eframe::App for MoqCastApp {
                 });
             });
 
+        self.diagnostics.show_window(&context, self.locale);
+
         let repaint = if matches!(snapshot.media, MediaState::Viewing { .. }) {
             33
         } else {
@@ -426,6 +447,15 @@ impl eframe::App for MoqCastApp {
         storage.set_string(
             STORAGE_SYSTEM_AUDIO,
             if self.system_audio { "true" } else { "false" }.to_owned(),
+        );
+        storage.set_string(
+            STORAGE_DETAILED_DIAGNOSTICS,
+            if self.diagnostics.detailed() {
+                "true"
+            } else {
+                "false"
+            }
+            .to_owned(),
         );
     }
 }
@@ -485,10 +515,10 @@ mod tests {
 
     #[test]
     fn system_audio_is_off_unless_explicitly_enabled() {
-        assert!(!parse_system_audio(None));
-        assert!(!parse_system_audio(Some("false".to_owned())));
-        assert!(!parse_system_audio(Some("invalid".to_owned())));
-        assert!(parse_system_audio(Some("true".to_owned())));
+        assert!(!parse_stored_bool(None));
+        assert!(!parse_stored_bool(Some("false".to_owned())));
+        assert!(!parse_stored_bool(Some("invalid".to_owned())));
+        assert!(parse_stored_bool(Some("true".to_owned())));
     }
 
     #[test]

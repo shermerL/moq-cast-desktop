@@ -1,0 +1,45 @@
+[package]
+name = "moqcast-macos"
+description = "Native macOS desktop application for MoQCast"
+version = "0.4.1-dev.3"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+default = ["app"]
+app = ["dep:eframe", "network"]
+network = ["dep:moq-tokio", "dep:url"]
+foundation = [
+    "network",
+    "dep:hang",
+    "dep:moq-audio",
+    "dep:moq-mux",
+    "dep:moq-video",
+]
+
+[dependencies]
+anyhow = "1"
+eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wgpu"], optional = true }
+thiserror = "2"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = "0.3.23"
+url = { version = "2", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+hang = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", optional = true }
+moq-audio = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["playback"], optional = true }
+moq-mux = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", optional = true }
+moq-tokio = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["aws-lc-rs", "mdns", "quinn"], optional = true }
+moq-video = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["capture"], optional = true }
+
+[[bin]]
+name = "moqcast-macos"
+path = "src/main.rs"
+required-features = ["app"]
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros"] }
+toml_edit = { version = "0.25.13", default-features = false, features = ["parse"] }

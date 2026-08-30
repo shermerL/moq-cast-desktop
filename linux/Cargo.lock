@@ -197,6 +197,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "alsa"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "812947049edcd670a82cd5c73c3661d2e58468577ba8489de58e1a73c04cbd5d"
+dependencies = [
+ "alsa-sys",
+ "bitflags 2.13.1",
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
+name = "alsa-sys"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad7569085a265dd3f607ebecce7458eaab2132a84393534c95b18dcbc3f31e04"
+dependencies = [
+ "libc",
+ "pkg-config",
+]
+
+[[package]]
 name = "android-activity"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -312,7 +334,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
  "x11rb",
 ]
 
@@ -1173,6 +1195,61 @@ dependencies = [
 ]
 
 [[package]]
+name = "core_affinity"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a034b3a7b624016c6e13f5df875747cc25f884156aad2abd12b6c46797971342"
+dependencies = [
+ "libc",
+ "num_cpus",
+ "winapi",
+]
+
+[[package]]
+name = "coreaudio-rs"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d5d7dca3ebcf65a035582c9ad4385371a9d9ee6537474d2a278f4e1e475bb58"
+dependencies = [
+ "bitflags 2.13.1",
+ "libc",
+ "objc2-audio-toolbox",
+ "objc2-core-audio",
+ "objc2-core-audio-types",
+ "objc2-core-foundation",
+]
+
+[[package]]
+name = "cpal"
+version = "0.18.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f02e8d0327b42d3e2e4ab2119af397344eb9fc54a34bf0ddeaa1277af8681f1"
+dependencies = [
+ "alsa",
+ "block2 0.6.2",
+ "coreaudio-rs",
+ "dasp_sample",
+ "jni",
+ "js-sys",
+ "libc",
+ "mach2",
+ "ndk",
+ "ndk-context",
+ "num-derive",
+ "num-traits",
+ "objc2 0.6.4",
+ "objc2-audio-toolbox",
+ "objc2-avf-audio",
+ "objc2-core-audio",
+ "objc2-core-audio-types",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "web-sys",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1197,6 +1274,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "crossbeam-channel"
+version = "0.5.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d85363c37faeca707aef026efa9f3b34d077bce547e48f770770625c6013679e"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -1296,6 +1382,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "dasp_sample"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
 name = "data-encoding"
@@ -1431,6 +1523,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dns-lookup"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e39034cee21a2f5bbb66ba0e3689819c4bb5d00382a282006e802a7ffa6c41d"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "socket2",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1526,7 +1630,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "pollster",
+ "pollster 1.0.1",
  "profiling",
  "raw-window-handle",
  "ron",
@@ -1818,10 +1922,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
+name = "file-rotate"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e8e2fa049328a1f3295991407a88585805d126dfaadf74b9fe8c194c730aafc"
+dependencies = [
+ "chrono",
+ "flate2",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+
+[[package]]
+name = "fixed-resample"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3505607cc0adc388ce98f59707477c02fbd05a2fa0c1b8c4cf42b71a3cb9c34"
+dependencies = [
+ "audioadapter",
+ "audioadapter-buffers",
+ "ringbuf",
+ "rubato",
+]
 
 [[package]]
 name = "fixedbitset"
@@ -2262,8 +2388,8 @@ dependencies = [
 
 [[package]]
 name = "hang"
-version = "0.20.4"
-source = "git+https://github.com/moq-dev/moq.git?rev=68cf64603f067f64bc02fe800464aa59710a258c#68cf64603f067f64bc02fe800464aa59710a258c"
+version = "0.20.6"
+source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
 dependencies = [
  "bytes",
  "derive_more",
@@ -2893,8 +3019,8 @@ dependencies = [
 
 [[package]]
 name = "kio"
-version = "0.5.4"
-source = "git+https://github.com/moq-dev/moq.git?rev=68cf64603f067f64bc02fe800464aa59710a258c#68cf64603f067f64bc02fe800464aa59710a258c"
+version = "0.5.5"
+source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
 dependencies = [
  "loom",
  "smallvec",
@@ -3080,6 +3206,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
+name = "mach2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3157,42 +3289,48 @@ dependencies = [
 
 [[package]]
 name = "moq-audio"
-version = "0.0.16"
-source = "git+https://github.com/moq-dev/moq.git?rev=68cf64603f067f64bc02fe800464aa59710a258c#68cf64603f067f64bc02fe800464aa59710a258c"
+version = "0.0.18"
+source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
 dependencies = [
  "bytes",
+ "cpal",
+ "fixed-resample",
  "hang",
  "moq-mux",
  "moq-net",
  "rand",
  "rubato",
  "thiserror 2.0.20",
+ "tokio",
+ "tracing",
  "unsafe-libopus",
 ]
 
 [[package]]
 name = "moq-cast-desktop"
-version = "0.4.1-dev.1"
+version = "0.4.1-dev.4"
 dependencies = [
  "anyhow",
  "eframe",
+ "gethostname",
+ "hang",
  "moq-audio",
  "moq-mux",
- "moq-native",
+ "moq-tokio",
  "moq-video",
+ "moqcast-diagnostics",
  "pipewire",
- "rustls",
+ "rfd",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "url",
 ]
 
 [[package]]
 name = "moq-flate"
 version = "0.1.1"
-source = "git+https://github.com/moq-dev/moq.git?rev=68cf64603f067f64bc02fe800464aa59710a258c#68cf64603f067f64bc02fe800464aa59710a258c"
+source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
 dependencies = [
  "bytes",
  "flate2",
@@ -3201,12 +3339,12 @@ dependencies = [
 
 [[package]]
 name = "moq-json"
-version = "0.3.3"
-source = "git+https://github.com/moq-dev/moq.git?rev=68cf64603f067f64bc02fe800464aa59710a258c#68cf64603f067f64bc02fe800464aa59710a258c"
+version = "0.3.4"
+source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
 dependencies = [
  "bytes",
  "json-patch",
- "kio 0.5.4 (git+https://github.com/moq-dev/moq.git?rev=68cf64603f067f64bc02fe800464aa59710a258c)",
+ "kio 0.5.5",
  "moq-flate",
  "moq-net",
  "serde",
@@ -3219,7 +3357,7 @@ dependencies = [
 [[package]]
 name = "moq-loc"
 version = "0.2.1"
-source = "git+https://github.com/moq-dev/moq.git?rev=68cf64603f067f64bc02fe800464aa59710a258c#68cf64603f067f64bc02fe800464aa59710a258c"
+source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
 dependencies = [
  "bytes",
  "moq-net",
@@ -3228,8 +3366,8 @@ dependencies = [
 
 [[package]]
 name = "moq-msf"
-version = "0.4.0"
-source = "git+https://github.com/moq-dev/moq.git?rev=68cf64603f067f64bc02fe800464aa59710a258c#68cf64603f067f64bc02fe800464aa59710a258c"
+version = "0.4.1"
+source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
 dependencies = [
  "serde",
  "serde_json",
@@ -3238,15 +3376,15 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.9.4"
-source = "git+https://github.com/moq-dev/moq.git?rev=68cf64603f067f64bc02fe800464aa59710a258c#68cf64603f067f64bc02fe800464aa59710a258c"
+version = "0.9.8"
+source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
  "bytes",
  "h264-parser",
  "hang",
- "kio 0.5.4 (git+https://github.com/moq-dev/moq.git?rev=68cf64603f067f64bc02fe800464aa59710a258c)",
+ "kio 0.5.5",
  "memchr",
  "moq-json",
  "moq-loc",
@@ -3264,15 +3402,46 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "web-async",
  "webm-iterable",
 ]
 
 [[package]]
-name = "moq-native"
-version = "0.19.8"
-source = "git+https://github.com/moq-dev/moq.git?rev=68cf64603f067f64bc02fe800464aa59710a258c#68cf64603f067f64bc02fe800464aa59710a258c"
+name = "moq-net"
+version = "0.2.13"
+source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
 dependencies = [
+ "bytes",
+ "futures",
+ "kio 0.5.5",
+ "num_enum",
+ "rand",
+ "serde",
+ "thiserror 2.0.20",
+ "tracing",
+ "web-async",
+ "web-transport-trait",
+]
+
+[[package]]
+name = "moq-nvenc"
+version = "0.0.3"
+source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
+dependencies = [
+ "cudarc",
+ "lazy_static",
+ "libloading 0.9.0",
+]
+
+[[package]]
+name = "moq-tokio"
+version = "0.19.11"
+source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
+dependencies = [
+ "bytes",
  "clap",
+ "core_affinity",
+ "dns-lookup",
  "futures",
  "hex",
  "hmac",
@@ -3310,35 +3479,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-net"
-version = "0.2.9"
-source = "git+https://github.com/moq-dev/moq.git?rev=68cf64603f067f64bc02fe800464aa59710a258c#68cf64603f067f64bc02fe800464aa59710a258c"
-dependencies = [
- "bytes",
- "futures",
- "kio 0.5.4 (git+https://github.com/moq-dev/moq.git?rev=68cf64603f067f64bc02fe800464aa59710a258c)",
- "num_enum",
- "rand",
- "serde",
- "thiserror 2.0.20",
- "tracing",
- "web-async",
- "web-transport-trait",
-]
-
-[[package]]
-name = "moq-nvenc"
-version = "0.0.3"
-source = "git+https://github.com/moq-dev/moq.git?rev=68cf64603f067f64bc02fe800464aa59710a258c#68cf64603f067f64bc02fe800464aa59710a258c"
-dependencies = [
- "cudarc",
- "lazy_static",
- "libloading 0.9.0",
-]
-
-[[package]]
 name = "moq-video"
-version = "0.0.14"
+version = "0.0.18"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -3350,6 +3492,7 @@ dependencies = [
  "hang",
  "libc",
  "libloading 0.9.0",
+ "linux-raw-sys 0.12.1",
  "moq-mux",
  "moq-net",
  "moq-nvenc",
@@ -3376,6 +3519,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "moqcast-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "file-rotate",
+ "serde_json",
+ "thiserror 2.0.20",
+ "time",
+ "tracing",
+ "tracing-subscriber",
+ "zip",
+]
+
+[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3387,9 +3544,9 @@ dependencies = [
 
 [[package]]
 name = "mp4-atom"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3144b10c48a9707a4e8526a0371eebf4a46e2cb703748b0d83bbdc77421bc16f"
+checksum = "f3d7433df407a636db7047600422af07145adf6ee25e0622745b0131516dbc3c"
 dependencies = [
  "bytes",
  "derive_more",
@@ -3606,7 +3763,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3649,6 +3806,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
 
 [[package]]
+name = "num-derive"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "num-integer"
 version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3686,6 +3854,16 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
  "libm",
+]
+
+[[package]]
+name = "num_cpus"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
+dependencies = [
+ "hermit-abi",
+ "libc",
 ]
 
 [[package]]
@@ -3767,9 +3945,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
 dependencies = [
  "bitflags 2.13.1",
+ "block2 0.6.2",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "objc2-audio-toolbox"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6948501a91121d6399b79abaa33a8aa4ea7857fe019f341b8c23ad6e81b79b08"
+dependencies = [
+ "bitflags 2.13.1",
+ "libc",
+ "objc2 0.6.4",
+ "objc2-core-audio",
+ "objc2-core-audio-types",
+ "objc2-core-foundation",
  "objc2-foundation 0.3.2",
 ]
 
@@ -3801,6 +3995,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13a380031deed8e99db00065c45937da434ca987c034e13b87e4441f9e4090be"
 dependencies = [
+ "bitflags 2.13.1",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
 ]
@@ -3839,6 +4034,7 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-core-audio-types",
  "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]
@@ -4515,6 +4711,12 @@ dependencies = [
 
 [[package]]
 name = "pollster"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
+
+[[package]]
+name = "pollster"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc6355899e1c9462875b6757c79f3caa011a1fdae12bbb1a2e72dd1f234f8336"
@@ -4687,7 +4889,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4897,6 +5099,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "rfd"
+version = "0.17.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20dafead71c16a34e1ff357ddefc8afc11e7d51d6d2b9fbd07eaa48e3e540220"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "js-sys",
+ "libc",
+ "log",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "percent-encoding",
+ "pollster 0.4.0",
+ "raw-window-handle",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "web-sys",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4908,6 +5137,17 @@ dependencies = [
  "libc",
  "untrusted 0.9.0",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "ringbuf"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a158e09ede21a14b172ca6cdd6208386c6ae2cb6acef58d774368ef8c450dfa7"
+dependencies = [
+ "crossbeam-utils",
+ "portable-atomic",
+ "portable-atomic-util",
 ]
 
 [[package]]
@@ -4997,7 +5237,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5055,7 +5295,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5677,10 +5917,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6036,6 +6276,12 @@ checksum = "cb30dbbd9036155e74adad6812e9898d03ec374946234fbcebd5dfc7b9187b90"
 dependencies = [
  "rustc-hash 2.1.3",
 ]
+
+[[package]]
+name = "typed-path"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
 
 [[package]]
 name = "typeid"
@@ -6513,7 +6759,7 @@ dependencies = [
  "bytes",
  "futures",
  "http",
- "kio 0.5.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "kio 0.5.4",
  "noq",
  "rustls",
  "rustls-native-certs",
@@ -6548,7 +6794,7 @@ dependencies = [
  "bytes",
  "futures",
  "http",
- "kio 0.5.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "kio 0.5.4",
  "quinn",
  "rustls",
  "rustls-native-certs",
@@ -6808,13 +7054,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "winapi"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419"
+dependencies = [
+ "winapi-i686-pc-windows-gnu",
+ "winapi-x86_64-pc-windows-gnu",
+]
+
+[[package]]
+name = "winapi-i686-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
+
+[[package]]
 name = "winapi-util"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "winapi-x86_64-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windowfunctions"
@@ -7471,6 +7739,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "zip"
+version = "8.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+dependencies = [
+ "crc32fast",
+ "indexmap 2.14.0",
+ "memchr",
+ "typed-path",
 ]
 
 [[package]]

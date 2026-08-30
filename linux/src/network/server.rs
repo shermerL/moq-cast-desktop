@@ -1,6 +1,6 @@
 //! QUIC listener construction and inbound peer authorization.
 
-use moq_native::moq_net;
+use moq_tokio::moq_net;
 use thiserror::Error;
 
 use super::security::authorized;
@@ -10,24 +10,25 @@ pub(crate) enum AcceptError {
     #[error("LAN peer did not present this listener's credential")]
     Unauthorized,
     #[error(transparent)]
-    Native(#[from] moq_native::Error),
+    Native(#[from] moq_tokio::Error),
 }
 
-pub(crate) fn build() -> Result<moq_native::Server, moq_native::Error> {
-    let mut config = moq_native::ServerConfig::default();
+pub(crate) fn build() -> Result<moq_tokio::Server, moq_tokio::Error> {
+    let mut config = moq_tokio::listen::Config::default();
     config.bind = Some("[::]:0".into());
     config.tls.generate = vec!["moq-cast-desktop".into()];
-    config.init()
+    config.init(moq_tokio::quic::Config::default())
 }
 
-pub(crate) fn authorized_request(request: &moq_native::Request, credential: &str) -> bool {
+pub(crate) fn authorized_request(request: &moq_tokio::Request, credential: &str) -> bool {
     authorized(request.path(), credential)
 }
 
 pub(crate) async fn accept(
-    request: moq_native::Request,
+    request: moq_tokio::Request,
     credential: &str,
-    origin: moq_net::origin::Producer,
+    publish_origin: &moq_net::origin::Producer,
+    receive_origin: moq_net::origin::Producer,
 ) -> Result<moq_net::Session, AcceptError> {
     if !authorized_request(&request, credential) {
         request.close(403).await?;
@@ -35,8 +36,8 @@ pub(crate) async fn accept(
     }
 
     Ok(request
-        .with_publisher(&origin)
-        .with_subscriber(origin)
+        .with_publisher(publish_origin)
+        .with_subscriber(receive_origin)
         .ok()
         .await?)
 }

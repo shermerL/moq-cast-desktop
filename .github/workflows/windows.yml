@@ -2,13 +2,15 @@ name: Windows
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths:
       - "windows/**"
+      - "shared/diagnostics/**"
       - ".github/workflows/windows.yml"
   pull_request:
     paths:
       - "windows/**"
+      - "shared/diagnostics/**"
       - ".github/workflows/windows.yml"
   workflow_dispatch:
 
@@ -40,17 +42,37 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             windows/target
-          key: windows-cargo-${{ runner.os }}-rust1.95.0-${{ hashFiles('windows/Cargo.lock') }}
+            shared/diagnostics/target
+          key: windows-cargo-${{ runner.os }}-rust1.95.0-${{ hashFiles('windows/Cargo.lock', 'shared/diagnostics/Cargo.lock') }}
           restore-keys: |
             windows-cargo-${{ runner.os }}-rust1.95.0-
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Run tests
         run: cargo test --locked --all-targets
+      - name: Run shared diagnostics tests
+        working-directory: shared/diagnostics
+        run: cargo test --locked --all-targets
       - name: Run Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build release desktop app
         run: cargo build --locked --release
+        env:
+          MOQCAST_BUILD_IDENTITY: windows-x86_64-msvc
+          MOQCAST_SOURCE_COMMIT: ${{ github.sha }}
+      - name: Verify Windows GUI subsystem
+        shell: pwsh
+        run: |
+          $path = "target/release/moqcast-windows.exe"
+          $bytes = [System.IO.File]::ReadAllBytes($path)
+          $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+          if ([Text.Encoding]::ASCII.GetString($bytes, $pe, 4) -ne "PE`0`0") {
+            throw "$path is not a PE image"
+          }
+          $subsystem = [BitConverter]::ToUInt16($bytes, $pe + 24 + 68)
+          if ($subsystem -ne 2) {
+            throw "$path uses PE subsystem $subsystem instead of Windows GUI (2)"
+          }
       - name: Upload Windows desktop app
         uses: actions/upload-artifact@v4
         with:

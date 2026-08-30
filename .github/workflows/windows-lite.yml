@@ -1,0 +1,72 @@
+name: Windows Lite
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "windows-lite/**"
+      - ".github/workflows/windows-lite.yml"
+  pull_request:
+    paths:
+      - "windows-lite/**"
+      - ".github/workflows/windows-lite.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: windows-lite
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: clippy,rustfmt
+      - name: Cache Rust dependencies and build outputs
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            windows-lite/target
+          key: windows-lite-cargo-${{ runner.os }}-rust1.95.0-${{ hashFiles('windows-lite/Cargo.lock') }}
+          restore-keys: |
+            windows-lite-cargo-${{ runner.os }}-rust1.95.0-
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Run tests
+        run: cargo test --locked --all-targets
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Build release application
+        run: cargo build --locked --release
+      - name: Verify Windows GUI subsystem
+        shell: pwsh
+        run: |
+          $path = "target/release/moqtcast-lite.exe"
+          $bytes = [System.IO.File]::ReadAllBytes($path)
+          $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+          if ([Text.Encoding]::ASCII.GetString($bytes, $pe, 4) -ne "PE`0`0") {
+            throw "$path is not a PE image"
+          }
+          $subsystem = [BitConverter]::ToUInt16($bytes, $pe + 24 + 68)
+          if ($subsystem -ne 2) {
+            throw "$path uses PE subsystem $subsystem instead of Windows GUI (2)"
+          }
+      - name: Upload Windows Lite application
+        uses: actions/upload-artifact@v4
+        with:
+          name: moqtcast-lite-windows-x86_64-${{ github.sha }}
+          path: windows-lite/target/release/moqtcast-lite.exe
+          if-no-files-found: error
+          retention-days: 14

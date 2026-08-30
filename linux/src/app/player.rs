@@ -3,15 +3,19 @@
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Color32, Event, Frame, Margin, Rect, RichText, Sense, Stroke, TextureHandle,
-    ViewportCommand,
+    self, Align, Color32, Event, Frame, Layout, Margin, Rect, RichText, Sense, Stroke,
+    TextureHandle, ViewportCommand,
 };
 
-use super::Locale;
+use super::{Locale, RemoteAudioPhase, RemoteAudioSnapshot};
 
 const FALLBACK_SOURCE: egui::Vec2 = egui::vec2(16.0, 9.0);
 const CONTROLS_HIDE_AFTER: f64 = 2.8;
-const CONTROL_HEIGHT: f32 = 92.0;
+const CONTROL_HEIGHT: f32 = 50.0;
+const CONTROL_BUTTON_HEIGHT: f32 = 34.0;
+const CONTROL_BUTTON_WIDTH: f32 = 104.0;
+const COMPACT_CONTROL_BUTTON_WIDTH: f32 = 88.0;
+const CONTROL_GAP: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PlayerLayout {
@@ -28,12 +32,49 @@ fn player_layout(
     let source = source
         .filter(|size| valid_size(*size))
         .unwrap_or(FALLBACK_SOURCE);
-    let scale = (available.x / source.x).min(available.y / source.y);
+    let surface = if fullscreen {
+        available
+    } else {
+        egui::vec2(
+            available.x,
+            (available.x * FALLBACK_SOURCE.y / FALLBACK_SOURCE.x).min(available.y),
+        )
+    };
+    let scale = (surface.x / source.x).min(surface.y / source.y);
     let image = source * scale;
 
-    PlayerLayout {
-        surface: if fullscreen { available } else { image },
-        image,
+    PlayerLayout { surface, image }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ControlLayout {
+    info_width: f32,
+    actions_width: f32,
+    button_width: f32,
+}
+
+fn control_layout(available_width: f32, action_count: usize) -> ControlLayout {
+    let available_width = valid_extent(available_width);
+    let button_width = if available_width < 520.0 {
+        COMPACT_CONTROL_BUTTON_WIDTH
+    } else {
+        CONTROL_BUTTON_WIDTH
+    };
+    let actions_width = if action_count == 0 {
+        0.0
+    } else {
+        button_width * action_count as f32 + CONTROL_GAP * action_count.saturating_sub(1) as f32
+    };
+    let group_gap = if actions_width > 0.0 {
+        CONTROL_GAP
+    } else {
+        0.0
+    };
+
+    ControlLayout {
+        info_width: (available_width - actions_width - group_gap).max(0.0),
+        actions_width: actions_width.min(available_width),
+        button_width,
     }
 }
 
@@ -69,14 +110,27 @@ impl FullscreenState {
 }
 
 pub(super) enum PlayerMode<'a> {
-    Preparing { path: &'a str },
-    Viewing { path: &'a str, stopping: bool },
+    Preparing {
+        path: &'a str,
+        audio: &'a RemoteAudioSnapshot,
+    },
+    Viewing {
+        path: &'a str,
+        stopping: bool,
+        audio: &'a RemoteAudioSnapshot,
+    },
 }
 
 impl PlayerMode<'_> {
     fn path(&self) -> &str {
         match self {
-            Self::Preparing { path } | Self::Viewing { path, .. } => path,
+            Self::Preparing { path, .. } | Self::Viewing { path, .. } => path,
+        }
+    }
+
+    fn audio(&self) -> &RemoteAudioSnapshot {
+        match self {
+            Self::Preparing { audio, .. } | Self::Viewing { audio, .. } => audio,
         }
     }
 
@@ -129,11 +183,7 @@ impl LivePlayer {
         texture: Option<&TextureHandle>,
     ) -> Option<PlayerAction> {
         let fullscreen = self.fullscreen.active();
-        let available = if fullscreen {
-            ui.available_size()
-        } else {
-            egui::vec2(ui.available_width(), ui.available_height().min(540.0))
-        };
+        let available = ui.available_size();
         let layout = player_layout(texture.map(TextureHandle::size_vec2), available, fullscreen);
         let (now, activity, escape) = ui.ctx().input(|input| {
             let activity = input.events.iter().any(is_control_activity);
@@ -188,61 +238,101 @@ impl LivePlayer {
                 );
                 ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
                     Frame::new()
-                        .fill(Color32::from_black_alpha(205))
-                        .inner_margin(Margin::symmetric(14, 10))
+                        .fill(Color32::from_black_alpha(195))
+                        .inner_margin(Margin::symmetric(12, 8))
                         .show(ui, |ui| {
-                            ui.set_min_width((controls.width() - 28.0).max(1.0));
-                            ui.horizontal(|ui| {
-                                if mode.viewing() {
-                                    live_badge(ui);
-                                } else {
-                                    ui.spinner();
-                                    ui.label(
-                                        RichText::new(locale.preparing_view())
-                                            .size(12.0)
-                                            .color(Color32::WHITE),
-                                    );
-                                }
+                            ui.visuals_mut().override_text_color = Some(Color32::WHITE);
+                            let action_count = 1 + usize::from(mode.viewing());
+                            let row_layout = control_layout(ui.available_width(), action_count);
+                            let (row, _) = ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), CONTROL_BUTTON_HEIGHT),
+                                Sense::hover(),
+                            );
+                            let info = Rect::from_min_size(
+                                row.min,
+                                egui::vec2(row_layout.info_width, row.height()),
+                            );
+                            let actions = Rect::from_min_size(
+                                egui::pos2(row.right() - row_layout.actions_width, row.top()),
+                                egui::vec2(row_layout.actions_width, row.height()),
+                            );
 
-                                let resolution = texture
-                                    .map(|texture| {
-                                        let [width, height] = texture.size();
-                                        format!("{width} × {height}")
-                                    })
-                                    .unwrap_or_else(|| locale.waiting_for_first_frame().to_owned());
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(format!("{}  ·  {resolution}", mode.path()))
-                                            .size(11.0)
-                                            .color(Color32::from_gray(205)),
-                                    )
-                                    .truncate(),
-                                );
+                            ui.scope_builder(egui::UiBuilder::new().max_rect(info), |ui| {
+                                ui.horizontal(|ui| {
+                                    if mode.viewing() {
+                                        live_badge(ui);
+                                    } else {
+                                        ui.spinner();
+                                        ui.label(
+                                            RichText::new(locale.preparing_view())
+                                                .size(12.0)
+                                                .color(Color32::WHITE),
+                                        );
+                                    }
+
+                                    let resolution = texture
+                                        .map(|texture| {
+                                            let [width, height] = texture.size();
+                                            format!("{width} × {height}")
+                                        })
+                                        .unwrap_or_else(|| {
+                                            locale.waiting_for_first_frame().to_owned()
+                                        });
+                                    let audio = mode.audio();
+                                    let details = format!(
+                                        "{}  ·  {resolution}  ·  {}",
+                                        mode.path(),
+                                        locale.remote_audio_status(audio.phase)
+                                    );
+                                    let color = if audio.phase == RemoteAudioPhase::Failed {
+                                        Color32::from_rgb(255, 174, 174)
+                                    } else {
+                                        Color32::from_gray(205)
+                                    };
+                                    let status = ui.add_sized(
+                                        ui.available_size(),
+                                        egui::Label::new(
+                                            RichText::new(details).size(11.0).color(color),
+                                        )
+                                        .truncate(),
+                                    );
+                                    if let Some(error) = &audio.last_error {
+                                        status.on_hover_text(error);
+                                    }
+                                });
                             });
-                            ui.add_space(4.0);
-                            ui.horizontal_wrapped(|ui| {
-                                if player_button(ui, locale.stop_watching(), !mode.stopping(), true)
-                                    .clicked()
-                                {
-                                    action = Some(PlayerAction::StopWatching);
-                                }
-                                if mode.viewing()
-                                    && player_button(
+                            ui.scope_builder(egui::UiBuilder::new().max_rect(actions), |ui| {
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if mode.viewing()
+                                        && player_button(
+                                            ui,
+                                            if fullscreen {
+                                                locale.exit_fullscreen()
+                                            } else {
+                                                locale.enter_fullscreen()
+                                            },
+                                            !mode.stopping(),
+                                            false,
+                                            row_layout.button_width,
+                                        )
+                                        .clicked()
+                                    {
+                                        ui.ctx().send_viewport_cmd(ViewportCommand::Fullscreen(
+                                            !fullscreen,
+                                        ));
+                                    }
+                                    if player_button(
                                         ui,
-                                        if fullscreen {
-                                            locale.exit_fullscreen()
-                                        } else {
-                                            locale.enter_fullscreen()
-                                        },
+                                        locale.stop_watching(),
                                         !mode.stopping(),
-                                        false,
+                                        true,
+                                        row_layout.button_width,
                                     )
                                     .clicked()
-                                {
-                                    ui.ctx().send_viewport_cmd(ViewportCommand::Fullscreen(
-                                        !fullscreen,
-                                    ));
-                                }
+                                    {
+                                        action = Some(PlayerAction::StopWatching);
+                                    }
+                                });
                             });
                         });
                 });
@@ -283,7 +373,13 @@ fn live_badge(ui: &mut egui::Ui) {
         });
 }
 
-fn player_button(ui: &mut egui::Ui, label: &str, enabled: bool, danger: bool) -> egui::Response {
+fn player_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    enabled: bool,
+    danger: bool,
+    width: f32,
+) -> egui::Response {
     let text = if danger {
         Color32::from_rgb(255, 174, 174)
     } else {
@@ -295,7 +391,7 @@ fn player_button(ui: &mut egui::Ui, label: &str, enabled: bool, danger: bool) ->
             .fill(Color32::from_black_alpha(120))
             .stroke(Stroke::new(1.0, Color32::from_gray(105)))
             .corner_radius(egui::CornerRadius::same(8))
-            .min_size(egui::vec2(112.0, 36.0)),
+            .min_size(egui::vec2(width, CONTROL_BUTTON_HEIGHT)),
     )
 }
 
@@ -323,15 +419,15 @@ mod tests {
     }
 
     #[test]
-    fn portrait_frame_is_constrained_by_available_height() {
+    fn portrait_frame_uses_side_bars_inside_the_stable_stage() {
         let layout = player_layout(
             Some(egui::vec2(1080.0, 1920.0)),
             egui::vec2(1000.0, 700.0),
             false,
         );
 
-        assert_size(layout.surface, egui::vec2(393.75, 700.0));
-        assert_size(layout.image, layout.surface);
+        assert_size(layout.surface, egui::vec2(1000.0, 562.5));
+        assert_size(layout.image, egui::vec2(316.406_25, 562.5));
     }
 
     #[test]
@@ -342,8 +438,10 @@ mod tests {
             false,
         );
 
-        assert!((layout.surface.x - 355.555_57).abs() < 0.001);
+        assert_eq!(layout.surface.x, 500.0);
         assert_eq!(layout.surface.y, 200.0);
+        assert!((layout.image.x - 355.555_57).abs() < 0.001);
+        assert_eq!(layout.image.y, 200.0);
     }
 
     #[test]
@@ -357,6 +455,37 @@ mod tests {
 
         assert_eq!(missing, invalid);
         assert_size(missing.surface, egui::vec2(800.0, 450.0));
+    }
+
+    #[test]
+    fn narrow_window_keeps_a_full_width_stable_stage() {
+        let landscape = player_layout(
+            Some(egui::vec2(1920.0, 1080.0)),
+            egui::vec2(420.0, 400.0),
+            false,
+        );
+        let portrait = player_layout(
+            Some(egui::vec2(1080.0, 1920.0)),
+            egui::vec2(420.0, 400.0),
+            false,
+        );
+
+        assert_size(landscape.surface, egui::vec2(420.0, 236.25));
+        assert_size(portrait.surface, landscape.surface);
+        assert_size(portrait.image, egui::vec2(132.890_63, 236.25));
+    }
+
+    #[test]
+    fn narrow_controls_reserve_compact_actions_without_overflow() {
+        let layout = control_layout(360.0, 2);
+
+        assert_eq!(layout.button_width, COMPACT_CONTROL_BUTTON_WIDTH);
+        assert_eq!(layout.actions_width, 184.0);
+        assert_eq!(layout.info_width, 168.0);
+        assert_eq!(
+            layout.info_width + CONTROL_GAP + layout.actions_width,
+            360.0
+        );
     }
 
     #[test]
