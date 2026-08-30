@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -139,6 +140,7 @@ pub(crate) enum NearbyIssue {
     DirectConnectionsUnavailable,
     DiscoveryStopped,
     ListenerStopped,
+    ServicesStopped,
     DeviceRejected,
 }
 
@@ -503,8 +505,13 @@ pub(crate) enum RuntimeCommand {
     SetShareSystemAudio(bool),
     StartSharing,
     StopSharing,
+    RestartNetwork,
     Shutdown,
 }
+
+type NetworkStartFuture =
+    Pin<Box<dyn Future<Output = Result<network::Services, NearbyIssue>> + Send>>;
+type NetworkStart = Arc<dyn Fn() -> NetworkStartFuture + Send + Sync>;
 
 #[derive(Debug, Error)]
 pub(crate) enum RuntimeStartError {
@@ -542,7 +549,7 @@ impl RuntimeOwner {
 
     fn start_with<F, Fut, W>(start: F, wake: W) -> Result<Self, RuntimeStartError>
     where
-        F: FnOnce() -> Fut + Send + 'static,
+        F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<network::Services, NearbyIssue>> + Send + 'static,
         W: Fn() + Send + Sync + 'static,
     {
@@ -556,9 +563,10 @@ impl RuntimeOwner {
         let (snapshot_tx, snapshot) = watch::channel(Arc::new(AppSnapshot::default()));
         let (frames_tx, frames) = watch::channel(None);
         let wake = Arc::new(wake);
+        let start: NetworkStart = Arc::new(move || Box::pin(start()));
         let owner = thread::Builder::new()
             .name("moqcast-macos-runtime".to_owned())
-            .spawn(move || runtime.block_on(run(command_rx, snapshot_tx, frames_tx, start(), wake)))
+            .spawn(move || runtime.block_on(run(command_rx, snapshot_tx, frames_tx, start, wake)))
             .map_err(RuntimeStartError::OwnerThread)?;
 
         Ok(Self {
@@ -607,7 +615,13 @@ impl RuntimeOwner {
         self.commands.try_send(RuntimeCommand::StopSharing).is_ok()
     }
 
-    fn shutdown(&mut self) {
+    pub(crate) fn restart_network(&self) -> bool {
+        self.commands
+            .try_send(RuntimeCommand::RestartNetwork)
+            .is_ok()
+    }
+
+    pub(crate) fn shutdown(&mut self) {
         let Some(owner) = self.owner.take() else {
             return;
         };
@@ -628,7 +642,7 @@ async fn run(
     mut commands: mpsc::Receiver<RuntimeCommand>,
     snapshot_tx: watch::Sender<Arc<AppSnapshot>>,
     frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
-    start: impl Future<Output = Result<network::Services, NearbyIssue>>,
+    start: NetworkStart,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) {
     let mut snapshot = AppSnapshot::default();
@@ -638,158 +652,301 @@ async fn run(
             .runtime
             .apply(runtime_generation, RuntimePhase::Ready)
     );
-    let discovery_generation = snapshot.discovery.begin(DiscoveryPhase::Starting);
-    let session_generation = snapshot.session.begin(SessionPhase::Starting);
     publish_snapshot(&snapshot_tx, &snapshot, &wake);
     tracing::info!(stage = "runtime", "macOS runtime owner ready");
-
-    tokio::pin!(start);
-    let mut services = tokio::select! {
-        result = &mut start => match result {
-            Ok(services) => {
-                snapshot.discovery.apply(discovery_generation, DiscoveryPhase::Scanning);
-                snapshot.session.apply(session_generation, SessionPhase::Listening);
-                snapshot.nearby_issue = None;
-                publish_snapshot(&snapshot_tx, &snapshot, &wake);
-                services
-            }
-            Err(issue) => {
-                snapshot.discovery.apply(discovery_generation, DiscoveryPhase::Failed);
-                snapshot.session.apply(session_generation, SessionPhase::Failed);
-                snapshot.nearby_issue = Some(issue);
-                publish_snapshot(&snapshot_tx, &snapshot, &wake);
-                loop {
-                    if matches!(commands.recv().await, Some(RuntimeCommand::Shutdown) | None) {
-                        break;
-                    }
-                }
-                stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
-                return;
-            }
-        },
-        command = commands.recv() => {
-            if matches!(command, Some(RuntimeCommand::Shutdown) | None) {
-                stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
-                return;
-            }
-            unreachable!("media commands are unavailable before services start");
-        }
-    };
 
     let (playback_events_tx, mut playback_events) = mpsc::channel(PLAYBACK_EVENT_CAPACITY);
     let mut playback = playback::Owner::default();
     let mut publication = publication::Owner::default();
-    let mut initial_scan = Box::pin(tokio::time::sleep(Duration::from_secs(3)));
-    let mut scan_finished = false;
-    loop {
-        let input = if scan_finished {
+
+    'runtime: loop {
+        let generations = begin_network_start(&mut snapshot);
+        tracing::info!(
+            discovery_generation = generations.discovery.value(),
+            session_generation = generations.session.value(),
+            "starting Nearby network services"
+        );
+        publish_snapshot(&snapshot_tx, &snapshot, &wake);
+        let mut start_attempt = start();
+        let mut services = loop {
             tokio::select! {
-                command = commands.recv() => RuntimeInput::Command(command),
-                event = services.recv() => RuntimeInput::Network(event),
-                event = playback_events.recv() => RuntimeInput::Playback(event),
-                event = publication.recv() => RuntimeInput::Publication(event),
-            }
-        } else {
-            tokio::select! {
-                command = commands.recv() => RuntimeInput::Command(command),
-                event = services.recv() => RuntimeInput::Network(event),
-                event = playback_events.recv() => RuntimeInput::Playback(event),
-                event = publication.recv() => RuntimeInput::Publication(event),
-                () = &mut initial_scan => RuntimeInput::InitialScanFinished,
+                result = &mut start_attempt => match result {
+                    Ok(services) => break services,
+                    Err(issue) => {
+                        tracing::warn!(?issue, "Nearby network services failed to start");
+                        mark_network_failed(&mut snapshot, generations, issue);
+                        publish_snapshot(&snapshot_tx, &snapshot, &wake);
+                        match wait_for_network_restart(&mut commands).await {
+                            RecoveryAction::Restart => continue 'runtime,
+                            RecoveryAction::Shutdown => {
+                                teardown_media(&mut snapshot, &mut playback, &mut publication, &frames).await;
+                                stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
+                                return;
+                            }
+                            RecoveryAction::Failed => unreachable!(),
+                        }
+                    }
+                },
+                command = commands.recv() => match command {
+                    Some(RuntimeCommand::Shutdown) | None => {
+                        teardown_media(&mut snapshot, &mut playback, &mut publication, &frames).await;
+                        stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
+                        return;
+                    }
+                    Some(RuntimeCommand::RestartNetwork) => continue 'runtime,
+                    Some(_) => tracing::debug!(
+                        "ignored media command while Nearby network services are starting"
+                    ),
+                },
             }
         };
 
-        let previous = snapshot.clone();
-        let network_exhausted = match input {
-            RuntimeInput::Command(Some(RuntimeCommand::Shutdown) | None) => break,
-            RuntimeInput::Command(Some(RuntimeCommand::WatchScreen { peer, path })) => {
-                start_watch(
-                    &mut snapshot,
-                    StartWatch {
-                        services: &services,
-                        playback: &mut playback,
-                        events: &playback_events_tx,
-                        frames: &frames,
-                        wake: &wake,
-                        peer_id: peer,
-                        path,
-                    },
-                );
-                false
-            }
-            RuntimeInput::Command(Some(RuntimeCommand::StopWatching)) => {
-                stop_watch(&mut snapshot, &mut playback, &frames).await;
-                false
-            }
-            RuntimeInput::Command(Some(RuntimeCommand::SelectShareSource(selection))) => {
-                snapshot.select_share_source(selection);
-                false
-            }
-            RuntimeInput::Command(Some(RuntimeCommand::SetShareSystemAudio(enabled))) => {
-                snapshot.set_share_system_audio(enabled);
-                false
-            }
-            RuntimeInput::Command(Some(RuntimeCommand::StartSharing)) => {
-                start_share(&mut snapshot, &services, &mut publication);
-                false
-            }
-            RuntimeInput::Command(Some(RuntimeCommand::StopSharing)) => {
-                stop_share(&mut snapshot, &mut publication);
-                false
-            }
-            RuntimeInput::Network(Some(event)) => {
-                apply_network_event(
-                    &mut snapshot,
-                    discovery_generation,
-                    session_generation,
-                    event,
-                );
-                refresh_discovery_result(&mut snapshot, discovery_generation, scan_finished);
-                false
-            }
-            RuntimeInput::Network(None) => {
-                snapshot
-                    .discovery
-                    .apply(discovery_generation, DiscoveryPhase::Failed);
-                snapshot
-                    .session
-                    .apply(session_generation, SessionPhase::Failed);
-                snapshot.nearby_issue = Some(NearbyIssue::ListenerStopped);
-                true
-            }
-            RuntimeInput::Playback(Some(event)) => {
-                apply_playback_event(&mut snapshot, &frames, event);
-                false
-            }
-            RuntimeInput::Playback(None) => false,
-            RuntimeInput::Publication(event) => {
-                apply_publication_event(&mut snapshot, event);
-                false
-            }
-            RuntimeInput::InitialScanFinished => {
-                scan_finished = true;
-                let phase = if snapshot.peers.values().any(|peer| peer.discovered) {
-                    DiscoveryPhase::Ready
-                } else {
-                    DiscoveryPhase::Empty
-                };
-                snapshot.discovery.apply(discovery_generation, phase);
-                false
-            }
-        };
-        if snapshot != previous {
-            publish_snapshot(&snapshot_tx, &snapshot, &wake);
+        snapshot
+            .discovery
+            .apply(generations.discovery, DiscoveryPhase::Scanning);
+        snapshot
+            .session
+            .apply(generations.session, SessionPhase::Listening);
+        snapshot.nearby_issue = None;
+        publish_snapshot(&snapshot_tx, &snapshot, &wake);
+
+        let action = ServiceRun {
+            commands: &mut commands,
+            snapshot: &mut snapshot,
+            services: &mut services,
+            generations,
+            playback: &mut playback,
+            playback_events_tx: &playback_events_tx,
+            playback_events: &mut playback_events,
+            publication: &mut publication,
+            frames: &frames,
+            snapshot_tx: &snapshot_tx,
+            wake: &wake,
         }
-        if network_exhausted {
-            break;
+        .run()
+        .await;
+        teardown_media(&mut snapshot, &mut playback, &mut publication, &frames).await;
+        services.shutdown().await;
+
+        match action {
+            RecoveryAction::Shutdown => {
+                stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
+                return;
+            }
+            RecoveryAction::Restart => {
+                tracing::info!("restarting Nearby network services");
+                continue;
+            }
+            RecoveryAction::Failed => {
+                tracing::warn!("Nearby network services ended; waiting for explicit restart");
+                mark_network_failed(&mut snapshot, generations, NearbyIssue::ServicesStopped);
+                publish_snapshot(&snapshot_tx, &snapshot, &wake);
+                match wait_for_network_restart(&mut commands).await {
+                    RecoveryAction::Restart => continue,
+                    RecoveryAction::Shutdown => {
+                        stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
+                        return;
+                    }
+                    RecoveryAction::Failed => unreachable!(),
+                }
+            }
         }
     }
+}
 
-    playback.stop().await;
+#[derive(Clone, Copy)]
+struct NetworkGenerations {
+    discovery: Generation,
+    session: Generation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoveryAction {
+    Restart,
+    Shutdown,
+    Failed,
+}
+
+fn begin_network_start(snapshot: &mut AppSnapshot) -> NetworkGenerations {
+    snapshot.peers.clear();
+    snapshot.remote_screens.clear();
+    snapshot.inbound_sessions = 0;
+    snapshot.nearby_issue = None;
+    NetworkGenerations {
+        discovery: snapshot.discovery.begin(DiscoveryPhase::Starting),
+        session: snapshot.session.begin(SessionPhase::Starting),
+    }
+}
+
+fn mark_network_failed(
+    snapshot: &mut AppSnapshot,
+    generations: NetworkGenerations,
+    issue: NearbyIssue,
+) -> bool {
+    if snapshot.discovery.generation() != generations.discovery
+        || snapshot.session.generation() != generations.session
+    {
+        return false;
+    }
+    snapshot.peers.clear();
+    snapshot.remote_screens.clear();
+    snapshot.inbound_sessions = 0;
+    snapshot
+        .discovery
+        .apply(generations.discovery, DiscoveryPhase::Failed);
+    snapshot
+        .session
+        .apply(generations.session, SessionPhase::Failed);
+    snapshot.nearby_issue = Some(issue);
+    true
+}
+
+async fn wait_for_network_restart(commands: &mut mpsc::Receiver<RuntimeCommand>) -> RecoveryAction {
+    loop {
+        match commands.recv().await {
+            Some(RuntimeCommand::RestartNetwork) => return RecoveryAction::Restart,
+            Some(RuntimeCommand::Shutdown) | None => return RecoveryAction::Shutdown,
+            Some(_) => {}
+        }
+    }
+}
+
+struct ServiceRun<'a> {
+    commands: &'a mut mpsc::Receiver<RuntimeCommand>,
+    snapshot: &'a mut AppSnapshot,
+    services: &'a mut network::Services,
+    generations: NetworkGenerations,
+    playback: &'a mut playback::Owner,
+    playback_events_tx: &'a mpsc::Sender<PlaybackEvent>,
+    playback_events: &'a mut mpsc::Receiver<PlaybackEvent>,
+    publication: &'a mut publication::Owner,
+    frames: &'a watch::Sender<Option<Arc<PlaybackFrame>>>,
+    snapshot_tx: &'a watch::Sender<Arc<AppSnapshot>>,
+    wake: &'a Arc<dyn Fn() + Send + Sync>,
+}
+
+impl ServiceRun<'_> {
+    async fn run(&mut self) -> RecoveryAction {
+        let mut initial_scan = Box::pin(tokio::time::sleep(Duration::from_secs(3)));
+        let mut scan_finished = false;
+        loop {
+            let input = if scan_finished {
+                tokio::select! {
+                    command = self.commands.recv() => RuntimeInput::Command(command),
+                    event = self.services.recv() => RuntimeInput::Network(event),
+                    event = self.playback_events.recv() => RuntimeInput::Playback(event),
+                    event = self.publication.recv() => RuntimeInput::Publication(event),
+                }
+            } else {
+                tokio::select! {
+                    command = self.commands.recv() => RuntimeInput::Command(command),
+                    event = self.services.recv() => RuntimeInput::Network(event),
+                    event = self.playback_events.recv() => RuntimeInput::Playback(event),
+                    event = self.publication.recv() => RuntimeInput::Publication(event),
+                    () = &mut initial_scan => RuntimeInput::InitialScanFinished,
+                }
+            };
+
+            let previous = self.snapshot.clone();
+            let action = match input {
+                RuntimeInput::Command(Some(RuntimeCommand::Shutdown) | None) => {
+                    Some(RecoveryAction::Shutdown)
+                }
+                RuntimeInput::Command(Some(RuntimeCommand::RestartNetwork)) => {
+                    Some(RecoveryAction::Restart)
+                }
+                RuntimeInput::Command(Some(RuntimeCommand::WatchScreen { peer, path })) => {
+                    start_watch(
+                        self.snapshot,
+                        StartWatch {
+                            services: self.services,
+                            playback: self.playback,
+                            events: self.playback_events_tx,
+                            frames: self.frames,
+                            wake: self.wake,
+                            peer_id: peer,
+                            path,
+                        },
+                    );
+                    None
+                }
+                RuntimeInput::Command(Some(RuntimeCommand::StopWatching)) => {
+                    stop_watch(self.snapshot, self.playback, self.frames).await;
+                    None
+                }
+                RuntimeInput::Command(Some(RuntimeCommand::SelectShareSource(selection))) => {
+                    self.snapshot.select_share_source(selection);
+                    None
+                }
+                RuntimeInput::Command(Some(RuntimeCommand::SetShareSystemAudio(enabled))) => {
+                    self.snapshot.set_share_system_audio(enabled);
+                    None
+                }
+                RuntimeInput::Command(Some(RuntimeCommand::StartSharing)) => {
+                    start_share(self.snapshot, self.services, self.publication);
+                    None
+                }
+                RuntimeInput::Command(Some(RuntimeCommand::StopSharing)) => {
+                    stop_share(self.snapshot, self.publication);
+                    None
+                }
+                RuntimeInput::Network(Some(event)) => {
+                    apply_network_event(
+                        self.snapshot,
+                        self.generations.discovery,
+                        self.generations.session,
+                        event,
+                    );
+                    refresh_discovery_result(
+                        self.snapshot,
+                        self.generations.discovery,
+                        scan_finished,
+                    );
+                    None
+                }
+                RuntimeInput::Network(None) => Some(RecoveryAction::Failed),
+                RuntimeInput::Playback(Some(event)) => {
+                    apply_playback_event(self.snapshot, self.frames, event);
+                    None
+                }
+                RuntimeInput::Playback(None) => None,
+                RuntimeInput::Publication(event) => {
+                    apply_publication_event(self.snapshot, event);
+                    None
+                }
+                RuntimeInput::InitialScanFinished => {
+                    scan_finished = true;
+                    let phase = if self.snapshot.peers.values().any(|peer| peer.discovered) {
+                        DiscoveryPhase::Ready
+                    } else {
+                        DiscoveryPhase::Empty
+                    };
+                    self.snapshot
+                        .discovery
+                        .apply(self.generations.discovery, phase);
+                    None
+                }
+            };
+            if *self.snapshot != previous {
+                publish_snapshot(self.snapshot_tx, self.snapshot, self.wake);
+            }
+            if let Some(action) = action {
+                return action;
+            }
+        }
+    }
+}
+
+async fn teardown_media(
+    snapshot: &mut AppSnapshot,
+    playback: &mut playback::Owner,
+    publication: &mut publication::Owner,
+    frames: &watch::Sender<Option<Arc<PlaybackFrame>>>,
+) {
+    snapshot.clear_media(MediaPhase::Idle, None);
     publication.stop();
+    playback.stop().await;
     frames.send_replace(None);
-    services.shutdown().await;
-    stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
 }
 
 enum RuntimeInput {
@@ -1156,13 +1313,9 @@ mod tests {
                 let (snapshot_tx, mut snapshot_rx) =
                     watch::channel(Arc::new(AppSnapshot::default()));
                 let (frames, _) = watch::channel(None);
-                let owner = run(
-                    command_rx,
-                    snapshot_tx,
-                    frames,
-                    async { Err(NearbyIssue::LocalNetworkUnavailable) },
-                    Arc::new(|| {}),
-                );
+                let start: NetworkStart =
+                    Arc::new(|| Box::pin(async { Err(NearbyIssue::LocalNetworkUnavailable) }));
+                let owner = run(command_rx, snapshot_tx, frames, start, Arc::new(|| {}));
                 let observe = async move {
                     loop {
                         snapshot_rx.changed().await.expect("startup snapshot");
@@ -1206,21 +1359,197 @@ mod tests {
     }
 
     #[test]
+    fn failed_network_owner_restarts_only_after_an_explicit_command() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let attempts = Arc::new(AtomicUsize::new(0));
+                let start: NetworkStart = {
+                    let attempts = attempts.clone();
+                    Arc::new(move || {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        Box::pin(async { Err(NearbyIssue::LocalNetworkUnavailable) })
+                    })
+                };
+                let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
+                let (snapshot_tx, mut snapshot_rx) =
+                    watch::channel(Arc::new(AppSnapshot::default()));
+                let (frames, _) = watch::channel(None);
+                let owner = run(command_rx, snapshot_tx, frames, start, Arc::new(|| {}));
+                let observe = async move {
+                    loop {
+                        snapshot_rx.changed().await.expect("first failure");
+                        if snapshot_rx.borrow().discovery.phase() == DiscoveryPhase::Failed {
+                            break;
+                        }
+                    }
+                    let first_generation = snapshot_rx.borrow().discovery.generation();
+                    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+                    commands
+                        .send(RuntimeCommand::RestartNetwork)
+                        .await
+                        .expect("restart command");
+                    loop {
+                        snapshot_rx.changed().await.expect("second failure");
+                        let snapshot = snapshot_rx.borrow();
+                        if snapshot.discovery.phase() == DiscoveryPhase::Failed
+                            && snapshot.discovery.generation() != first_generation
+                        {
+                            break;
+                        }
+                    }
+                    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+                    commands
+                        .send(RuntimeCommand::Shutdown)
+                        .await
+                        .expect("shutdown command");
+                };
+                tokio::join!(owner, observe);
+            });
+    }
+
+    #[test]
+    fn shutdown_waits_for_the_current_start_owner_to_drop() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc as std_mpsc;
+
+        struct DropSignal(Arc<AtomicBool>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut runtime = RuntimeOwner::start_with(
+            {
+                let dropped = dropped.clone();
+                move || {
+                    let entered_tx = entered_tx.clone();
+                    let dropped = dropped.clone();
+                    async move {
+                        let _drop = DropSignal(dropped);
+                        entered_tx.send(()).expect("start entered");
+                        std::future::pending::<Result<network::Services, NearbyIssue>>().await
+                    }
+                }
+            },
+            || {},
+        )
+        .expect("runtime starts");
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("start future was polled");
+
+        runtime.shutdown();
+
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(runtime.snapshot().runtime.phase(), RuntimePhase::Stopped);
+    }
+
+    #[test]
+    fn restart_drops_a_pending_start_and_advances_network_generation() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::mpsc as std_mpsc;
+
+        struct DropSignal(Arc<AtomicBool>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let first_dropped = Arc::new(AtomicBool::new(false));
+        let (first_entered_tx, first_entered_rx) = std_mpsc::channel();
+        let (second_started_tx, second_started_rx) = std_mpsc::channel();
+        let (wake_tx, wake_rx) = std_mpsc::channel();
+        let mut runtime = RuntimeOwner::start_with(
+            {
+                let attempts = attempts.clone();
+                let first_dropped = first_dropped.clone();
+                move || {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    let first_dropped = first_dropped.clone();
+                    let first_entered_tx = first_entered_tx.clone();
+                    let second_started_tx = second_started_tx.clone();
+                    async move {
+                        if attempt == 0 {
+                            let _drop = DropSignal(first_dropped);
+                            first_entered_tx.send(()).expect("first start entered");
+                            std::future::pending::<()>().await;
+                            unreachable!();
+                        }
+                        second_started_tx.send(()).expect("second start invoked");
+                        Err(NearbyIssue::LocalNetworkUnavailable)
+                    }
+                }
+            },
+            move || {
+                let _ = wake_tx.send(());
+            },
+        )
+        .expect("runtime starts");
+        first_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first start future was polled");
+        let first_generation = runtime.snapshot().discovery.generation();
+
+        assert!(runtime.restart_network());
+        second_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("restart invoked the factory again");
+        while runtime.snapshot().discovery.phase() != DiscoveryPhase::Failed {
+            wake_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("restart snapshot");
+        }
+
+        assert!(first_dropped.load(Ordering::SeqCst));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_ne!(runtime.snapshot().discovery.generation(), first_generation);
+        runtime.shutdown();
+    }
+
+    #[test]
     fn stale_network_generation_cannot_mutate_snapshot() {
         let mut snapshot = AppSnapshot::default();
-        let stale_discovery = snapshot.discovery.begin(DiscoveryPhase::Scanning);
-        let stale_session = snapshot.session.begin(SessionPhase::Listening);
-        snapshot.discovery.begin(DiscoveryPhase::Starting);
-        snapshot.session.begin(SessionPhase::Starting);
+        let stale = begin_network_start(&mut snapshot);
+        apply_network_event(
+            &mut snapshot,
+            stale.discovery,
+            stale.session,
+            NetworkEvent::InboundCount(4),
+        );
+        assert_eq!(snapshot.inbound_sessions, 4);
+
+        let current = begin_network_start(&mut snapshot);
+        snapshot.inbound_sessions = 2;
+        assert!(!mark_network_failed(
+            &mut snapshot,
+            stale,
+            NearbyIssue::ServicesStopped,
+        ));
 
         apply_network_event(
             &mut snapshot,
-            stale_discovery,
-            stale_session,
-            NetworkEvent::InboundCount(4),
+            stale.discovery,
+            stale.session,
+            NetworkEvent::InboundCount(9),
         );
 
-        assert_eq!(snapshot.inbound_sessions, 0);
+        assert_eq!(snapshot.inbound_sessions, 2);
+        assert_eq!(snapshot.discovery.phase(), DiscoveryPhase::Starting);
+        assert_eq!(snapshot.session.phase(), SessionPhase::Starting);
+        assert_eq!(snapshot.discovery.generation(), current.discovery);
+        assert_eq!(snapshot.session.generation(), current.session);
     }
 
     #[test]

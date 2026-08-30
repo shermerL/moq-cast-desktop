@@ -343,6 +343,25 @@ impl MoqCastApp {
 
         if let Some(issue) = snapshot.nearby_issue {
             issue_notice(ui, issue, self.locale);
+            let placeholder_has_retry = snapshot.peers.is_empty()
+                && matches!(
+                    snapshot.discovery.phase(),
+                    DiscoveryPhase::Failed | DiscoveryPhase::Stopped
+                );
+            if !placeholder_has_retry
+                && matches!(
+                    issue,
+                    NearbyIssue::DiscoveryStopped | NearbyIssue::ListenerStopped
+                )
+            {
+                ui.add_space(8.0);
+                if ui
+                    .button(self.text("重新启动附近设备服务", "Restart Nearby services"))
+                    .clicked()
+                {
+                    self.runtime.restart_network();
+                }
+            }
             ui.add_space(12.0);
         }
 
@@ -376,22 +395,20 @@ impl MoqCastApp {
                     ),
                 );
             }
-            DiscoveryPhase::Failed if snapshot.peers.is_empty() => self.placeholder(
+            DiscoveryPhase::Failed if snapshot.peers.is_empty() => self.recovery_placeholder(
                 ui,
-                false,
                 self.text("无法搜索本地网络", "Could not search the local network"),
                 self.text(
-                    "请检查本地网络权限，然后重新打开 MoQCast。",
-                    "Check Local Network permission, then reopen MoQCast.",
+                    "请检查本地网络权限，然后重试。",
+                    "Check Local Network permission, then try again.",
                 ),
             ),
-            DiscoveryPhase::Stopped if snapshot.peers.is_empty() => self.placeholder(
+            DiscoveryPhase::Stopped if snapshot.peers.is_empty() => self.recovery_placeholder(
                 ui,
-                false,
                 self.text("附近设备服务已停止", "Nearby services stopped"),
                 self.text(
-                    "关闭并重新打开 MoQCast 以恢复扫描。",
-                    "Close and reopen MoQCast to resume scanning.",
+                    "可以重新启动附近设备服务。",
+                    "Nearby services can be started again.",
                 ),
             ),
             _ => self.device_workspace(ui, snapshot),
@@ -443,6 +460,29 @@ impl MoqCastApp {
                     }
                     ui.label(RichText::new(title).size(16.0).strong());
                     ui.label(RichText::new(body).small().color(theme::MUTED));
+                });
+            });
+    }
+
+    fn recovery_placeholder(&mut self, ui: &mut egui::Ui, title: &str, body: &str) {
+        Frame::NONE
+            .inner_margin(Margin::symmetric(24, 24))
+            .show(ui, |ui| {
+                ui.set_min_height(172.0);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(28.0);
+                    ui.label(RichText::new(title).size(16.0).strong());
+                    ui.label(RichText::new(body).small().color(theme::MUTED));
+                    ui.add_space(12.0);
+                    if ui
+                        .add_sized(
+                            [132.0, 36.0],
+                            egui::Button::new(self.text("重试", "Try Again")),
+                        )
+                        .clicked()
+                    {
+                        self.runtime.restart_network();
+                    }
                 });
             });
     }
@@ -992,6 +1032,10 @@ impl eframe::App for MoqCastApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(STORAGE_LOCALE, self.locale.stored().to_owned());
     }
+
+    fn on_exit(&mut self) {
+        self.runtime.shutdown();
+    }
 }
 
 fn text(locale: Locale, chinese: &'static str, english: &'static str) -> &'static str {
@@ -1082,6 +1126,11 @@ fn issue_notice(ui: &mut egui::Ui, issue: NearbyIssue, locale: Locale) {
             locale,
             "无法接受新的安全连接；现有设备结果仍会保留。",
             "New secure sessions cannot be accepted; existing device results remain visible.",
+        ),
+        NearbyIssue::ServicesStopped => text(
+            locale,
+            "附近设备服务已结束。可以重试恢复扫描与安全连接。",
+            "Nearby services ended. Try again to restore scanning and secure connections.",
         ),
         NearbyIssue::DeviceRejected => text(
             locale,
