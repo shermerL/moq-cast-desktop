@@ -1,13 +1,16 @@
 //! Cross-platform MoQCast protocol and product contract.
 
+#[cfg(test)]
 pub(crate) const SERVICE_TYPE: &str = "_moq._udp.local.";
 pub(crate) const CLUSTER_PATH_PREFIX: &str = "/.cluster/";
+#[cfg(test)]
 pub(crate) const SCREEN_PATH_PREFIX: &str = "moqcast.screen/";
 
 pub(crate) fn cluster_path(credential: &str) -> String {
     format!("{CLUSTER_PATH_PREFIX}{credential}")
 }
 
+#[cfg(test)]
 pub(crate) fn screen_path(peer_id: &str) -> String {
     format!("{SCREEN_PATH_PREFIX}{peer_id}")
 }

@@ -2,8 +2,12 @@
 
 #[cfg(feature = "app")]
 mod app;
+#[cfg(test)]
 mod build_info;
 mod contract;
+#[cfg(feature = "network")]
+mod network;
+#[cfg(feature = "network")]
 mod runtime;
 
 /// Start the native MoQCast macOS application.
@@ -11,18 +15,13 @@ mod runtime;
 pub fn run() -> anyhow::Result<()> {
     use eframe::egui;
 
-    let build = build_info::BuildInfo::current();
     let _ = tracing_subscriber::fmt()
         .with_target(true)
         .with_thread_names(true)
         .try_init();
     tracing::info!(
         stage = "startup",
-        version = build.version,
-        build_identity = build.build_identity,
-        source_identity = build.source_identity,
-        dependency_identity = build.dependency_identity,
-        minimum_macos = build_info::MINIMUM_MACOS,
+        version = env!("CARGO_PKG_VERSION"),
         "MoQCast macOS starting"
     );
 

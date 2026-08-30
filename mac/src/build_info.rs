@@ -73,6 +73,17 @@ mod tests {
             .as_array()
             .expect("foundation feature array");
         assert_foundation_feature(foundation);
+
+        let network = manifest["features"]["network"]
+            .as_array()
+            .expect("network feature array");
+        assert_eq!(
+            network
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>(),
+            ["dep:moq-tokio", "dep:url"]
+        );
         assert!(PACKAGE_SCRIPT.contains(MOQ_DEPENDENCY_IDENTITY));
     }
 
@@ -108,10 +119,12 @@ mod tests {
             .iter()
             .filter_map(|value| value.as_str())
             .collect::<Vec<_>>();
-        let expected = MOQ_DEPENDENCIES
+        let mut expected = MOQ_DEPENDENCIES
             .iter()
+            .filter(|dependency| **dependency != "moq-tokio")
             .map(|dependency| format!("dep:{dependency}"))
             .collect::<Vec<_>>();
+        expected.insert(0, "network".to_owned());
         assert_eq!(actual, expected);
     }
 }
