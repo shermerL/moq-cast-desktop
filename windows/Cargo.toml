@@ -1,7 +1,7 @@
 [package]
 name = "moqcast-windows"
 description = "Native Windows desktop application for MoQCast"
-version = "0.4.1-dev.3"
+version = "0.4.1-dev.4"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
