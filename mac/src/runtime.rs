@@ -177,6 +177,15 @@ impl Default for AppSnapshot {
 }
 
 impl AppSnapshot {
+    pub(crate) fn can_watch(&self, peer: &str, path: &str) -> bool {
+        self.media.phase() == MediaPhase::Idle
+            && self.peers.contains_key(peer)
+            && path == crate::contract::screen_path(peer)
+            && self.remote_screens.get(path).is_some_and(|screen| {
+                screen.peer_id == peer && screen.availability == ScreenAvailability::Available
+            })
+    }
+
     fn begin_watch(&mut self, peer: &str, path: &str) -> Option<Generation> {
         if self.media.phase() != MediaPhase::Idle {
             return None;
@@ -529,17 +538,7 @@ struct StartWatch<'a> {
 }
 
 fn start_watch(snapshot: &mut AppSnapshot, start: StartWatch<'_>) {
-    let peer_ready = snapshot
-        .peers
-        .get(&start.peer_id)
-        .is_some_and(|peer| peer.session == PeerSession::Connected);
-    let screen_ready = snapshot
-        .remote_screens
-        .get(&start.path)
-        .is_some_and(|screen| {
-            screen.peer_id == start.peer_id && screen.availability == ScreenAvailability::Available
-        });
-    if !peer_ready || !screen_ready {
+    if !snapshot.can_watch(&start.peer_id, &start.path) {
         return;
     }
     let Some(broadcast) = start.services.remote_broadcast(&start.path) else {
@@ -900,6 +899,55 @@ mod tests {
             snapshot.remote_screens["moqcast.screen/internal-peer"].availability,
             ScreenAvailability::Available
         );
+    }
+
+    #[test]
+    fn waiting_peer_with_available_screen_can_watch() {
+        let mut snapshot = AppSnapshot::default();
+        snapshot.peers.insert(
+            "passive-peer".to_owned(),
+            PeerSnapshot {
+                ordinal: 1,
+                discovered: true,
+                session: PeerSession::Waiting,
+            },
+        );
+        let path = crate::contract::screen_path("passive-peer");
+        snapshot.remote_screens.insert(
+            path.clone(),
+            ScreenView {
+                peer_id: "passive-peer".to_owned(),
+                availability: ScreenAvailability::Available,
+            },
+        );
+
+        assert!(snapshot.can_watch("passive-peer", &path));
+        assert_eq!(snapshot.peers["passive-peer"].session, PeerSession::Waiting);
+    }
+
+    #[test]
+    fn peer_without_available_screen_cannot_watch() {
+        let mut snapshot = AppSnapshot::default();
+        snapshot.peers.insert(
+            "passive-peer".to_owned(),
+            PeerSnapshot {
+                ordinal: 1,
+                discovered: true,
+                session: PeerSession::Waiting,
+            },
+        );
+        let path = crate::contract::screen_path("passive-peer");
+
+        assert!(!snapshot.can_watch("passive-peer", &path));
+
+        snapshot.remote_screens.insert(
+            path.clone(),
+            ScreenView {
+                peer_id: "passive-peer".to_owned(),
+                availability: ScreenAvailability::Unavailable,
+            },
+        );
+        assert!(!snapshot.can_watch("passive-peer", &path));
     }
 
     #[test]

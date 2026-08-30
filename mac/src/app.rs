@@ -493,10 +493,7 @@ impl MoqCastApp {
                     },
                     None,
                 );
-                if peer.session == PeerSession::Connected
-                    && screen == ScreenAvailability::Available
-                    && snapshot.media.phase() == MediaPhase::Idle
-                {
+                if snapshot.can_watch(peer_id, &screen_path) {
                     ui.add_space(14.0);
                     let watch = ui.add_sized(
                         [ui.available_width(), 36.0],
