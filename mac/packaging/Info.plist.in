@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>MoQCast</string>
+    <key>CFBundleExecutable</key>
+    <string>moqcast-macos</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.moq.moqcast.macos</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>MoQCast</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__MARKETING_VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__BUILD_VERSION__</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>MacOSX</string>
+    </array>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.2</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>MoQCast captures system audio only when you choose to share it with a nearby device.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_moq._udp</string>
+    </array>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>MoQCast discovers and connects directly to devices on your local network.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>MoQCast captures the screen only when you choose to share it with a nearby device.</string>
+</dict>
+</plist>

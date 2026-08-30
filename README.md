@@ -1,8 +1,8 @@
 # MoQCast Desktop
 
-MoQCast Desktop 是基于 Media over QUIC 的局域网投屏应用，支持 Linux 和 Windows。
+MoQCast Desktop 是基于 Media over QUIC 的局域网投屏应用，支持 Linux 和 Windows。macOS 原生端正在建立基础能力，尚未发布可用版本。
 
-MoQCast Desktop is a LAN screen-sharing application for Linux and Windows, built with Media over QUIC.
+MoQCast Desktop is a LAN screen-sharing application for Linux and Windows, built with Media over QUIC. The native macOS app is at the foundation stage and does not have a usable release yet.
 
 > 当前为开发预发布版本。This project is currently a development prerelease.
 
@@ -31,11 +31,15 @@ cargo run --locked --release
 # Windows PowerShell
 cd windows
 cargo run --locked --release
+
+# macOS foundation, media is not implemented yet
+cd mac
+cargo run --locked
 ```
 
-平台说明见 [Linux](linux/README.md) 和 [Windows](windows/README.md)。
+平台说明见 [Linux](linux/README.md)、[Windows](windows/README.md) 和 [macOS](mac/README.md)。
 
-See the platform notes for [Linux](linux/README.md) and [Windows](windows/README.md).
+See the platform notes for [Linux](linux/README.md), [Windows](windows/README.md), and [macOS](mac/README.md).
 
 ## MoQTCast Lite for Windows
 
