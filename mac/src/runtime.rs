@@ -169,6 +169,7 @@ pub(crate) struct AppSnapshot {
     pub(crate) share_system_audio: bool,
     pub(crate) share_audio: ShareAudioPhase,
     pub(crate) share_audio_error: Option<String>,
+    pub(crate) watch_audio: playback::AudioSnapshot,
     pub(crate) media_decoder: Option<String>,
     pub(crate) media_width: Option<u32>,
     pub(crate) media_height: Option<u32>,
@@ -196,6 +197,7 @@ impl Default for AppSnapshot {
             share_system_audio: false,
             share_audio: ShareAudioPhase::Off,
             share_audio_error: None,
+            watch_audio: playback::AudioSnapshot::default(),
             media_decoder: None,
             media_width: None,
             media_height: None,
@@ -226,6 +228,7 @@ impl AppSnapshot {
         self.media_width = None;
         self.media_height = None;
         self.media_error = None;
+        self.watch_audio = playback::AudioSnapshot::default();
         Some(generation)
     }
 
@@ -269,8 +272,27 @@ impl AppSnapshot {
                 self.media_width = None;
                 self.media_height = None;
                 self.media_error = Some(error);
+                self.watch_audio = playback::AudioSnapshot::default();
             }
         }
+        true
+    }
+
+    fn playback_audio_changed(
+        &mut self,
+        generation: Generation,
+        audio: playback::AudioSnapshot,
+    ) -> bool {
+        if self.media_owner != Some(MediaOwner::Watch)
+            || self.media.generation() != generation
+            || !matches!(
+                self.media.phase(),
+                MediaPhase::PreparingWatch | MediaPhase::Watching
+            )
+        {
+            return false;
+        }
+        self.watch_audio = audio;
         true
     }
 
@@ -457,6 +479,7 @@ impl AppSnapshot {
         self.media_width = None;
         self.media_height = None;
         self.media_error = error;
+        self.watch_audio = playback::AudioSnapshot::default();
     }
 
     fn reset_share_audio(&mut self) {
@@ -800,6 +823,7 @@ fn start_watch(snapshot: &mut AppSnapshot, start: StartWatch<'_>) {
     start.frames.send_replace(None);
     start.playback.start(
         generation.value(),
+        start.path,
         broadcast,
         start.events.clone(),
         start.frames.clone(),
@@ -923,6 +947,34 @@ fn apply_playback_event(
                     width,
                     height,
                     "remote screen playback started"
+                );
+            }
+        }
+        PlaybackEvent::Audio {
+            generation,
+            snapshot: audio,
+        } => {
+            let generation = Generation(generation);
+            if snapshot.playback_audio_changed(generation, audio.clone()) {
+                match audio.phase {
+                    playback::AudioPhase::NoAudio => tracing::debug!(
+                        view_generation = generation.value(),
+                        "remote screen has no audio; video playback continues"
+                    ),
+                    playback::AudioPhase::Failed => tracing::warn!(
+                        view_generation = generation.value(),
+                        error = audio
+                            .last_error
+                            .as_deref()
+                            .unwrap_or("remote audio unavailable"),
+                        "remote audio unavailable; video playback continues"
+                    ),
+                    _ => {}
+                }
+            } else {
+                tracing::debug!(
+                    view_generation = generation.value(),
+                    "ignored stale remote audio state"
                 );
             }
         }
@@ -1303,6 +1355,57 @@ mod tests {
     }
 
     #[test]
+    fn remote_audio_failure_does_not_end_healthy_video_playback() {
+        let mut snapshot = AppSnapshot::default();
+        let generation = snapshot
+            .begin_watch("peer", "moqcast.screen/peer")
+            .expect("view");
+        assert!(snapshot.playback_started(generation, "videotoolbox".to_owned(), 640, 360,));
+
+        assert!(snapshot.playback_audio_changed(
+            generation,
+            playback::AudioSnapshot {
+                phase: playback::AudioPhase::Failed,
+                last_error: Some("default output unavailable".to_owned()),
+                ..playback::AudioSnapshot::default()
+            },
+        ));
+
+        assert_eq!(snapshot.media.phase(), MediaPhase::Watching);
+        assert_eq!(snapshot.media_decoder.as_deref(), Some("videotoolbox"));
+        assert_eq!(snapshot.watch_audio.phase, playback::AudioPhase::Failed);
+    }
+
+    #[test]
+    fn stale_remote_audio_cannot_override_a_new_watch() {
+        let mut snapshot = AppSnapshot::default();
+        let first = snapshot
+            .begin_watch("peer", "moqcast.screen/peer")
+            .expect("first view");
+        let stopping = snapshot.begin_stop_watch().expect("stop first view");
+        assert!(snapshot.finish_stop_media(stopping));
+        let second = snapshot
+            .begin_watch("peer", "moqcast.screen/peer")
+            .expect("second view");
+
+        assert!(!snapshot.playback_audio_changed(
+            first,
+            playback::AudioSnapshot {
+                phase: playback::AudioPhase::NoAudio,
+                ..playback::AudioSnapshot::default()
+            },
+        ));
+        assert!(snapshot.playback_audio_changed(
+            second,
+            playback::AudioSnapshot {
+                phase: playback::AudioPhase::Pending,
+                ..playback::AudioSnapshot::default()
+            },
+        ));
+        assert_eq!(snapshot.watch_audio.phase, playback::AudioPhase::Pending);
+    }
+
+    #[test]
     fn failed_watch_requires_stop_before_retry() {
         let mut snapshot = AppSnapshot::default();
         let generation = snapshot
@@ -1340,6 +1443,14 @@ mod tests {
         snapshot
             .begin_watch("peer", "moqcast.screen/peer")
             .expect("view");
+        snapshot.watch_audio = playback::AudioSnapshot {
+            phase: playback::AudioPhase::PcmSubmitted,
+            track: Some("audio".to_owned()),
+            codec: Some("opus".to_owned()),
+            sample_rate: Some(48_000),
+            channels: Some(2),
+            last_error: None,
+        };
         let stopping = snapshot.begin_stop_watch().expect("stop");
         assert!(snapshot.finish_stop_media(stopping));
 
@@ -1347,6 +1458,7 @@ mod tests {
         assert_eq!(snapshot.peers["peer"].session, PeerSession::Connected);
         assert!(snapshot.share_system_audio);
         assert_eq!(snapshot.share_audio, ShareAudioPhase::Off);
+        assert_eq!(snapshot.watch_audio, playback::AudioSnapshot::default());
     }
 
     fn display_selection() -> ShareSelection {

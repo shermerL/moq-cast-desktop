@@ -1,4 +1,6 @@
-//! Catalog-driven H.264 playback and decoded-frame delivery.
+//! Catalog-driven H.264 and Opus playback with decoded-frame delivery.
+
+mod audio;
 
 use std::sync::Arc;
 
@@ -30,35 +32,91 @@ pub(crate) enum Event {
         width: u32,
         height: u32,
     },
+    Audio {
+        generation: u64,
+        snapshot: AudioSnapshot,
+    },
     Ended {
         generation: u64,
         result: Result<(), String>,
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum AudioPhase {
+    #[default]
+    Idle,
+    Pending,
+    NoAudio,
+    TrackSelected,
+    PcmDecoded,
+    PcmSubmitted,
+    Failed,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AudioSnapshot {
+    pub(crate) phase: AudioPhase,
+    pub(crate) track: Option<String>,
+    pub(crate) codec: Option<String>,
+    pub(crate) sample_rate: Option<u32>,
+    pub(crate) channels: Option<u32>,
+    pub(crate) last_error: Option<String>,
+}
+
+impl AudioSnapshot {
+    fn pending() -> Self {
+        Self {
+            phase: AudioPhase::Pending,
+            ..Self::default()
+        }
+    }
+
+    fn no_audio() -> Self {
+        Self {
+            phase: AudioPhase::NoAudio,
+            ..Self::default()
+        }
+    }
+
+    fn failed(message: &str) -> Self {
+        Self {
+            phase: AudioPhase::Failed,
+            last_error: Some(message.to_owned()),
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Owner {
     task: Option<JoinHandle<()>>,
+    cancel: Option<watch::Sender<bool>>,
 }
 
 impl Owner {
     pub(crate) fn start(
         &mut self,
         generation: u64,
+        path: String,
         broadcast: moq_tokio::moq_net::broadcast::Consumer,
         events: mpsc::Sender<Event>,
         frames: watch::Sender<Option<Arc<Frame>>>,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) {
         debug_assert!(self.task.is_none());
+        let (cancel, cancelled) = watch::channel(false);
+        self.cancel = Some(cancel);
         self.task = Some(tokio::spawn(run(
-            generation, broadcast, events, frames, wake,
+            generation, path, broadcast, cancelled, events, frames, wake,
         )));
     }
 
     pub(crate) async fn stop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.send_replace(true);
+        }
         if let Some(task) = self.task.take() {
-            task.abort();
             let _ = task.await;
         }
     }
@@ -66,6 +124,9 @@ impl Owner {
 
 impl Drop for Owner {
     fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.send_replace(true);
+        }
         if let Some(task) = &self.task {
             task.abort();
         }
@@ -87,19 +148,19 @@ struct VideoIdentity {
 }
 
 #[derive(Clone, Debug)]
-struct Selection {
+struct VideoSelection {
     name: String,
     config: Box<hang::catalog::VideoConfig>,
     identity: VideoIdentity,
 }
 
-impl PartialEq for Selection {
+impl PartialEq for VideoSelection {
     fn eq(&self, other: &Self) -> bool {
         self.identity == other.identity
     }
 }
 
-impl Selection {
+impl VideoSelection {
     fn from_catalog(
         mut video: hang::catalog::Video,
         preferred: Option<&str>,
@@ -161,6 +222,45 @@ impl Selection {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct Selection {
+    video: Option<VideoSelection>,
+    audio: audio::Selection,
+}
+
+impl Selection {
+    fn from_catalog(
+        catalog: moq_mux::catalog::hang::Catalog<()>,
+        current: Option<&Self>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            video: VideoSelection::from_catalog(
+                catalog.video,
+                current.and_then(|selection| {
+                    selection.video.as_ref().map(|video| video.name.as_str())
+                }),
+            )?,
+            audio: audio::Selection::from_catalog(
+                catalog.audio,
+                current.and_then(|selection| selection.audio.name()),
+            ),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MediaChanges {
+    video: bool,
+    audio: bool,
+}
+
+fn media_changes(current: &Selection, next: &Selection, video_reader_active: bool) -> MediaChanges {
+    MediaChanges {
+        video: next.video != current.video || (next.video.is_some() && !video_reader_active),
+        audio: next.audio != current.audio,
+    }
+}
+
 fn supported_video(config: &hang::catalog::VideoConfig) -> bool {
     config.broadcast.is_none() && matches!(&config.codec, hang::catalog::VideoCodec::H264(_))
 }
@@ -213,6 +313,10 @@ struct VideoUpdate {
     event: VideoEvent,
 }
 
+fn accept_audio_update(current_generation: u64, update: audio::Update) -> Option<AudioSnapshot> {
+    (update.generation == current_generation).then_some(update.snapshot)
+}
+
 struct VideoTask {
     task: Option<JoinHandle<()>>,
 }
@@ -261,42 +365,76 @@ impl Drop for VideoTask {
     }
 }
 
+async fn wait_for_cancel(cancel: &mut watch::Receiver<bool>) {
+    if *cancel.borrow_and_update() {
+        return;
+    }
+    loop {
+        if cancel.changed().await.is_err() || *cancel.borrow_and_update() {
+            return;
+        }
+    }
+}
+
 async fn run(
     generation: u64,
+    path: String,
     broadcast: moq_tokio::moq_net::broadcast::Consumer,
+    cancel: watch::Receiver<bool>,
     events: mpsc::Sender<Event>,
     frames: watch::Sender<Option<Arc<Frame>>>,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) {
-    let result = run_inner(generation, broadcast, &events, &frames, &wake)
-        .await
-        .map_err(|error| error.to_string());
-    let _ = events.send(Event::Ended { generation, result }).await;
+    let stopped = cancel.clone();
+    let result = run_inner(
+        generation, &path, broadcast, cancel, &events, &frames, &wake,
+    )
+    .await
+    .map_err(|error| error.to_string());
+    let event = Event::Ended { generation, result };
+    if *stopped.borrow() {
+        let _ = events.try_send(event);
+    } else {
+        let _ = events.send(event).await;
+    }
 }
 
 async fn run_inner(
     generation: u64,
+    path: &str,
     broadcast: moq_tokio::moq_net::broadcast::Consumer,
+    mut cancel: watch::Receiver<bool>,
     events: &mpsc::Sender<Event>,
     frames: &watch::Sender<Option<Arc<Frame>>>,
     wake: &Arc<dyn Fn() + Send + Sync>,
 ) -> anyhow::Result<()> {
-    let mut catalog =
-        moq_mux::catalog::Consumer::<()>::new(&broadcast, moq_mux::catalog::CatalogFormat::Hang)
-            .await?;
-    let first = catalog
-        .next()
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("remote screen catalog ended"))?;
-    let mut selection = Selection::from_catalog(first.video, None)?;
+    let mut catalog = tokio::select! {
+        biased;
+        _ = wait_for_cancel(&mut cancel) => return Ok(()),
+        result = moq_mux::catalog::Consumer::<()>::new(
+            &broadcast,
+            moq_mux::catalog::CatalogFormat::Hang,
+        ) => result?,
+    };
+    let first = tokio::select! {
+        biased;
+        _ = wait_for_cancel(&mut cancel) => return Ok(()),
+        result = catalog.next() => result?
+            .ok_or_else(|| anyhow::anyhow!("remote screen catalog ended"))?,
+    };
+    let mut selection = Selection::from_catalog(first, None)?;
     let mut sequence = FrameSequence::new(generation);
     let (video_tx, mut video_rx) = mpsc::channel(1);
     let mut decoder_name = None;
     let mut video_task = None;
 
-    if let Some(video) = &selection {
+    if let Some(video) = &selection.video {
         sequence.replace_decoder();
-        let decoder = video.decoder(&broadcast).await?;
+        let decoder = tokio::select! {
+            biased;
+            _ = wait_for_cancel(&mut cancel) => return Ok(()),
+            result = video.decoder(&broadcast) => result?,
+        };
         decoder_name = Some(decoder.name().to_owned());
         tracing::info!(
             view_generation = generation,
@@ -310,83 +448,184 @@ async fn run_inner(
             decoder,
             &video_tx,
         ));
+    } else {
+        tracing::debug!(
+            view_generation = generation,
+            "waiting for a playable remote video rendition"
+        );
     }
 
-    loop {
-        tokio::select! {
-            biased;
-            update = catalog.next() => {
-                let Some(update) = update? else {
-                    anyhow::bail!("remote screen catalog ended");
-                };
-                let preferred = selection.as_ref().map(|video| video.name.as_str());
-                let next = Selection::from_catalog(update.video, preferred)?;
-                if next == selection && !(next.is_some() && video_task.is_none()) {
-                    continue;
+    let (audio_tx, mut audio_rx) = mpsc::channel(8);
+    let audio_engine = Arc::new(tokio::sync::OnceCell::new());
+    let mut audio_generation = 1_u64;
+    let mut audio_task = audio::Task::spawn(
+        audio_generation,
+        path,
+        &broadcast,
+        &selection.audio,
+        &audio_tx,
+        &audio_engine,
+    );
+
+    let result = async {
+        loop {
+            tokio::select! {
+                biased;
+                _ = wait_for_cancel(&mut cancel) => {
+                    tracing::debug!(
+                        view_generation = generation,
+                        "remote playback cancellation received"
+                    );
+                    break Ok(());
                 }
-                if let Some(mut task) = video_task.take() {
-                    task.stop().await;
-                }
-                sequence.replace_decoder();
-                decoder_name = None;
-                if let Some(video) = &next {
-                    let decoder = video.decoder(&broadcast).await?;
-                    decoder_name = Some(decoder.name().to_owned());
+                update = catalog.next() => {
+                    let Some(update) = update? else {
+                        anyhow::bail!("remote screen catalog ended");
+                    };
+                    let next = Selection::from_catalog(update, Some(&selection))?;
+                    let changes = media_changes(&selection, &next, video_task.is_some());
+                    if !changes.video && !changes.audio {
+                        selection = next;
+                        continue;
+                    }
+
                     tracing::info!(
                         view_generation = generation,
-                        decoder_generation = sequence.decoder_generation,
-                        decoder = decoder.name(),
-                        track = %video.name,
-                        "remote video decoder rebuilt after catalog change"
+                        video_changed = changes.video,
+                        audio_changed = changes.audio,
+                        old_video_track = %selection
+                            .video
+                            .as_ref()
+                            .map(|video| video.name.as_str())
+                            .unwrap_or("<none>"),
+                        new_video_track = %next
+                            .video
+                            .as_ref()
+                            .map(|video| video.name.as_str())
+                            .unwrap_or("<none>"),
+                        "remote screen catalog changed"
                     );
-                    video_task = Some(VideoTask::spawn(
-                        sequence.decoder_generation,
-                        decoder,
-                        &video_tx,
-                    ));
-                }
-                selection = next;
-            }
-            update = video_rx.recv(), if video_task.is_some() => {
-                let Some(update) = update else {
-                    anyhow::bail!("remote video reader stopped");
-                };
-                if update.generation != sequence.decoder_generation {
-                    continue;
-                }
-                match update.event {
-                    VideoEvent::Frame(decoded) => {
-                        let selected = selection.as_ref().expect("active decoder has a selection");
-                        let (identity, first_view_frame) = sequence.next();
-                        let display = selected.identity.display;
-                        let quarter_turns = selected.identity.quarter_turns;
-                        let flip = selected.identity.flip;
-                        let frame = tokio::task::spawn_blocking(move || {
-                            Frame::from_video(decoded, identity, display, quarter_turns, flip)
-                        })
-                        .await??;
-                        let width = frame.display_width;
-                        let height = frame.display_height;
-                        frames.send_replace(Some(Arc::new(frame)));
-                        wake();
-                        if first_view_frame {
-                            events
-                                .send(Event::Started {
-                                    generation,
-                                    decoder: decoder_name.clone().expect("active decoder has a name"),
-                                    width,
-                                    height,
-                                })
-                                .await
-                                .map_err(|_| anyhow::anyhow!("playback event receiver closed"))?;
+
+                    if changes.audio {
+                        let reason = audio::transition_teardown_reason(
+                            &selection.audio,
+                            &next.audio,
+                        );
+                        audio_task.stop(reason).await;
+                        audio_generation = audio_generation.wrapping_add(1);
+                        audio_task = audio::Task::spawn(
+                            audio_generation,
+                            path,
+                            &broadcast,
+                            &next.audio,
+                            &audio_tx,
+                            &audio_engine,
+                        );
+                    }
+                    if changes.video {
+                        if let Some(mut task) = video_task.take() {
+                            task.stop().await;
+                        }
+                        sequence.replace_decoder();
+                        decoder_name = None;
+                        if let Some(video) = &next.video {
+                            let decoder = tokio::select! {
+                                biased;
+                                _ = wait_for_cancel(&mut cancel) => break Ok(()),
+                                result = video.decoder(&broadcast) => result?,
+                            };
+                            decoder_name = Some(decoder.name().to_owned());
+                            tracing::info!(
+                                view_generation = generation,
+                                decoder_generation = sequence.decoder_generation,
+                                decoder = decoder.name(),
+                                track = %video.name,
+                                "remote video decoder rebuilt after catalog change"
+                            );
+                            video_task = Some(VideoTask::spawn(
+                                sequence.decoder_generation,
+                                decoder,
+                                &video_tx,
+                            ));
+                        } else {
+                            tracing::debug!(
+                                view_generation = generation,
+                                decoder_generation = sequence.decoder_generation,
+                                "remote video rendition withdrawn; waiting for catalog replacement"
+                            );
                         }
                     }
-                    VideoEvent::Ended => anyhow::bail!("remote screen video track ended"),
-                    VideoEvent::Failed(error) => anyhow::bail!(error),
+                    selection = next;
+                }
+                update = audio_rx.recv() => {
+                    let Some(update) = update else {
+                        anyhow::bail!("remote audio event channel closed");
+                    };
+                    if let Some(snapshot) = accept_audio_update(audio_generation, update) {
+                        events
+                            .send(Event::Audio {
+                                generation,
+                                snapshot,
+                            })
+                            .await
+                            .map_err(|_| anyhow::anyhow!("playback event receiver closed"))?;
+                    }
+                }
+                update = video_rx.recv(), if video_task.is_some() => {
+                    let Some(update) = update else {
+                        anyhow::bail!("remote video reader stopped");
+                    };
+                    if update.generation != sequence.decoder_generation {
+                        continue;
+                    }
+                    match update.event {
+                        VideoEvent::Frame(decoded) => {
+                            let selected = selection
+                                .video
+                                .as_ref()
+                                .expect("active decoder has a selection");
+                            let (identity, first_view_frame) = sequence.next();
+                            let display = selected.identity.display;
+                            let quarter_turns = selected.identity.quarter_turns;
+                            let flip = selected.identity.flip;
+                            let frame = tokio::task::spawn_blocking(move || {
+                                Frame::from_video(decoded, identity, display, quarter_turns, flip)
+                            })
+                            .await??;
+                            let width = frame.display_width;
+                            let height = frame.display_height;
+                            frames.send_replace(Some(Arc::new(frame)));
+                            wake();
+                            if first_view_frame {
+                                events
+                                    .send(Event::Started {
+                                        generation,
+                                        decoder: decoder_name
+                                            .clone()
+                                            .expect("active decoder has a name"),
+                                        width,
+                                        height,
+                                    })
+                                    .await
+                                    .map_err(|_| {
+                                        anyhow::anyhow!("playback event receiver closed")
+                                    })?;
+                            }
+                        }
+                        VideoEvent::Ended => anyhow::bail!("remote screen video track ended"),
+                        VideoEvent::Failed(error) => anyhow::bail!(error),
+                    }
                 }
             }
         }
     }
+    .await;
+
+    if let Some(mut task) = video_task {
+        task.stop().await;
+    }
+    audio_task.stop(audio::OwnerTeardownReason::Stop).await;
+    result
 }
 
 impl Frame {
@@ -485,6 +724,15 @@ fn convert_i420(
 mod tests {
     use super::*;
 
+    fn h264() -> hang::catalog::VideoConfig {
+        hang::catalog::VideoConfig::new(hang::catalog::H264 {
+            inline: true,
+            profile: 0x42,
+            constraints: 0xc0,
+            level: 0x1f,
+        })
+    }
+
     #[test]
     fn replacing_decoder_advances_only_decoder_generation() {
         let mut sequence = FrameSequence::new(7);
@@ -515,5 +763,71 @@ mod tests {
         let (flipped, _, _) = convert_i420(&source, 2, 2, 16, 0, true);
         assert_eq!(&flipped[0..4], &plain[4..8]);
         assert_eq!(&flipped[4..8], &plain[0..4]);
+    }
+
+    #[test]
+    fn video_only_catalog_does_not_wait_for_audio() {
+        let mut catalog = moq_mux::catalog::hang::Catalog::<()>::default();
+        catalog.video.renditions.insert("screen".into(), h264());
+
+        let selection = Selection::from_catalog(catalog, None).expect("valid catalog");
+
+        assert!(selection.video.is_some());
+        assert_eq!(selection.audio, audio::Selection::NotPublished);
+    }
+
+    #[test]
+    fn audio_only_catalog_selects_opus_independently() {
+        let mut catalog = moq_mux::catalog::hang::Catalog::<()>::default();
+        catalog.audio.renditions.insert(
+            "audio".into(),
+            hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+        );
+
+        let selection = Selection::from_catalog(catalog, None).expect("valid catalog");
+
+        assert!(selection.video.is_none());
+        assert!(matches!(
+            selection.audio,
+            audio::Selection::Playable { name, .. } if name == "audio"
+        ));
+    }
+
+    #[test]
+    fn audio_only_catalog_change_does_not_replace_video() {
+        let mut catalog = moq_mux::catalog::hang::Catalog::<()>::default();
+        catalog.video.renditions.insert("screen".into(), h264());
+        let current = Selection::from_catalog(catalog.clone(), None).expect("valid catalog");
+        catalog.audio.renditions.insert(
+            "audio".into(),
+            hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+        );
+        let next = Selection::from_catalog(catalog, Some(&current)).expect("valid catalog");
+
+        assert_eq!(
+            media_changes(&current, &next, true),
+            MediaChanges {
+                video: false,
+                audio: true,
+            }
+        );
+    }
+
+    #[test]
+    fn stale_audio_generation_update_is_ignored() {
+        let stale = audio::Update {
+            generation: 4,
+            snapshot: AudioSnapshot::failed("stale"),
+        };
+        let current = audio::Update {
+            generation: 5,
+            snapshot: AudioSnapshot::no_audio(),
+        };
+
+        assert!(accept_audio_update(5, stale).is_none());
+        assert_eq!(
+            accept_audio_update(5, current).map(|snapshot| snapshot.phase),
+            Some(AudioPhase::NoAudio)
+        );
     }
 }

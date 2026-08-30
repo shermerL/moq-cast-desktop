@@ -72,7 +72,7 @@ mod tests {
         let foundation = manifest["features"]["foundation"]
             .as_array()
             .expect("foundation feature array");
-        assert_feature(foundation, &["publish", "moq-audio/playback"]);
+        assert_feature(foundation, &["publish"]);
 
         let publish = manifest["features"]["publish"]
             .as_array()
@@ -81,7 +81,6 @@ mod tests {
             publish,
             &[
                 "watch",
-                "dep:moq-audio",
                 "dep:objc2",
                 "dep:objc2-core-graphics",
                 "dep:objc2-foundation",
@@ -96,7 +95,14 @@ mod tests {
             .expect("watch feature array");
         assert_feature(
             watch,
-            &["network", "dep:hang", "dep:moq-mux", "dep:moq-video"],
+            &[
+                "network",
+                "dep:hang",
+                "dep:moq-audio",
+                "dep:moq-mux",
+                "dep:moq-video",
+                "moq-audio/playback",
+            ],
         );
 
         let network = manifest["features"]["network"]

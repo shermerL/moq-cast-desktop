@@ -11,10 +11,16 @@ publish = false
 default = ["app"]
 app = ["dep:eframe", "publish"]
 network = ["dep:moq-tokio", "dep:url"]
-watch = ["network", "dep:hang", "dep:moq-mux", "dep:moq-video"]
+watch = [
+    "network",
+    "dep:hang",
+    "dep:moq-audio",
+    "dep:moq-mux",
+    "dep:moq-video",
+    "moq-audio/playback",
+]
 publish = [
     "watch",
-    "dep:moq-audio",
     "dep:objc2",
     "dep:objc2-core-graphics",
     "dep:objc2-foundation",
@@ -24,7 +30,6 @@ publish = [
 ]
 foundation = [
     "publish",
-    "moq-audio/playback",
 ]
 
 [dependencies]
