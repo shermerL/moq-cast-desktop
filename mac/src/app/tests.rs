@@ -112,3 +112,32 @@ fn ordinary_ui_copy_keeps_internal_provenance_private() {
         );
     }
 }
+
+#[test]
+fn share_action_requires_permission_source_and_idle_media() {
+    let mut snapshot = AppSnapshot::default();
+    assert!(!share_action_available(
+        CapturePermission::Allowed,
+        &snapshot
+    ));
+
+    snapshot.share_selection = Some(crate::publication::Selection::Display {
+        display_id: 7,
+        label: "Display 7".to_owned(),
+    });
+    assert!(!share_action_available(
+        CapturePermission::NotRequested,
+        &snapshot
+    ));
+    snapshot.session.begin(SessionPhase::Listening);
+    assert!(share_action_available(
+        CapturePermission::Allowed,
+        &snapshot
+    ));
+
+    snapshot.media.begin(MediaPhase::PreparingShare);
+    assert!(!share_action_available(
+        CapturePermission::Allowed,
+        &snapshot
+    ));
+}

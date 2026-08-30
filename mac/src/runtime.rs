@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::network::{self, Event as NetworkEvent, PeerSession};
 use crate::playback::{self, Event as PlaybackEvent, Frame as PlaybackFrame};
+use crate::publication::{self, Event as PublicationEvent, Selection as ShareSelection};
 use crate::remote::{ScreenAvailability, ScreenView};
 
 const COMMAND_CAPACITY: usize = 32;
@@ -111,8 +112,16 @@ pub(crate) enum MediaPhase {
     Idle,
     PreparingWatch,
     Watching,
+    PreparingShare,
+    Sharing,
     Stopping,
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MediaOwner {
+    Watch,
+    Share,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,6 +155,8 @@ pub(crate) struct AppSnapshot {
     pub(crate) nearby_issue: Option<NearbyIssue>,
     pub(crate) media_peer: Option<String>,
     pub(crate) media_path: Option<String>,
+    pub(crate) media_owner: Option<MediaOwner>,
+    pub(crate) share_selection: Option<ShareSelection>,
     pub(crate) media_decoder: Option<String>,
     pub(crate) media_width: Option<u32>,
     pub(crate) media_height: Option<u32>,
@@ -159,7 +170,7 @@ impl Default for AppSnapshot {
             discovery: Lifecycle::new(DiscoveryPhase::Starting),
             session: Lifecycle::new(SessionPhase::Starting),
             media: Lifecycle::new(MediaPhase::Idle),
-            capture: Lifecycle::new(CapabilityPhase::Unavailable),
+            capture: Lifecycle::new(CapabilityPhase::Available),
             decoder: Lifecycle::new(CapabilityPhase::Available),
             local_device_name: local_device_name(),
             peers: BTreeMap::new(),
@@ -168,6 +179,8 @@ impl Default for AppSnapshot {
             nearby_issue: None,
             media_peer: None,
             media_path: None,
+            media_owner: None,
+            share_selection: None,
             media_decoder: None,
             media_width: None,
             media_height: None,
@@ -191,6 +204,7 @@ impl AppSnapshot {
             return None;
         }
         let generation = self.media.begin(MediaPhase::PreparingWatch);
+        self.media_owner = Some(MediaOwner::Watch);
         self.media_peer = Some(peer.to_owned());
         self.media_path = Some(path.to_owned());
         self.media_decoder = None;
@@ -207,10 +221,12 @@ impl AppSnapshot {
         width: u32,
         height: u32,
     ) -> bool {
-        if !matches!(
-            self.media.phase(),
-            MediaPhase::PreparingWatch | MediaPhase::Watching
-        ) || !self.media.apply(generation, MediaPhase::Watching)
+        if self.media_owner != Some(MediaOwner::Watch)
+            || !matches!(
+                self.media.phase(),
+                MediaPhase::PreparingWatch | MediaPhase::Watching
+            )
+            || !self.media.apply(generation, MediaPhase::Watching)
         {
             return false;
         }
@@ -221,7 +237,8 @@ impl AppSnapshot {
     }
 
     fn playback_ended(&mut self, generation: Generation, result: Result<(), String>) -> bool {
-        if self.media.generation() != generation
+        if self.media_owner != Some(MediaOwner::Watch)
+            || self.media.generation() != generation
             || !matches!(
                 self.media.phase(),
                 MediaPhase::PreparingWatch | MediaPhase::Watching
@@ -243,21 +260,99 @@ impl AppSnapshot {
     }
 
     fn begin_stop_watch(&mut self) -> Option<Generation> {
-        if !matches!(
-            self.media.phase(),
-            MediaPhase::PreparingWatch | MediaPhase::Watching | MediaPhase::Failed
-        ) {
+        if self.media_owner != Some(MediaOwner::Watch)
+            || !matches!(
+                self.media.phase(),
+                MediaPhase::PreparingWatch | MediaPhase::Watching | MediaPhase::Failed
+            )
+        {
             return None;
         }
         Some(self.media.begin(MediaPhase::Stopping))
     }
 
-    fn finish_stop_watch(&mut self, generation: Generation) -> bool {
+    fn finish_stop_media(&mut self, generation: Generation) -> bool {
         if !self.media.apply(generation, MediaPhase::Idle) {
             return false;
         }
         self.clear_media_fields(None);
         true
+    }
+
+    fn select_share_source(&mut self, selection: ShareSelection) -> bool {
+        if !matches!(self.media.phase(), MediaPhase::Idle | MediaPhase::Failed) {
+            return false;
+        }
+        self.share_selection = Some(selection);
+        true
+    }
+
+    fn begin_share(&mut self) -> Option<(Generation, ShareSelection)> {
+        if self.media.phase() != MediaPhase::Idle {
+            return None;
+        }
+        let selection = self.share_selection.clone()?;
+        let generation = self.media.begin(MediaPhase::PreparingShare);
+        self.media_owner = Some(MediaOwner::Share);
+        self.media_peer = None;
+        self.media_path = None;
+        self.media_decoder = None;
+        self.media_width = None;
+        self.media_height = None;
+        self.media_error = None;
+        Some((generation, selection))
+    }
+
+    fn publication_announced(&mut self, generation: Generation, path: String) -> bool {
+        if self.media_owner != Some(MediaOwner::Share)
+            || self.media.phase() != MediaPhase::PreparingShare
+            || !self.media.apply(generation, MediaPhase::Sharing)
+        {
+            return false;
+        }
+        self.media_path = Some(path);
+        true
+    }
+
+    fn publication_ended(
+        &mut self,
+        generation: Generation,
+        result: Result<(), publication::Failure>,
+    ) -> bool {
+        if self.media_owner != Some(MediaOwner::Share)
+            || self.media.generation() != generation
+            || !matches!(
+                self.media.phase(),
+                MediaPhase::PreparingShare | MediaPhase::Sharing
+            )
+        {
+            return false;
+        }
+        match result {
+            Ok(()) => self.clear_media(MediaPhase::Idle, None),
+            Err(error) => {
+                let (message, source_unavailable) = error.into_parts();
+                self.media.apply(generation, MediaPhase::Failed);
+                self.media_path = None;
+                self.media_error = Some(message);
+                if source_unavailable {
+                    self.share_selection = None;
+                }
+            }
+        }
+        true
+    }
+
+    fn begin_stop_share(&mut self) -> Option<Generation> {
+        if self.media_owner != Some(MediaOwner::Share)
+            || !matches!(
+                self.media.phase(),
+                MediaPhase::PreparingShare | MediaPhase::Sharing | MediaPhase::Failed
+            )
+        {
+            return None;
+        }
+        Some(self.media.begin(MediaPhase::Stopping))
     }
 
     fn clear_media(&mut self, phase: MediaPhase, error: Option<String>) {
@@ -266,6 +361,7 @@ impl AppSnapshot {
     }
 
     fn clear_media_fields(&mut self, error: Option<String>) {
+        self.media_owner = None;
         self.media_peer = None;
         self.media_path = None;
         self.media_decoder = None;
@@ -279,6 +375,9 @@ impl AppSnapshot {
 pub(crate) enum RuntimeCommand {
     WatchScreen { peer: String, path: String },
     StopWatching,
+    SelectShareSource(ShareSelection),
+    StartSharing,
+    StopSharing,
     Shutdown,
 }
 
@@ -363,6 +462,20 @@ impl RuntimeOwner {
         self.commands.try_send(RuntimeCommand::StopWatching).is_ok()
     }
 
+    pub(crate) fn select_share_source(&self, selection: ShareSelection) -> bool {
+        self.commands
+            .try_send(RuntimeCommand::SelectShareSource(selection))
+            .is_ok()
+    }
+
+    pub(crate) fn start_sharing(&self) -> bool {
+        self.commands.try_send(RuntimeCommand::StartSharing).is_ok()
+    }
+
+    pub(crate) fn stop_sharing(&self) -> bool {
+        self.commands.try_send(RuntimeCommand::StopSharing).is_ok()
+    }
+
     fn shutdown(&mut self) {
         let Some(owner) = self.owner.take() else {
             return;
@@ -414,7 +527,11 @@ async fn run(
                 snapshot.session.apply(session_generation, SessionPhase::Failed);
                 snapshot.nearby_issue = Some(issue);
                 publish_snapshot(&snapshot_tx, &snapshot, &wake);
-                let _ = commands.recv().await;
+                loop {
+                    if matches!(commands.recv().await, Some(RuntimeCommand::Shutdown) | None) {
+                        break;
+                    }
+                }
                 stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
                 return;
             }
@@ -430,6 +547,7 @@ async fn run(
 
     let (playback_events_tx, mut playback_events) = mpsc::channel(PLAYBACK_EVENT_CAPACITY);
     let mut playback = playback::Owner::default();
+    let mut publication = publication::Owner::default();
     let mut initial_scan = Box::pin(tokio::time::sleep(Duration::from_secs(3)));
     let mut scan_finished = false;
     loop {
@@ -438,12 +556,14 @@ async fn run(
                 command = commands.recv() => RuntimeInput::Command(command),
                 event = services.recv() => RuntimeInput::Network(event),
                 event = playback_events.recv() => RuntimeInput::Playback(event),
+                event = publication.recv() => RuntimeInput::Publication(event),
             }
         } else {
             tokio::select! {
                 command = commands.recv() => RuntimeInput::Command(command),
                 event = services.recv() => RuntimeInput::Network(event),
                 event = playback_events.recv() => RuntimeInput::Playback(event),
+                event = publication.recv() => RuntimeInput::Publication(event),
                 () = &mut initial_scan => RuntimeInput::InitialScanFinished,
             }
         };
@@ -468,6 +588,18 @@ async fn run(
             }
             RuntimeInput::Command(Some(RuntimeCommand::StopWatching)) => {
                 stop_watch(&mut snapshot, &mut playback, &frames).await;
+                false
+            }
+            RuntimeInput::Command(Some(RuntimeCommand::SelectShareSource(selection))) => {
+                snapshot.select_share_source(selection);
+                false
+            }
+            RuntimeInput::Command(Some(RuntimeCommand::StartSharing)) => {
+                start_share(&mut snapshot, &services, &mut publication);
+                false
+            }
+            RuntimeInput::Command(Some(RuntimeCommand::StopSharing)) => {
+                stop_share(&mut snapshot, &mut publication);
                 false
             }
             RuntimeInput::Network(Some(event)) => {
@@ -495,6 +627,10 @@ async fn run(
                 false
             }
             RuntimeInput::Playback(None) => false,
+            RuntimeInput::Publication(event) => {
+                apply_publication_event(&mut snapshot, event);
+                false
+            }
             RuntimeInput::InitialScanFinished => {
                 scan_finished = true;
                 let phase = if snapshot.peers.values().any(|peer| peer.discovered) {
@@ -515,6 +651,7 @@ async fn run(
     }
 
     playback.stop().await;
+    publication.stop();
     frames.send_replace(None);
     services.shutdown().await;
     stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
@@ -524,6 +661,7 @@ enum RuntimeInput {
     Command(Option<RuntimeCommand>),
     Network(Option<NetworkEvent>),
     Playback(Option<PlaybackEvent>),
+    Publication(PublicationEvent),
     InitialScanFinished,
 }
 
@@ -567,7 +705,67 @@ async fn stop_watch(
     };
     playback.stop().await;
     frames.send_replace(None);
-    snapshot.finish_stop_watch(generation);
+    snapshot.finish_stop_media(generation);
+}
+
+fn start_share(
+    snapshot: &mut AppSnapshot,
+    services: &network::Services,
+    publication: &mut publication::Owner,
+) {
+    let Some((generation, selection)) = snapshot.begin_share() else {
+        return;
+    };
+    publication.start(
+        generation.value(),
+        services.publish_origin(),
+        services.local_peer_id().to_owned(),
+        selection,
+    );
+}
+
+fn stop_share(snapshot: &mut AppSnapshot, publication: &mut publication::Owner) {
+    let Some(generation) = snapshot.begin_stop_share() else {
+        return;
+    };
+    publication.stop();
+    snapshot.finish_stop_media(generation);
+}
+
+fn apply_publication_event(snapshot: &mut AppSnapshot, event: PublicationEvent) {
+    match event {
+        PublicationEvent::Announced { generation, path } => {
+            let generation = Generation(generation);
+            if snapshot.publication_announced(generation, path) {
+                tracing::info!(
+                    publish_generation = generation.value(),
+                    "screen publication announced"
+                );
+            }
+        }
+        PublicationEvent::Ended { generation, result } => {
+            let generation = Generation(generation);
+            let failed = result.is_err();
+            let error = result
+                .as_ref()
+                .err()
+                .map(|error| error.message().to_owned());
+            if snapshot.publication_ended(generation, result) {
+                if let Some(error) = error {
+                    tracing::warn!(
+                        publish_generation = generation.value(),
+                        %error,
+                        "screen sharing ended"
+                    );
+                }
+            } else if failed {
+                tracing::debug!(
+                    publish_generation = generation.value(),
+                    "ignored stale publication failure"
+                );
+            }
+        }
+    }
 }
 
 fn apply_playback_event(
@@ -771,34 +969,35 @@ mod tests {
                 let (snapshot_tx, mut snapshot_rx) =
                     watch::channel(Arc::new(AppSnapshot::default()));
                 let (frames, _) = watch::channel(None);
-                let owner = tokio::spawn(run(
+                let owner = run(
                     command_rx,
                     snapshot_tx,
                     frames,
                     async { Err(NearbyIssue::LocalNetworkUnavailable) },
                     Arc::new(|| {}),
-                ));
-
-                loop {
-                    snapshot_rx.changed().await.expect("startup snapshot");
-                    if snapshot_rx.borrow().discovery.phase() == DiscoveryPhase::Failed {
-                        break;
+                );
+                let observe = async move {
+                    loop {
+                        snapshot_rx.changed().await.expect("startup snapshot");
+                        if snapshot_rx.borrow().discovery.phase() == DiscoveryPhase::Failed {
+                            break;
+                        }
                     }
-                }
-                let snapshot = snapshot_rx.borrow().clone();
-                assert_eq!(snapshot.runtime.phase(), RuntimePhase::Ready);
-                assert_eq!(snapshot.runtime.generation().value(), 1);
-                assert_eq!(snapshot.discovery.phase(), DiscoveryPhase::Failed);
-                assert_eq!(snapshot.session.phase(), SessionPhase::Failed);
-                assert_eq!(snapshot.media.phase(), MediaPhase::Idle);
-                assert_eq!(snapshot.capture.phase(), CapabilityPhase::Unavailable);
-                assert_eq!(snapshot.decoder.phase(), CapabilityPhase::Available);
+                    let snapshot = snapshot_rx.borrow().clone();
+                    assert_eq!(snapshot.runtime.phase(), RuntimePhase::Ready);
+                    assert_eq!(snapshot.runtime.generation().value(), 1);
+                    assert_eq!(snapshot.discovery.phase(), DiscoveryPhase::Failed);
+                    assert_eq!(snapshot.session.phase(), SessionPhase::Failed);
+                    assert_eq!(snapshot.media.phase(), MediaPhase::Idle);
+                    assert_eq!(snapshot.capture.phase(), CapabilityPhase::Available);
+                    assert_eq!(snapshot.decoder.phase(), CapabilityPhase::Available);
 
-                commands
-                    .send(RuntimeCommand::Shutdown)
-                    .await
-                    .expect("shutdown command");
-                owner.await.expect("runtime owner task");
+                    commands
+                        .send(RuntimeCommand::Shutdown)
+                        .await
+                        .expect("shutdown command");
+                };
+                tokio::join!(owner, observe);
             });
     }
 
@@ -957,7 +1156,7 @@ mod tests {
             .begin_watch("peer", "moqcast.screen/peer")
             .expect("first view");
         let stopping = snapshot.begin_stop_watch().expect("stop first view");
-        assert!(snapshot.finish_stop_watch(stopping));
+        assert!(snapshot.finish_stop_media(stopping));
         let second = snapshot
             .begin_watch("peer", "moqcast.screen/peer")
             .expect("second view");
@@ -982,7 +1181,7 @@ mod tests {
                 .is_none()
         );
         let stopping = snapshot.begin_stop_watch().expect("stop failed view");
-        assert!(snapshot.finish_stop_watch(stopping));
+        assert!(snapshot.finish_stop_media(stopping));
         assert!(
             snapshot
                 .begin_watch("peer", "moqcast.screen/peer")
@@ -1005,9 +1204,109 @@ mod tests {
             .begin_watch("peer", "moqcast.screen/peer")
             .expect("view");
         let stopping = snapshot.begin_stop_watch().expect("stop");
-        assert!(snapshot.finish_stop_watch(stopping));
+        assert!(snapshot.finish_stop_media(stopping));
 
         assert_eq!(snapshot.media.phase(), MediaPhase::Idle);
         assert_eq!(snapshot.peers["peer"].session, PeerSession::Connected);
+    }
+
+    fn display_selection() -> ShareSelection {
+        ShareSelection::Display {
+            display_id: 7,
+            label: "Display 7".to_owned(),
+        }
+    }
+
+    #[test]
+    fn watch_and_share_have_one_media_owner() {
+        let mut snapshot = AppSnapshot::default();
+        assert!(snapshot.select_share_source(display_selection()));
+        let (share, _) = snapshot.begin_share().expect("share starts");
+        assert_eq!(snapshot.media_owner, Some(MediaOwner::Share));
+        assert!(
+            snapshot
+                .begin_watch("peer", "moqcast.screen/peer")
+                .is_none()
+        );
+        assert!(!snapshot.playback_started(share, "stale".to_owned(), 640, 360));
+    }
+
+    #[test]
+    fn stale_publication_events_cannot_override_a_new_media_generation() {
+        let mut snapshot = AppSnapshot::default();
+        assert!(snapshot.select_share_source(display_selection()));
+        let (first, _) = snapshot.begin_share().expect("first share");
+        let stopping = snapshot.begin_stop_share().expect("stop first share");
+        assert!(snapshot.finish_stop_media(stopping));
+        let (second, _) = snapshot.begin_share().expect("second share");
+
+        assert!(!snapshot.publication_announced(first, "moqcast.screen/stale".to_owned()));
+        assert!(
+            !snapshot
+                .publication_ended(first, Err(publication::Failure::pipeline("stale failure")),)
+        );
+        assert_eq!(snapshot.media.phase(), MediaPhase::PreparingShare);
+        assert!(snapshot.media_error.is_none());
+        assert!(snapshot.publication_announced(second, "moqcast.screen/current".to_owned()));
+        assert_eq!(snapshot.media.phase(), MediaPhase::Sharing);
+        assert_eq!(
+            snapshot.media_path.as_deref(),
+            Some("moqcast.screen/current")
+        );
+    }
+
+    #[test]
+    fn stopping_share_does_not_change_a_healthy_session() {
+        let mut snapshot = AppSnapshot::default();
+        let session_generation = snapshot.session.begin(SessionPhase::Listening);
+        snapshot.peers.insert(
+            "peer".to_owned(),
+            PeerSnapshot {
+                ordinal: 1,
+                discovered: true,
+                session: PeerSession::Connected,
+            },
+        );
+        assert!(snapshot.select_share_source(display_selection()));
+        snapshot.begin_share().expect("share");
+        let stopping = snapshot.begin_stop_share().expect("stop share");
+        assert!(snapshot.finish_stop_media(stopping));
+
+        assert_eq!(snapshot.media.phase(), MediaPhase::Idle);
+        assert_eq!(snapshot.media_owner, None);
+        assert_eq!(snapshot.session.phase(), SessionPhase::Listening);
+        assert_eq!(snapshot.session.generation(), session_generation);
+        assert_eq!(snapshot.peers["peer"].session, PeerSession::Connected);
+        assert!(snapshot.share_selection.is_some());
+    }
+
+    #[test]
+    fn unavailable_share_source_requires_a_new_picker_selection() {
+        let mut snapshot = AppSnapshot::default();
+        assert!(snapshot.select_share_source(display_selection()));
+        let (generation, _) = snapshot.begin_share().expect("share");
+
+        assert!(
+            snapshot
+                .publication_ended(generation, Err(publication::Failure::source_unavailable()),)
+        );
+        assert_eq!(snapshot.media.phase(), MediaPhase::Failed);
+        assert!(snapshot.share_selection.is_none());
+    }
+
+    #[test]
+    fn active_media_rejects_source_replacement() {
+        let mut snapshot = AppSnapshot::default();
+        assert!(snapshot.select_share_source(display_selection()));
+        snapshot.begin_share().expect("share");
+
+        assert!(!snapshot.select_share_source(ShareSelection::Window {
+            window_id: 9,
+            label: "Window".to_owned(),
+        }));
+        assert_eq!(
+            snapshot.share_selection.as_ref().map(ShareSelection::label),
+            Some("Display 7")
+        );
     }
 }

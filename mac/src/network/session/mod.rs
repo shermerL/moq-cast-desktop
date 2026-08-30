@@ -82,6 +82,10 @@ impl SessionFoundation {
         self.origins.receive.clone()
     }
 
+    pub(crate) fn publish_origin(&self) -> moq_tokio::moq_net::origin::Producer {
+        self.origins.publish.clone()
+    }
+
     pub(crate) async fn connect(
         &mut self,
         peer: &PeerRecord,

@@ -9,6 +9,8 @@ mod contract;
 mod network;
 #[cfg(feature = "watch")]
 mod playback;
+#[cfg(feature = "publish")]
+mod publication;
 #[cfg(feature = "network")]
 mod remote;
 #[cfg(feature = "watch")]

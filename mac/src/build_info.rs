@@ -72,7 +72,22 @@ mod tests {
         let foundation = manifest["features"]["foundation"]
             .as_array()
             .expect("foundation feature array");
-        assert_feature(foundation, &["watch", "dep:moq-audio", "moq-video/capture"]);
+        assert_feature(foundation, &["publish", "dep:moq-audio"]);
+
+        let publish = manifest["features"]["publish"]
+            .as_array()
+            .expect("publish feature array");
+        assert_feature(
+            publish,
+            &[
+                "watch",
+                "dep:objc2",
+                "dep:objc2-core-graphics",
+                "dep:objc2-foundation",
+                "dep:objc2-screen-capture-kit",
+                "moq-video/capture",
+            ],
+        );
 
         let watch = manifest["features"]["watch"]
             .as_array()

@@ -85,10 +85,9 @@ impl Services {
             .with_fingerprint(advertisement.fingerprint)
             .advertise()
             .await?;
-        let local_peer_id = discovery.id().to_owned();
         let registry = PeerRegistry::new(discovery.id());
         let sessions = bound.start(discovery.credential().to_owned()).await?;
-        let remote = remote::Directory::start(sessions.receive_origin(), local_peer_id);
+        let remote = remote::Directory::start(sessions.receive_origin(), discovery.id().to_owned());
 
         Ok(Self {
             discovery,
@@ -132,6 +131,14 @@ impl Services {
         path: &str,
     ) -> Option<moq_tokio::moq_net::broadcast::Consumer> {
         self.remote.broadcast(path)
+    }
+
+    pub(crate) fn local_peer_id(&self) -> &str {
+        self.discovery.id()
+    }
+
+    pub(crate) fn publish_origin(&self) -> moq_tokio::moq_net::origin::Producer {
+        self.sessions.publish_origin()
     }
 
     async fn handle_input(&mut self, input: Input) {

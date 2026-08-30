@@ -1,5 +1,6 @@
 //! Native macOS application shell for Nearby and direct-only sessions.
 
+mod capture_picker;
 mod player;
 mod theme;
 mod view;
@@ -17,7 +18,8 @@ use crate::network::PeerSession;
 use crate::playback::FrameIdentity;
 use crate::remote::ScreenAvailability;
 use crate::runtime::{
-    AppSnapshot, DiscoveryPhase, MediaPhase, NearbyIssue, PeerSnapshot, RuntimeOwner, SessionPhase,
+    AppSnapshot, DiscoveryPhase, MediaOwner, MediaPhase, NearbyIssue, PeerSnapshot, RuntimeOwner,
+    SessionPhase,
 };
 
 const STORAGE_LOCALE: &str = "moqcast.macos.locale";
@@ -38,6 +40,13 @@ enum Locale {
     #[default]
     Chinese,
     English,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CapturePermission {
+    NotRequested,
+    Allowed,
+    Denied,
 }
 
 impl Locale {
@@ -65,6 +74,10 @@ pub(crate) struct MoqCastApp {
     playback_texture: Option<egui::TextureHandle>,
     playback_identity: Option<FrameIdentity>,
     playback_display: Option<(u32, u32)>,
+    capture_picker: Option<capture_picker::Picker>,
+    capture_permission: CapturePermission,
+    picker_pending: bool,
+    picker_error: bool,
 }
 
 impl MoqCastApp {
@@ -78,6 +91,11 @@ impl MoqCastApp {
         );
         let repaint = context.egui_ctx.clone();
         let runtime = RuntimeOwner::start(move || repaint.request_repaint())?;
+        let capture_permission = if capture_picker::permission_allowed() {
+            CapturePermission::Allowed
+        } else {
+            CapturePermission::NotRequested
+        };
         Ok(Self {
             page: Page::Nearby,
             locale,
@@ -87,6 +105,10 @@ impl MoqCastApp {
             playback_texture: None,
             playback_identity: None,
             playback_display: None,
+            capture_picker: None,
+            capture_permission,
+            picker_pending: false,
+            picker_error: false,
         })
     }
 
@@ -153,13 +175,50 @@ impl MoqCastApp {
     }
 
     fn media_active(snapshot: &AppSnapshot) -> bool {
-        matches!(
-            snapshot.media.phase(),
-            MediaPhase::PreparingWatch
-                | MediaPhase::Watching
-                | MediaPhase::Stopping
-                | MediaPhase::Failed
-        )
+        snapshot.media_owner == Some(MediaOwner::Watch)
+            && matches!(
+                snapshot.media.phase(),
+                MediaPhase::PreparingWatch
+                    | MediaPhase::Watching
+                    | MediaPhase::Stopping
+                    | MediaPhase::Failed
+            )
+    }
+
+    fn poll_capture_picker(&mut self, context: &egui::Context) {
+        let Some(picker) = self.capture_picker.as_ref() else {
+            return;
+        };
+        while let Some(event) = picker.poll() {
+            self.picker_pending = false;
+            match event {
+                capture_picker::Event::Selected(selection) => {
+                    self.capture_permission = if capture_picker::permission_allowed() {
+                        CapturePermission::Allowed
+                    } else {
+                        CapturePermission::Denied
+                    };
+                    self.picker_error = false;
+                    self.runtime.select_share_source(selection);
+                }
+                capture_picker::Event::Cancelled => {
+                    self.capture_permission = if capture_picker::permission_allowed() {
+                        CapturePermission::Allowed
+                    } else {
+                        CapturePermission::NotRequested
+                    };
+                }
+                capture_picker::Event::Failed => {
+                    self.capture_permission = if capture_picker::permission_allowed() {
+                        CapturePermission::Allowed
+                    } else {
+                        CapturePermission::Denied
+                    };
+                    self.picker_error = true;
+                }
+            }
+            context.request_repaint();
+        }
     }
 
     fn player_device_name(&self, snapshot: &AppSnapshot) -> String {
@@ -516,34 +575,236 @@ impl MoqCastApp {
             });
     }
 
-    fn screen_share(&self, ui: &mut egui::Ui) {
+    fn screen_share(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
         self.page_header(
             ui,
             self.text("屏幕共享", "Screen Share"),
             self.text(
-                "从这台 Mac 发布屏幕与系统音频。",
-                "Publish this Mac's screen and system audio.",
+                "选择一个屏幕或窗口，并将画面发布给附近设备。",
+                "Choose a display or window to share with nearby devices.",
             ),
         );
         ui.separator();
-        ui.add_space(22.0);
-        ui.label(
-            RichText::new(self.text(
-                "此版本尚未提供屏幕共享",
-                "Screen sharing is not available in this build",
-            ))
-            .size(15.0)
-            .strong(),
+        ui.add_space(12.0);
+
+        let permission = match self.capture_permission {
+            CapturePermission::NotRequested => self.text("尚未请求", "Not requested"),
+            CapturePermission::Allowed => self.text("已允许", "Allowed"),
+            CapturePermission::Denied => self.text("需要系统权限", "System permission required"),
+        };
+        action_row(
+            ui,
+            62.0,
+            self.text("屏幕录制权限", "Screen recording permission"),
+            permission,
+            |_| {},
         );
+        ui.separator();
+
+        let source = snapshot
+            .share_selection
+            .as_ref()
+            .map(|selection| selection.label().to_owned())
+            .unwrap_or_else(|| self.text("尚未选择", "Nothing selected").to_owned());
+        let network_ready = snapshot.session.phase() == SessionPhase::Listening;
+        let can_choose = network_ready && matches!(snapshot.media.phase(), MediaPhase::Idle);
+        let choose_label = if self.picker_pending {
+            self.text("正在打开…", "Opening…")
+        } else {
+            self.text("选择屏幕…", "Choose Screen…")
+        };
+        let mut choose_clicked = false;
+        action_row(
+            ui,
+            62.0,
+            self.text("共享来源", "Share source"),
+            &source,
+            |ui| {
+                choose_clicked = ui
+                    .add_enabled(
+                        can_choose && !self.picker_pending,
+                        egui::Button::new(choose_label).min_size(egui::vec2(132.0, 32.0)),
+                    )
+                    .clicked();
+            },
+        );
+        if choose_clicked {
+            self.picker_error = false;
+            if self.capture_permission == CapturePermission::Allowed
+                || capture_picker::request_permission()
+            {
+                self.capture_permission = CapturePermission::Allowed;
+                self.picker_pending = true;
+                let picker = self.capture_picker.get_or_insert_with(|| {
+                    let repaint = ui.ctx().clone();
+                    capture_picker::Picker::new(move || repaint.request_repaint())
+                });
+                picker.present();
+            } else {
+                self.capture_permission = CapturePermission::Denied;
+            }
+        }
         ui.label(
             RichText::new(self.text(
-                "当前版本仅提供附近设备与安全直连。真实屏幕能力接入后，来源、权限和发布操作才会出现在这里。",
-                "This version provides Nearby and secure direct sessions only. Source, permission, and publishing actions will appear after the real screen capability is connected.",
+                "共享画面包含光标。当前版本仅发布视频。",
+                "The pointer is included. This version publishes video only.",
             ))
             .small()
             .color(theme::MUTED),
         );
-        ui.add_space(22.0);
+        ui.add_space(14.0);
+
+        let share_owned = snapshot.media_owner == Some(MediaOwner::Share);
+        let watch_owned = snapshot.media_owner == Some(MediaOwner::Watch);
+        let can_start = share_action_available(self.capture_permission, snapshot);
+        let (title, body, tone) = if self.picker_error {
+            (
+                self.text("无法打开系统选择器", "The system picker could not open"),
+                self.text(
+                    "请检查系统设置中的屏幕录制权限，然后重试。",
+                    "Check Screen Recording permission in System Settings, then try again.",
+                ),
+                Tone::Error,
+            )
+        } else if !network_ready {
+            (
+                self.text("屏幕共享不可用", "Screen sharing unavailable"),
+                self.text(
+                    "安全直连服务尚未就绪。",
+                    "The secure direct-session service is not ready.",
+                ),
+                Tone::Error,
+            )
+        } else if self.capture_permission == CapturePermission::Denied {
+            (
+                self.text("需要屏幕录制权限", "Screen recording permission required"),
+                self.text(
+                    "请在系统设置中允许 MoQCast 录制屏幕，然后重新打开应用。",
+                    "Allow MoQCast to record the screen in System Settings, then reopen the app.",
+                ),
+                Tone::Error,
+            )
+        } else if watch_owned {
+            (
+                self.text("正在观看另一台设备", "Watching another device"),
+                self.text(
+                    "停止观看后才能共享这台 Mac 的屏幕。",
+                    "Stop watching before sharing this Mac's screen.",
+                ),
+                Tone::Neutral,
+            )
+        } else if share_owned && snapshot.media.phase() == MediaPhase::PreparingShare {
+            (
+                self.text("正在准备屏幕共享", "Preparing screen sharing"),
+                self.text(
+                    "正在验证来源并准备 H.264 视频。安全连接保持不变。",
+                    "Validating the source and preparing H.264 video. Secure sessions stay active.",
+                ),
+                Tone::Warning,
+            )
+        } else if share_owned && snapshot.media.phase() == MediaPhase::Sharing {
+            (
+                self.text("屏幕共享已就绪", "Screen sharing is ready"),
+                self.text(
+                    "附近设备开始观看时，将按需启动捕获与 H.264 编码。停止共享不会断开健康连接。",
+                    "Capture and H.264 encoding start on demand when a nearby device watches. Stopping keeps healthy sessions active.",
+                ),
+                Tone::Success,
+            )
+        } else if share_owned && snapshot.media.phase() == MediaPhase::Stopping {
+            (
+                self.text("正在停止共享", "Stopping screen sharing"),
+                self.text(
+                    "正在释放捕获与发布资源。",
+                    "Releasing capture and publishing resources.",
+                ),
+                Tone::Neutral,
+            )
+        } else if share_owned && snapshot.media.phase() == MediaPhase::Failed {
+            (
+                self.text("屏幕共享已停止", "Screen sharing stopped"),
+                snapshot.media_error.as_deref().unwrap_or_else(|| {
+                    self.text(
+                        "无法继续捕获或编码所选画面。",
+                        "The selected content could not continue capturing or encoding.",
+                    )
+                }),
+                Tone::Error,
+            )
+        } else if can_start {
+            (
+                self.text("可以开始共享", "Ready to share"),
+                self.text(
+                    "开始后，附近设备可通过现有直连会话观看。",
+                    "Nearby devices can watch through existing direct sessions after you start.",
+                ),
+                Tone::Success,
+            )
+        } else {
+            (
+                self.text("选择共享来源", "Choose what to share"),
+                self.text(
+                    "使用系统选择器明确选择屏幕或窗口。",
+                    "Use the system picker to explicitly choose a display or window.",
+                ),
+                Tone::Neutral,
+            )
+        };
+
+        let mut action = None;
+        status_panel(ui, title, body, tone, |ui| {
+            if share_owned
+                && matches!(
+                    snapshot.media.phase(),
+                    MediaPhase::PreparingShare | MediaPhase::Sharing
+                )
+            {
+                if ui
+                    .add_sized(
+                        [132.0, 36.0],
+                        egui::Button::new(self.text("停止共享", "Stop Sharing")),
+                    )
+                    .clicked()
+                {
+                    action = Some(false);
+                }
+            } else if share_owned && snapshot.media.phase() == MediaPhase::Failed {
+                if ui
+                    .add_sized(
+                        [132.0, 36.0],
+                        egui::Button::new(self.text("返回", "Return")),
+                    )
+                    .clicked()
+                {
+                    action = Some(false);
+                }
+            } else if !watch_owned
+                && ui
+                    .add_enabled(
+                        can_start,
+                        egui::Button::new(
+                            RichText::new(self.text("开始共享", "Start Sharing"))
+                                .strong()
+                                .color(Color32::WHITE),
+                        )
+                        .fill(theme::BRAND)
+                        .corner_radius(CornerRadius::same(6))
+                        .min_size(egui::vec2(132.0, 36.0)),
+                    )
+                    .clicked()
+            {
+                action = Some(true);
+            }
+        });
+        match action {
+            Some(true) => {
+                self.runtime.start_sharing();
+            }
+            Some(false) => {
+                self.runtime.stop_sharing();
+            }
+            None => {}
+        }
         ui.separator();
     }
 
@@ -570,7 +831,7 @@ impl MoqCastApp {
             "立即应用并保存在这台 Mac 上",
             "Applies immediately and is saved on this Mac",
         );
-        setting_row(ui, language, language_hint, |ui| {
+        action_row(ui, 58.0, language, language_hint, |ui| {
             egui::ComboBox::from_id_salt("settings-locale")
                 .width(180.0)
                 .selected_text(match self.locale {
@@ -583,8 +844,9 @@ impl MoqCastApp {
                 });
         });
         ui.separator();
-        setting_row(
+        action_row(
             ui,
+            58.0,
             self.text("版本", "Version"),
             self.text("公开产品版本", "Public product version"),
             |ui| {
@@ -596,6 +858,7 @@ impl MoqCastApp {
 
 impl eframe::App for MoqCastApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.poll_capture_picker(ui.ctx());
         let snapshot = self.runtime.snapshot();
         self.update_playback_texture(ui.ctx(), &snapshot);
         let media_active = Self::media_active(&snapshot);
@@ -660,7 +923,7 @@ impl eframe::App for MoqCastApp {
                                         Layout::top_down(Align::Min),
                                         |ui| match self.page {
                                             Page::Nearby => self.nearby(ui, &snapshot),
-                                            Page::ScreenShare => self.screen_share(ui),
+                                            Page::ScreenShare => self.screen_share(ui, &snapshot),
                                             Page::Settings => self.settings(ui),
                                         },
                                     );
@@ -897,15 +1160,52 @@ fn badge(ui: &mut egui::Ui, label: &str, tone: Tone) {
         });
 }
 
-fn setting_row(ui: &mut egui::Ui, label: &str, hint: &str, action: impl FnOnce(&mut egui::Ui)) {
+fn action_row(
+    ui: &mut egui::Ui,
+    min_height: f32,
+    label: &str,
+    hint: &str,
+    action: impl FnOnce(&mut egui::Ui),
+) {
     ui.horizontal(|ui| {
-        ui.set_min_height(58.0);
+        ui.set_min_height(min_height);
         ui.vertical(|ui| {
             ui.label(RichText::new(label).strong());
             ui.label(RichText::new(hint).small().color(theme::MUTED));
         });
         ui.with_layout(Layout::right_to_left(Align::Center), action);
     });
+}
+
+fn status_panel(
+    ui: &mut egui::Ui,
+    title: &str,
+    body: &str,
+    tone: Tone,
+    action: impl FnOnce(&mut egui::Ui),
+) {
+    let (fill, stroke, color) = tone_colors(tone);
+    Frame::NONE
+        .fill(fill)
+        .stroke(Stroke::new(1.0, stroke))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(title).strong().color(color));
+                    ui.label(RichText::new(body).small().color(theme::MUTED));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), action);
+            });
+        });
+}
+
+fn share_action_available(permission: CapturePermission, snapshot: &AppSnapshot) -> bool {
+    permission == CapturePermission::Allowed
+        && snapshot.session.phase() == SessionPhase::Listening
+        && snapshot.media.phase() == MediaPhase::Idle
+        && snapshot.share_selection.is_some()
 }
 
 fn device_name(peer: &PeerSnapshot, locale: Locale) -> String {
