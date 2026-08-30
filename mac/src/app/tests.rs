@@ -123,6 +123,7 @@ fn share_action_requires_permission_source_and_idle_media() {
 
     snapshot.share_selection = Some(crate::publication::Selection::Display {
         display_id: 7,
+        primary: true,
         label: "Display 7".to_owned(),
     });
     assert!(!share_action_available(
@@ -140,4 +141,38 @@ fn share_action_requires_permission_source_and_idle_media() {
         CapturePermission::Allowed,
         &snapshot
     ));
+}
+
+#[test]
+fn system_audio_action_requires_an_idle_primary_display() {
+    let mut snapshot = AppSnapshot {
+        share_selection: Some(crate::publication::Selection::Display {
+            display_id: 7,
+            primary: true,
+            label: "Display 7".to_owned(),
+        }),
+        ..AppSnapshot::default()
+    };
+    assert!(system_audio_action_available(&snapshot));
+
+    snapshot.share_selection = Some(crate::publication::Selection::Display {
+        display_id: 8,
+        primary: false,
+        label: "Display 8".to_owned(),
+    });
+    assert!(!system_audio_action_available(&snapshot));
+
+    snapshot.share_selection = Some(crate::publication::Selection::Window {
+        window_id: 9,
+        label: "Window".to_owned(),
+    });
+    assert!(!system_audio_action_available(&snapshot));
+
+    snapshot.share_selection = Some(crate::publication::Selection::Display {
+        display_id: 7,
+        primary: true,
+        label: "Display 7".to_owned(),
+    });
+    snapshot.media.begin(MediaPhase::PreparingShare);
+    assert!(!system_audio_action_available(&snapshot));
 }

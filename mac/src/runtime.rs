@@ -124,6 +124,15 @@ pub(crate) enum MediaOwner {
     Share,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ShareAudioPhase {
+    #[default]
+    Off,
+    Preparing,
+    Included,
+    Failed,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NearbyIssue {
     LocalNetworkUnavailable,
@@ -157,6 +166,9 @@ pub(crate) struct AppSnapshot {
     pub(crate) media_path: Option<String>,
     pub(crate) media_owner: Option<MediaOwner>,
     pub(crate) share_selection: Option<ShareSelection>,
+    pub(crate) share_system_audio: bool,
+    pub(crate) share_audio: ShareAudioPhase,
+    pub(crate) share_audio_error: Option<String>,
     pub(crate) media_decoder: Option<String>,
     pub(crate) media_width: Option<u32>,
     pub(crate) media_height: Option<u32>,
@@ -181,6 +193,9 @@ impl Default for AppSnapshot {
             media_path: None,
             media_owner: None,
             share_selection: None,
+            share_system_audio: false,
+            share_audio: ShareAudioPhase::Off,
+            share_audio_error: None,
             media_decoder: None,
             media_width: None,
             media_height: None,
@@ -272,10 +287,14 @@ impl AppSnapshot {
     }
 
     fn finish_stop_media(&mut self, generation: Generation) -> bool {
+        let reset_share_audio = self.media_owner == Some(MediaOwner::Share);
         if !self.media.apply(generation, MediaPhase::Idle) {
             return false;
         }
         self.clear_media_fields(None);
+        if reset_share_audio {
+            self.reset_share_audio();
+        }
         true
     }
 
@@ -284,10 +303,29 @@ impl AppSnapshot {
             return false;
         }
         self.share_selection = Some(selection);
+        self.share_system_audio = false;
+        self.share_audio = ShareAudioPhase::Off;
+        self.share_audio_error = None;
         true
     }
 
-    fn begin_share(&mut self) -> Option<(Generation, ShareSelection)> {
+    fn set_share_system_audio(&mut self, enabled: bool) -> bool {
+        if self.media.phase() != MediaPhase::Idle
+            || (enabled
+                && !self
+                    .share_selection
+                    .as_ref()
+                    .is_some_and(ShareSelection::supports_system_audio))
+        {
+            return false;
+        }
+        self.share_system_audio = enabled;
+        self.share_audio = ShareAudioPhase::Off;
+        self.share_audio_error = None;
+        true
+    }
+
+    fn begin_share(&mut self) -> Option<ShareStart> {
         if self.media.phase() != MediaPhase::Idle {
             return None;
         }
@@ -300,10 +338,25 @@ impl AppSnapshot {
         self.media_width = None;
         self.media_height = None;
         self.media_error = None;
-        Some((generation, selection))
+        self.share_audio = if self.share_system_audio {
+            ShareAudioPhase::Preparing
+        } else {
+            ShareAudioPhase::Off
+        };
+        self.share_audio_error = None;
+        Some(ShareStart {
+            generation,
+            selection,
+            system_audio: self.share_system_audio,
+        })
     }
 
-    fn publication_announced(&mut self, generation: Generation, path: String) -> bool {
+    fn publication_announced(
+        &mut self,
+        generation: Generation,
+        path: String,
+        audio: publication::AudioStatus,
+    ) -> bool {
         if self.media_owner != Some(MediaOwner::Share)
             || self.media.phase() != MediaPhase::PreparingShare
             || !self.media.apply(generation, MediaPhase::Sharing)
@@ -311,6 +364,35 @@ impl AppSnapshot {
             return false;
         }
         self.media_path = Some(path);
+        match audio {
+            publication::AudioStatus::Off => {
+                self.share_audio = ShareAudioPhase::Off;
+                self.share_audio_error = None;
+            }
+            publication::AudioStatus::Included => {
+                self.share_audio = ShareAudioPhase::Included;
+                self.share_audio_error = None;
+            }
+            publication::AudioStatus::Unavailable(message) => {
+                self.share_audio = ShareAudioPhase::Failed;
+                self.share_audio_error = Some(message);
+            }
+        }
+        true
+    }
+
+    fn publication_audio_failed(&mut self, generation: Generation, message: String) -> bool {
+        if self.media_owner != Some(MediaOwner::Share)
+            || self.media.generation() != generation
+            || !matches!(
+                self.media.phase(),
+                MediaPhase::PreparingShare | MediaPhase::Sharing
+            )
+        {
+            return false;
+        }
+        self.share_audio = ShareAudioPhase::Failed;
+        self.share_audio_error = Some(message);
         true
     }
 
@@ -335,8 +417,11 @@ impl AppSnapshot {
                 self.media.apply(generation, MediaPhase::Failed);
                 self.media_path = None;
                 self.media_error = Some(message);
+                self.share_audio = ShareAudioPhase::Off;
+                self.share_audio_error = None;
                 if source_unavailable {
                     self.share_selection = None;
+                    self.reset_share_audio();
                 }
             }
         }
@@ -356,8 +441,12 @@ impl AppSnapshot {
     }
 
     fn clear_media(&mut self, phase: MediaPhase, error: Option<String>) {
+        let reset_share_audio = self.media_owner == Some(MediaOwner::Share);
         self.media.begin(phase);
         self.clear_media_fields(error);
+        if reset_share_audio {
+            self.reset_share_audio();
+        }
     }
 
     fn clear_media_fields(&mut self, error: Option<String>) {
@@ -369,6 +458,18 @@ impl AppSnapshot {
         self.media_height = None;
         self.media_error = error;
     }
+
+    fn reset_share_audio(&mut self) {
+        self.share_system_audio = false;
+        self.share_audio = ShareAudioPhase::Off;
+        self.share_audio_error = None;
+    }
+}
+
+struct ShareStart {
+    generation: Generation,
+    selection: ShareSelection,
+    system_audio: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -376,6 +477,7 @@ pub(crate) enum RuntimeCommand {
     WatchScreen { peer: String, path: String },
     StopWatching,
     SelectShareSource(ShareSelection),
+    SetShareSystemAudio(bool),
     StartSharing,
     StopSharing,
     Shutdown,
@@ -465,6 +567,12 @@ impl RuntimeOwner {
     pub(crate) fn select_share_source(&self, selection: ShareSelection) -> bool {
         self.commands
             .try_send(RuntimeCommand::SelectShareSource(selection))
+            .is_ok()
+    }
+
+    pub(crate) fn set_share_system_audio(&self, enabled: bool) -> bool {
+        self.commands
+            .try_send(RuntimeCommand::SetShareSystemAudio(enabled))
             .is_ok()
     }
 
@@ -594,6 +702,10 @@ async fn run(
                 snapshot.select_share_source(selection);
                 false
             }
+            RuntimeInput::Command(Some(RuntimeCommand::SetShareSystemAudio(enabled))) => {
+                snapshot.set_share_system_audio(enabled);
+                false
+            }
             RuntimeInput::Command(Some(RuntimeCommand::StartSharing)) => {
                 start_share(&mut snapshot, &services, &mut publication);
                 false
@@ -713,14 +825,15 @@ fn start_share(
     services: &network::Services,
     publication: &mut publication::Owner,
 ) {
-    let Some((generation, selection)) = snapshot.begin_share() else {
+    let Some(start) = snapshot.begin_share() else {
         return;
     };
     publication.start(
-        generation.value(),
+        start.generation.value(),
         services.publish_origin(),
         services.local_peer_id().to_owned(),
-        selection,
+        start.selection,
+        start.system_audio,
     );
 }
 
@@ -734,12 +847,34 @@ fn stop_share(snapshot: &mut AppSnapshot, publication: &mut publication::Owner) 
 
 fn apply_publication_event(snapshot: &mut AppSnapshot, event: PublicationEvent) {
     match event {
-        PublicationEvent::Announced { generation, path } => {
+        PublicationEvent::Announced {
+            generation,
+            path,
+            audio,
+        } => {
             let generation = Generation(generation);
-            if snapshot.publication_announced(generation, path) {
+            if snapshot.publication_announced(generation, path, audio) {
                 tracing::info!(
                     publish_generation = generation.value(),
                     "screen publication announced"
+                );
+            }
+        }
+        PublicationEvent::AudioFailed {
+            generation,
+            message,
+        } => {
+            let generation = Generation(generation);
+            if snapshot.publication_audio_failed(generation, message.clone()) {
+                tracing::warn!(
+                    publish_generation = generation.value(),
+                    %message,
+                    "system audio unavailable; video publication continues"
+                );
+            } else {
+                tracing::debug!(
+                    publish_generation = generation.value(),
+                    "ignored stale system audio failure"
                 );
             }
         }
@@ -1192,6 +1327,8 @@ mod tests {
     #[test]
     fn stopping_watch_does_not_change_a_healthy_session() {
         let mut snapshot = AppSnapshot::default();
+        assert!(snapshot.select_share_source(display_selection()));
+        assert!(snapshot.set_share_system_audio(true));
         snapshot.peers.insert(
             "peer".to_owned(),
             PeerSnapshot {
@@ -1208,20 +1345,120 @@ mod tests {
 
         assert_eq!(snapshot.media.phase(), MediaPhase::Idle);
         assert_eq!(snapshot.peers["peer"].session, PeerSession::Connected);
+        assert!(snapshot.share_system_audio);
+        assert_eq!(snapshot.share_audio, ShareAudioPhase::Off);
     }
 
     fn display_selection() -> ShareSelection {
         ShareSelection::Display {
             display_id: 7,
+            primary: true,
             label: "Display 7".to_owned(),
         }
+    }
+
+    fn secondary_display_selection() -> ShareSelection {
+        ShareSelection::Display {
+            display_id: 8,
+            primary: false,
+            label: "Display 8".to_owned(),
+        }
+    }
+
+    #[test]
+    fn system_audio_is_opt_in_and_requires_the_primary_display() {
+        let mut snapshot = AppSnapshot::default();
+        assert!(snapshot.select_share_source(display_selection()));
+        assert!(!snapshot.share_system_audio);
+        assert!(snapshot.set_share_system_audio(true));
+        assert!(snapshot.share_system_audio);
+
+        assert!(snapshot.select_share_source(secondary_display_selection()));
+        assert!(!snapshot.share_system_audio);
+        assert!(!snapshot.set_share_system_audio(true));
+
+        assert!(snapshot.select_share_source(ShareSelection::Window {
+            window_id: 9,
+            label: "Window".to_owned(),
+        }));
+        assert!(!snapshot.set_share_system_audio(true));
+    }
+
+    #[test]
+    fn current_audio_failure_keeps_video_sharing_and_stale_failure_is_ignored() {
+        let mut snapshot = AppSnapshot::default();
+        assert!(snapshot.select_share_source(display_selection()));
+        assert!(snapshot.set_share_system_audio(true));
+        let start = snapshot.begin_share().expect("share starts");
+        assert!(snapshot.publication_announced(
+            start.generation,
+            "moqcast.screen/current".to_owned(),
+            publication::AudioStatus::Included,
+        ));
+
+        assert!(!snapshot.publication_audio_failed(
+            Generation(start.generation.value() - 1),
+            "stale".to_owned(),
+        ));
+        assert!(snapshot.publication_audio_failed(
+            start.generation,
+            "System audio is unavailable. Video sharing continues.".to_owned(),
+        ));
+        assert_eq!(snapshot.media.phase(), MediaPhase::Sharing);
+        assert_eq!(
+            snapshot.media_path.as_deref(),
+            Some("moqcast.screen/current")
+        );
+        assert_eq!(snapshot.share_audio, ShareAudioPhase::Failed);
+    }
+
+    #[test]
+    fn unavailable_audio_keeps_video_sharing_and_reports_the_reason() {
+        let mut snapshot = AppSnapshot::default();
+        assert!(snapshot.select_share_source(display_selection()));
+        assert!(snapshot.set_share_system_audio(true));
+        let start = snapshot.begin_share().expect("share starts");
+        assert!(snapshot.publication_announced(
+            start.generation,
+            "moqcast.screen/current".to_owned(),
+            publication::AudioStatus::Unavailable("main display required".to_owned()),
+        ));
+
+        assert_eq!(snapshot.media.phase(), MediaPhase::Sharing);
+        assert_eq!(snapshot.share_audio, ShareAudioPhase::Failed);
+        assert_eq!(
+            snapshot.share_audio_error.as_deref(),
+            Some("main display required")
+        );
+    }
+
+    #[test]
+    fn publication_failure_ends_the_audio_running_state() {
+        let mut snapshot = AppSnapshot::default();
+        assert!(snapshot.select_share_source(display_selection()));
+        assert!(snapshot.set_share_system_audio(true));
+        let start = snapshot.begin_share().expect("share starts");
+        assert!(snapshot.publication_announced(
+            start.generation,
+            "moqcast.screen/current".to_owned(),
+            publication::AudioStatus::Included,
+        ));
+        assert!(snapshot.publication_ended(
+            start.generation,
+            Err(publication::Failure::pipeline("video failed")),
+        ));
+
+        assert_eq!(snapshot.media.phase(), MediaPhase::Failed);
+        assert!(snapshot.share_system_audio);
+        assert_eq!(snapshot.share_audio, ShareAudioPhase::Off);
+        assert!(snapshot.share_audio_error.is_none());
     }
 
     #[test]
     fn watch_and_share_have_one_media_owner() {
         let mut snapshot = AppSnapshot::default();
         assert!(snapshot.select_share_source(display_selection()));
-        let (share, _) = snapshot.begin_share().expect("share starts");
+        let share = snapshot.begin_share().expect("share starts").generation;
         assert_eq!(snapshot.media_owner, Some(MediaOwner::Share));
         assert!(
             snapshot
@@ -1235,19 +1472,27 @@ mod tests {
     fn stale_publication_events_cannot_override_a_new_media_generation() {
         let mut snapshot = AppSnapshot::default();
         assert!(snapshot.select_share_source(display_selection()));
-        let (first, _) = snapshot.begin_share().expect("first share");
+        let first = snapshot.begin_share().expect("first share").generation;
         let stopping = snapshot.begin_stop_share().expect("stop first share");
         assert!(snapshot.finish_stop_media(stopping));
-        let (second, _) = snapshot.begin_share().expect("second share");
+        let second = snapshot.begin_share().expect("second share").generation;
 
-        assert!(!snapshot.publication_announced(first, "moqcast.screen/stale".to_owned()));
+        assert!(!snapshot.publication_announced(
+            first,
+            "moqcast.screen/stale".to_owned(),
+            publication::AudioStatus::Off,
+        ));
         assert!(
             !snapshot
                 .publication_ended(first, Err(publication::Failure::pipeline("stale failure")),)
         );
         assert_eq!(snapshot.media.phase(), MediaPhase::PreparingShare);
         assert!(snapshot.media_error.is_none());
-        assert!(snapshot.publication_announced(second, "moqcast.screen/current".to_owned()));
+        assert!(snapshot.publication_announced(
+            second,
+            "moqcast.screen/current".to_owned(),
+            publication::AudioStatus::Off,
+        ));
         assert_eq!(snapshot.media.phase(), MediaPhase::Sharing);
         assert_eq!(
             snapshot.media_path.as_deref(),
@@ -1268,7 +1513,13 @@ mod tests {
             },
         );
         assert!(snapshot.select_share_source(display_selection()));
-        snapshot.begin_share().expect("share");
+        assert!(snapshot.set_share_system_audio(true));
+        let start = snapshot.begin_share().expect("share");
+        assert!(snapshot.publication_announced(
+            start.generation,
+            "moqcast.screen/current".to_owned(),
+            publication::AudioStatus::Included,
+        ));
         let stopping = snapshot.begin_stop_share().expect("stop share");
         assert!(snapshot.finish_stop_media(stopping));
 
@@ -1278,13 +1529,16 @@ mod tests {
         assert_eq!(snapshot.session.generation(), session_generation);
         assert_eq!(snapshot.peers["peer"].session, PeerSession::Connected);
         assert!(snapshot.share_selection.is_some());
+        assert!(!snapshot.share_system_audio);
+        assert_eq!(snapshot.share_audio, ShareAudioPhase::Off);
+        assert!(snapshot.share_audio_error.is_none());
     }
 
     #[test]
     fn unavailable_share_source_requires_a_new_picker_selection() {
         let mut snapshot = AppSnapshot::default();
         assert!(snapshot.select_share_source(display_selection()));
-        let (generation, _) = snapshot.begin_share().expect("share");
+        let generation = snapshot.begin_share().expect("share").generation;
 
         assert!(
             snapshot

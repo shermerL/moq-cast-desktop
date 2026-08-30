@@ -3089,12 +3089,20 @@ name = "moq-audio"
 version = "0.0.18"
 source = "git+https://github.com/moq-dev/moq?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
 dependencies = [
+ "block2 0.6.2",
  "bytes",
  "cpal",
+ "dispatch2",
  "fixed-resample",
  "hang",
  "moq-mux",
  "moq-net",
+ "objc2 0.6.4",
+ "objc2-av-foundation",
+ "objc2-core-audio-types",
+ "objc2-core-media",
+ "objc2-foundation 0.3.2",
+ "objc2-screen-capture-kit",
  "rand",
  "rubato",
  "thiserror 2.0.20",

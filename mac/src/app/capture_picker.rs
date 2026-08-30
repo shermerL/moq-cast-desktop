@@ -5,7 +5,9 @@ use std::sync::{Arc, mpsc};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
-use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
+use objc2_core_graphics::{
+    CGMainDisplayID, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
+};
 use objc2_foundation::{NSError, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCContentSharingPicker, SCContentSharingPickerConfiguration,
@@ -133,6 +135,7 @@ fn selection(filter: &SCContentFilter) -> Option<Selection> {
             let display_id = unsafe { display.displayID() };
             Some(Selection::Display {
                 display_id,
+                primary: display_id == CGMainDisplayID(),
                 label: format!("Display {display_id}"),
             })
         }

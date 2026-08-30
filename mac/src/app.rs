@@ -19,7 +19,7 @@ use crate::playback::FrameIdentity;
 use crate::remote::ScreenAvailability;
 use crate::runtime::{
     AppSnapshot, DiscoveryPhase, MediaOwner, MediaPhase, NearbyIssue, PeerSnapshot, RuntimeOwner,
-    SessionPhase,
+    SessionPhase, ShareAudioPhase,
 };
 
 const STORAGE_LOCALE: &str = "moqcast.macos.locale";
@@ -644,10 +644,52 @@ impl MoqCastApp {
                 self.capture_permission = CapturePermission::Denied;
             }
         }
+        let audio_supported = snapshot
+            .share_selection
+            .as_ref()
+            .is_some_and(crate::publication::Selection::supports_system_audio);
+        let audio_status = if snapshot.share_audio == ShareAudioPhase::Failed {
+            snapshot.share_audio_error.as_deref().unwrap_or_else(|| {
+                self.text(
+                    "系统音频不可用，视频共享继续。",
+                    "System audio is unavailable. Video sharing continues.",
+                )
+            })
+        } else if snapshot.share_audio == ShareAudioPhase::Included {
+            self.text("已包含，按观看需求采集", "Included, captured on demand")
+        } else if snapshot.share_system_audio {
+            self.text("已开启", "On")
+        } else if audio_supported {
+            self.text("关闭", "Off")
+        } else {
+            self.text(
+                "仅共享主显示器时可用",
+                "Available only for the main display",
+            )
+        };
+        let mut audio_enabled = snapshot.share_system_audio;
+        let mut audio_changed = false;
+        action_row(
+            ui,
+            62.0,
+            self.text("系统音频", "System audio"),
+            audio_status,
+            |ui| {
+                audio_changed = ui
+                    .add_enabled(
+                        system_audio_action_available(snapshot),
+                        egui::Checkbox::without_text(&mut audio_enabled),
+                    )
+                    .changed();
+            },
+        );
+        if audio_changed {
+            self.runtime.set_share_system_audio(audio_enabled);
+        }
         ui.label(
             RichText::new(self.text(
-                "共享画面包含光标。当前版本仅发布视频。",
-                "The pointer is included. This version publishes video only.",
+                "共享画面包含光标。系统音频不包含麦克风，当前仅支持主显示器。",
+                "The pointer is included. System audio excludes the microphone and currently supports only the main display.",
             ))
             .small()
             .color(theme::MUTED),
@@ -703,14 +745,25 @@ impl MoqCastApp {
                 Tone::Warning,
             )
         } else if share_owned && snapshot.media.phase() == MediaPhase::Sharing {
-            (
-                self.text("屏幕共享已就绪", "Screen sharing is ready"),
-                self.text(
+            if snapshot.share_audio == ShareAudioPhase::Failed {
+                (
+                    self.text("视频共享已就绪", "Video sharing is ready"),
+                    self.text(
+                        "系统音频不可用，视频仍会按观看需求发布。停止共享不会断开健康连接。",
+                        "System audio is unavailable, but video continues on demand. Stopping keeps healthy sessions active.",
+                    ),
+                    Tone::Warning,
+                )
+            } else {
+                (
+                    self.text("屏幕共享已就绪", "Screen sharing is ready"),
+                    self.text(
                     "附近设备开始观看时，将按需启动捕获与 H.264 编码。停止共享不会断开健康连接。",
                     "Capture and H.264 encoding start on demand when a nearby device watches. Stopping keeps healthy sessions active.",
-                ),
-                Tone::Success,
-            )
+                    ),
+                    Tone::Success,
+                )
+            }
         } else if share_owned && snapshot.media.phase() == MediaPhase::Stopping {
             (
                 self.text("正在停止共享", "Stopping screen sharing"),
@@ -1206,6 +1259,14 @@ fn share_action_available(permission: CapturePermission, snapshot: &AppSnapshot)
         && snapshot.session.phase() == SessionPhase::Listening
         && snapshot.media.phase() == MediaPhase::Idle
         && snapshot.share_selection.is_some()
+}
+
+fn system_audio_action_available(snapshot: &AppSnapshot) -> bool {
+    snapshot.media.phase() == MediaPhase::Idle
+        && snapshot
+            .share_selection
+            .as_ref()
+            .is_some_and(crate::publication::Selection::supports_system_audio)
 }
 
 fn device_name(peer: &PeerSnapshot, locale: Locale) -> String {
