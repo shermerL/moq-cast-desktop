@@ -1,51 +1,54 @@
-# MoQCast Desktop
+# MoQCast
 
-MoQCast Desktop 是基于 Media over QUIC 的局域网投屏应用，支持 Linux 和 Windows。macOS 原生端正在建立基础能力，尚未发布可用版本。
+English | [简体中文](README.zh-CN.md)
 
-MoQCast Desktop is a LAN screen-sharing application for Linux and Windows, built with Media over QUIC. The native macOS app is at the foundation stage and does not have a usable release yet.
+[![Windows CI](https://github.com/shermerL/moq-cast-desktop/actions/workflows/windows.yml/badge.svg?branch=dev)](https://github.com/shermerL/moq-cast-desktop/actions/workflows/windows.yml?query=branch%3Adev)
+[![Linux CI](https://github.com/shermerL/moq-cast-desktop/actions/workflows/linux-appimage.yml/badge.svg?branch=dev)](https://github.com/shermerL/moq-cast-desktop/actions/workflows/linux-appimage.yml?query=branch%3Adev)
+[![macOS CI](https://github.com/shermerL/moq-cast-desktop/actions/workflows/macos.yml/badge.svg?branch=dev)](https://github.com/shermerL/moq-cast-desktop/actions/workflows/macos.yml?query=branch%3Adev)
+[![Windows Lite CI](https://github.com/shermerL/moq-cast-desktop/actions/workflows/windows-lite.yml/badge.svg?branch=dev)](https://github.com/shermerL/moq-cast-desktop/actions/workflows/windows-lite.yml?query=branch%3Adev)
 
-> 当前为开发预发布版本。This project is currently a development prerelease.
+MoQCast is a cross-platform, low-latency screen-sharing app built with Media over QUIC.
 
-## 功能 / Features
+> This is a development preview. Capabilities and validation differ by platform, and the UI, compatibility, and installation flow may change.
+>
+> CI badges report automated checks and builds only. They do not prove real-device, hardware, or complete platform-environment acceptance.
 
-- 局域网设备发现与 QUIC 直连 / LAN discovery and direct QUIC connections
-- 发布屏幕和系统音频 / Publish the screen and system audio
-- 播放远端屏幕和音频 / Play a remote screen and audio
-- 与 [MoQCast Android](https://github.com/shermerL/moq-cast) 互联 / Interoperate with MoQCast Android
+## Platforms
 
-## 下载 / Downloads
+| Platform | Status |
+| --- | --- |
+| Android | Preview |
+| Windows | Preview |
+| Linux | Preview |
+| macOS | Preview |
+| Windows Lite | Experimental |
+| Web | Experimental |
 
-从 [GitHub Releases](https://github.com/shermerL/moq-cast-desktop/releases) 下载 Windows x86-64 EXE 或 Linux x86-64 AppImage。
+The table describes implemented product scope, not a guarantee that every platform pair has passed real-device validation.
 
-Download the Windows x86-64 EXE or Linux x86-64 AppImage from [GitHub Releases](https://github.com/shermerL/moq-cast-desktop/releases).
+## Core capabilities
 
-## 从源码运行 / Run From Source
+- Discover nearby devices and establish direct local-network sessions automatically.
+- Share H.264 screen video on supported native platforms.
+- Include system audio when the operating system and source allow capture.
+- Watch remote screen video and play remote audio on supported platforms.
+- Interoperate with [MoQCast Android](https://github.com/shermerL/moq-cast).
 
-项目使用 Rust `1.95.0`。The project uses Rust `1.95.0`.
+## Development
+
+Desktop applications use Rust `1.95.0`. Start with the platform notes for [Linux](linux/README.md), [Windows](windows/README.md), [macOS](mac/README.md), or [Windows Lite](windows-lite/README.md).
 
 ```bash
 # Linux
 cd linux
 cargo run --locked --release
 
-# Windows PowerShell
-cd windows
-cargo run --locked --release
-
-# macOS foundation, media is not implemented yet
+# macOS Nearby preview
 cd mac
 cargo run --locked
 ```
 
-平台说明见 [Linux](linux/README.md)、[Windows](windows/README.md) 和 [macOS](mac/README.md)。
-
-See the platform notes for [Linux](linux/README.md), [Windows](windows/README.md), and [macOS](mac/README.md).
-
-## MoQTCast Lite for Windows
-
-[`windows-lite/`](windows-lite/README.md) 是独立的轻量 notification-area 应用，只浏览局域网中的 MoQ 设备在线状态，并通过进程期授权的 loopback API 把清洗后 presence 交给 MoQTCast Connect 页面。它不发布服务，不处理或代理媒体。
-
-[`windows-lite/`](windows-lite/README.md) is a separate lightweight notification-area application. It browses MoQ device presence on the LAN and exposes only sanitized presence to the MoQTCast Connect page through a process-authorized loopback API. It does not advertise a service or handle or proxy media.
+On Windows, run `cargo run --locked --release` from the `windows` directory in PowerShell.
 
 ## License
 
@@ -53,6 +56,4 @@ Licensed under either [Apache License 2.0](LICENSE-APACHE) or [MIT License](LICE
 
 ## Acknowledgements
 
-MoQCast Desktop 基于 [moq-dev/moq](https://github.com/moq-dev/moq) 构建。感谢 Luke Curley 及其他 MoQ contributors。
-
-MoQCast Desktop builds on [moq-dev/moq](https://github.com/moq-dev/moq). Thanks to Luke Curley and the other MoQ contributors.
+MoQCast builds on [moq-dev/moq](https://github.com/moq-dev/moq). Thanks to Luke Curley and the wider MoQ contributor community.
