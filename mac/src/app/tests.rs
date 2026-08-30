@@ -41,6 +41,34 @@ fn peer_presentation_keeps_presence_and_session_independent() {
 }
 
 #[test]
+fn screen_availability_uses_only_the_canonical_peer_path() {
+    let mut screens = std::collections::BTreeMap::new();
+    screens.insert(
+        crate::contract::screen_path("peer-a"),
+        crate::remote::ScreenView {
+            peer_id: "peer-a".to_owned(),
+            availability: crate::remote::ScreenAvailability::Available,
+        },
+    );
+    screens.insert(
+        crate::contract::screen_path("peer-b"),
+        crate::remote::ScreenView {
+            peer_id: "different-peer".to_owned(),
+            availability: crate::remote::ScreenAvailability::Available,
+        },
+    );
+
+    assert_eq!(
+        screen_availability("peer-a", &screens),
+        crate::remote::ScreenAvailability::Available
+    );
+    assert_eq!(
+        screen_availability("peer-b", &screens),
+        crate::remote::ScreenAvailability::Unavailable
+    );
+}
+
+#[test]
 fn selection_survives_lost_while_the_session_is_healthy() {
     let mut peers = std::collections::BTreeMap::new();
     peers.insert("peer-a".to_owned(), peer(false, PeerSession::Connected));

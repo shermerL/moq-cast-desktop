@@ -10,8 +10,11 @@ use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 
 use crate::network::{self, Event as NetworkEvent, PeerSession};
+use crate::playback::{self, Event as PlaybackEvent, Frame as PlaybackFrame};
+use crate::remote::{ScreenAvailability, ScreenView};
 
 const COMMAND_CAPACITY: usize = 32;
+const PLAYBACK_EVENT_CAPACITY: usize = 8;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Generation(u64);
@@ -25,7 +28,6 @@ impl Generation {
         )
     }
 
-    #[cfg(test)]
     pub(crate) fn value(self) -> u64 {
         self.0
     }
@@ -80,6 +82,7 @@ pub(crate) enum RuntimePhase {
 pub(crate) enum CapabilityPhase {
     #[default]
     Unavailable,
+    Available,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -106,6 +109,10 @@ pub(crate) enum SessionPhase {
 pub(crate) enum MediaPhase {
     #[default]
     Idle,
+    PreparingWatch,
+    Watching,
+    Stopping,
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,8 +141,15 @@ pub(crate) struct AppSnapshot {
     pub(crate) decoder: Lifecycle<CapabilityPhase>,
     pub(crate) local_device_name: Option<String>,
     pub(crate) peers: BTreeMap<String, PeerSnapshot>,
+    pub(crate) remote_screens: BTreeMap<String, ScreenView>,
     pub(crate) inbound_sessions: usize,
     pub(crate) nearby_issue: Option<NearbyIssue>,
+    pub(crate) media_peer: Option<String>,
+    pub(crate) media_path: Option<String>,
+    pub(crate) media_decoder: Option<String>,
+    pub(crate) media_width: Option<u32>,
+    pub(crate) media_height: Option<u32>,
+    pub(crate) media_error: Option<String>,
 }
 
 impl Default for AppSnapshot {
@@ -146,17 +160,116 @@ impl Default for AppSnapshot {
             session: Lifecycle::new(SessionPhase::Starting),
             media: Lifecycle::new(MediaPhase::Idle),
             capture: Lifecycle::new(CapabilityPhase::Unavailable),
-            decoder: Lifecycle::new(CapabilityPhase::Unavailable),
+            decoder: Lifecycle::new(CapabilityPhase::Available),
             local_device_name: local_device_name(),
             peers: BTreeMap::new(),
+            remote_screens: BTreeMap::new(),
             inbound_sessions: 0,
             nearby_issue: None,
+            media_peer: None,
+            media_path: None,
+            media_decoder: None,
+            media_width: None,
+            media_height: None,
+            media_error: None,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+impl AppSnapshot {
+    fn begin_watch(&mut self, peer: &str, path: &str) -> Option<Generation> {
+        if self.media.phase() != MediaPhase::Idle {
+            return None;
+        }
+        let generation = self.media.begin(MediaPhase::PreparingWatch);
+        self.media_peer = Some(peer.to_owned());
+        self.media_path = Some(path.to_owned());
+        self.media_decoder = None;
+        self.media_width = None;
+        self.media_height = None;
+        self.media_error = None;
+        Some(generation)
+    }
+
+    fn playback_started(
+        &mut self,
+        generation: Generation,
+        decoder: String,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        if !matches!(
+            self.media.phase(),
+            MediaPhase::PreparingWatch | MediaPhase::Watching
+        ) || !self.media.apply(generation, MediaPhase::Watching)
+        {
+            return false;
+        }
+        self.media_decoder = Some(decoder);
+        self.media_width = Some(width);
+        self.media_height = Some(height);
+        true
+    }
+
+    fn playback_ended(&mut self, generation: Generation, result: Result<(), String>) -> bool {
+        if self.media.generation() != generation
+            || !matches!(
+                self.media.phase(),
+                MediaPhase::PreparingWatch | MediaPhase::Watching
+            )
+        {
+            return false;
+        }
+        match result {
+            Ok(()) => self.clear_media(MediaPhase::Idle, None),
+            Err(error) => {
+                self.media.apply(generation, MediaPhase::Failed);
+                self.media_decoder = None;
+                self.media_width = None;
+                self.media_height = None;
+                self.media_error = Some(error);
+            }
+        }
+        true
+    }
+
+    fn begin_stop_watch(&mut self) -> Option<Generation> {
+        if !matches!(
+            self.media.phase(),
+            MediaPhase::PreparingWatch | MediaPhase::Watching | MediaPhase::Failed
+        ) {
+            return None;
+        }
+        Some(self.media.begin(MediaPhase::Stopping))
+    }
+
+    fn finish_stop_watch(&mut self, generation: Generation) -> bool {
+        if !self.media.apply(generation, MediaPhase::Idle) {
+            return false;
+        }
+        self.clear_media_fields(None);
+        true
+    }
+
+    fn clear_media(&mut self, phase: MediaPhase, error: Option<String>) {
+        self.media.begin(phase);
+        self.clear_media_fields(error);
+    }
+
+    fn clear_media_fields(&mut self, error: Option<String>) {
+        self.media_peer = None;
+        self.media_path = None;
+        self.media_decoder = None;
+        self.media_width = None;
+        self.media_height = None;
+        self.media_error = error;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RuntimeCommand {
+    WatchScreen { peer: String, path: String },
+    StopWatching,
     Shutdown,
 }
 
@@ -171,6 +284,7 @@ pub(crate) enum RuntimeStartError {
 pub(crate) struct RuntimeOwner {
     commands: mpsc::Sender<RuntimeCommand>,
     snapshot: watch::Receiver<Arc<AppSnapshot>>,
+    frames: watch::Receiver<Option<Arc<PlaybackFrame>>>,
     owner: Option<thread::JoinHandle<()>>,
 }
 
@@ -207,21 +321,37 @@ impl RuntimeOwner {
             .map_err(RuntimeStartError::AsyncRuntime)?;
         let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (snapshot_tx, snapshot) = watch::channel(Arc::new(AppSnapshot::default()));
+        let (frames_tx, frames) = watch::channel(None);
         let wake = Arc::new(wake);
         let owner = thread::Builder::new()
             .name("moqcast-macos-runtime".to_owned())
-            .spawn(move || runtime.block_on(run(command_rx, snapshot_tx, start(), wake)))
+            .spawn(move || runtime.block_on(run(command_rx, snapshot_tx, frames_tx, start(), wake)))
             .map_err(RuntimeStartError::OwnerThread)?;
 
         Ok(Self {
             commands,
             snapshot,
+            frames,
             owner: Some(owner),
         })
     }
 
     pub(crate) fn snapshot(&self) -> Arc<AppSnapshot> {
         self.snapshot.borrow().clone()
+    }
+
+    pub(crate) fn playback_frame(&self) -> Option<Arc<PlaybackFrame>> {
+        self.frames.borrow().clone()
+    }
+
+    pub(crate) fn watch_screen(&self, peer: String, path: String) -> bool {
+        self.commands
+            .try_send(RuntimeCommand::WatchScreen { peer, path })
+            .is_ok()
+    }
+
+    pub(crate) fn stop_watching(&self) -> bool {
+        self.commands.try_send(RuntimeCommand::StopWatching).is_ok()
     }
 
     fn shutdown(&mut self) {
@@ -244,6 +374,7 @@ impl Drop for RuntimeOwner {
 async fn run(
     mut commands: mpsc::Receiver<RuntimeCommand>,
     snapshot_tx: watch::Sender<Arc<AppSnapshot>>,
+    frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
     start: impl Future<Output = Result<network::Services, NearbyIssue>>,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) {
@@ -284,10 +415,12 @@ async fn run(
                 stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
                 return;
             }
-            unreachable!("shutdown is the only runtime command");
+            unreachable!("media commands are unavailable before services start");
         }
     };
 
+    let (playback_events_tx, mut playback_events) = mpsc::channel(PLAYBACK_EVENT_CAPACITY);
+    let mut playback = playback::Owner::default();
     let mut initial_scan = Box::pin(tokio::time::sleep(Duration::from_secs(3)));
     let mut scan_finished = false;
     loop {
@@ -295,11 +428,13 @@ async fn run(
             tokio::select! {
                 command = commands.recv() => RuntimeInput::Command(command),
                 event = services.recv() => RuntimeInput::Network(event),
+                event = playback_events.recv() => RuntimeInput::Playback(event),
             }
         } else {
             tokio::select! {
                 command = commands.recv() => RuntimeInput::Command(command),
                 event = services.recv() => RuntimeInput::Network(event),
+                event = playback_events.recv() => RuntimeInput::Playback(event),
                 () = &mut initial_scan => RuntimeInput::InitialScanFinished,
             }
         };
@@ -307,6 +442,25 @@ async fn run(
         let previous = snapshot.clone();
         let network_exhausted = match input {
             RuntimeInput::Command(Some(RuntimeCommand::Shutdown) | None) => break,
+            RuntimeInput::Command(Some(RuntimeCommand::WatchScreen { peer, path })) => {
+                start_watch(
+                    &mut snapshot,
+                    StartWatch {
+                        services: &services,
+                        playback: &mut playback,
+                        events: &playback_events_tx,
+                        frames: &frames,
+                        wake: &wake,
+                        peer_id: peer,
+                        path,
+                    },
+                );
+                false
+            }
+            RuntimeInput::Command(Some(RuntimeCommand::StopWatching)) => {
+                stop_watch(&mut snapshot, &mut playback, &frames).await;
+                false
+            }
             RuntimeInput::Network(Some(event)) => {
                 apply_network_event(
                     &mut snapshot,
@@ -327,6 +481,11 @@ async fn run(
                 snapshot.nearby_issue = Some(NearbyIssue::ListenerStopped);
                 true
             }
+            RuntimeInput::Playback(Some(event)) => {
+                apply_playback_event(&mut snapshot, &frames, event);
+                false
+            }
+            RuntimeInput::Playback(None) => false,
             RuntimeInput::InitialScanFinished => {
                 scan_finished = true;
                 let phase = if snapshot.peers.values().any(|peer| peer.discovered) {
@@ -346,6 +505,8 @@ async fn run(
         }
     }
 
+    playback.stop().await;
+    frames.send_replace(None);
     services.shutdown().await;
     stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
 }
@@ -353,7 +514,106 @@ async fn run(
 enum RuntimeInput {
     Command(Option<RuntimeCommand>),
     Network(Option<NetworkEvent>),
+    Playback(Option<PlaybackEvent>),
     InitialScanFinished,
+}
+
+struct StartWatch<'a> {
+    services: &'a network::Services,
+    playback: &'a mut playback::Owner,
+    events: &'a mpsc::Sender<PlaybackEvent>,
+    frames: &'a watch::Sender<Option<Arc<PlaybackFrame>>>,
+    wake: &'a Arc<dyn Fn() + Send + Sync>,
+    peer_id: String,
+    path: String,
+}
+
+fn start_watch(snapshot: &mut AppSnapshot, start: StartWatch<'_>) {
+    let peer_ready = snapshot
+        .peers
+        .get(&start.peer_id)
+        .is_some_and(|peer| peer.session == PeerSession::Connected);
+    let screen_ready = snapshot
+        .remote_screens
+        .get(&start.path)
+        .is_some_and(|screen| {
+            screen.peer_id == start.peer_id && screen.availability == ScreenAvailability::Available
+        });
+    if !peer_ready || !screen_ready {
+        return;
+    }
+    let Some(broadcast) = start.services.remote_broadcast(&start.path) else {
+        return;
+    };
+    let Some(generation) = snapshot.begin_watch(&start.peer_id, &start.path) else {
+        return;
+    };
+    start.frames.send_replace(None);
+    start.playback.start(
+        generation.value(),
+        broadcast,
+        start.events.clone(),
+        start.frames.clone(),
+        start.wake.clone(),
+    );
+}
+
+async fn stop_watch(
+    snapshot: &mut AppSnapshot,
+    playback: &mut playback::Owner,
+    frames: &watch::Sender<Option<Arc<PlaybackFrame>>>,
+) {
+    let Some(generation) = snapshot.begin_stop_watch() else {
+        return;
+    };
+    playback.stop().await;
+    frames.send_replace(None);
+    snapshot.finish_stop_watch(generation);
+}
+
+fn apply_playback_event(
+    snapshot: &mut AppSnapshot,
+    frames: &watch::Sender<Option<Arc<PlaybackFrame>>>,
+    event: PlaybackEvent,
+) {
+    match event {
+        PlaybackEvent::Started {
+            generation,
+            decoder,
+            width,
+            height,
+        } => {
+            let generation = Generation(generation);
+            if snapshot.playback_started(generation, decoder.clone(), width, height) {
+                tracing::info!(
+                    view_generation = generation.value(),
+                    decoder,
+                    width,
+                    height,
+                    "remote screen playback started"
+                );
+            }
+        }
+        PlaybackEvent::Ended { generation, result } => {
+            let generation = Generation(generation);
+            let failed = result.is_err();
+            if snapshot.playback_ended(generation, result.clone()) {
+                frames.send_replace(None);
+                if let Err(error) = result {
+                    tracing::warn!(
+                        view_generation = generation.value(),
+                        %error,
+                        "remote screen playback ended"
+                    );
+                }
+            } else if failed {
+                tracing::debug!(
+                    view_generation = generation.value(),
+                    "ignored stale playback failure"
+                );
+            }
+        }
+    }
 }
 
 fn apply_network_event(
@@ -393,6 +653,9 @@ fn apply_network_event(
         NetworkEvent::InboundCount(count) => snapshot.inbound_sessions = count,
         NetworkEvent::InboundRejected => {
             snapshot.nearby_issue = Some(NearbyIssue::DeviceRejected);
+        }
+        NetworkEvent::Screen(update) => {
+            snapshot.remote_screens.insert(update.path, update.view);
         }
         NetworkEvent::DiscoveryStopped => {
             snapshot
@@ -438,6 +701,7 @@ fn stop_snapshot(
     snapshot.runtime.begin(RuntimePhase::Stopped);
     snapshot.discovery.begin(DiscoveryPhase::Stopped);
     snapshot.session.begin(SessionPhase::Stopped);
+    snapshot.clear_media(MediaPhase::Idle, None);
     publish_snapshot(snapshot_tx, snapshot, wake);
     tracing::info!(stage = "shutdown", "macOS runtime owner stopped");
 }
@@ -507,9 +771,11 @@ mod tests {
                 let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
                 let (snapshot_tx, mut snapshot_rx) =
                     watch::channel(Arc::new(AppSnapshot::default()));
+                let (frames, _) = watch::channel(None);
                 let owner = tokio::spawn(run(
                     command_rx,
                     snapshot_tx,
+                    frames,
                     async { Err(NearbyIssue::LocalNetworkUnavailable) },
                     Arc::new(|| {}),
                 ));
@@ -527,7 +793,7 @@ mod tests {
                 assert_eq!(snapshot.session.phase(), SessionPhase::Failed);
                 assert_eq!(snapshot.media.phase(), MediaPhase::Idle);
                 assert_eq!(snapshot.capture.phase(), CapabilityPhase::Unavailable);
-                assert_eq!(snapshot.decoder.phase(), CapabilityPhase::Unavailable);
+                assert_eq!(snapshot.decoder.phase(), CapabilityPhase::Available);
 
                 commands
                     .send(RuntimeCommand::Shutdown)
@@ -594,5 +860,106 @@ mod tests {
         let peer = snapshot.peers.get("internal-peer").expect("retained peer");
         assert!(!peer.discovered);
         assert_eq!(peer.session, PeerSession::Connected);
+    }
+
+    #[test]
+    fn screen_availability_does_not_override_presence_or_session() {
+        let mut snapshot = AppSnapshot::default();
+        let discovery = snapshot.discovery.begin(DiscoveryPhase::Scanning);
+        let session = snapshot.session.begin(SessionPhase::Listening);
+        apply_network_event(
+            &mut snapshot,
+            discovery,
+            session,
+            NetworkEvent::Peer(network::PeerStatus {
+                id: "internal-peer".to_owned(),
+                ordinal: 1,
+                discovered: false,
+                role: DialRole::Active,
+                session: PeerSession::Connected,
+                transport_generation: Some(3),
+            }),
+        );
+        apply_network_event(
+            &mut snapshot,
+            discovery,
+            session,
+            NetworkEvent::Screen(crate::remote::Update {
+                path: crate::contract::screen_path("internal-peer"),
+                view: ScreenView {
+                    peer_id: "internal-peer".to_owned(),
+                    availability: ScreenAvailability::Available,
+                },
+            }),
+        );
+
+        let peer = snapshot.peers.get("internal-peer").expect("retained peer");
+        assert!(!peer.discovered);
+        assert_eq!(peer.session, PeerSession::Connected);
+        assert_eq!(
+            snapshot.remote_screens["moqcast.screen/internal-peer"].availability,
+            ScreenAvailability::Available
+        );
+    }
+
+    #[test]
+    fn playback_generation_keeps_stale_decoder_events_out() {
+        let mut snapshot = AppSnapshot::default();
+        let first = snapshot
+            .begin_watch("peer", "moqcast.screen/peer")
+            .expect("first view");
+        let stopping = snapshot.begin_stop_watch().expect("stop first view");
+        assert!(snapshot.finish_stop_watch(stopping));
+        let second = snapshot
+            .begin_watch("peer", "moqcast.screen/peer")
+            .expect("second view");
+
+        assert!(!snapshot.playback_started(first, "stale".to_owned(), 640, 360));
+        assert!(snapshot.playback_started(second, "videotoolbox".to_owned(), 640, 360));
+        assert_eq!(snapshot.media.phase(), MediaPhase::Watching);
+        assert_eq!(snapshot.media_decoder.as_deref(), Some("videotoolbox"));
+    }
+
+    #[test]
+    fn failed_watch_requires_stop_before_retry() {
+        let mut snapshot = AppSnapshot::default();
+        let generation = snapshot
+            .begin_watch("peer", "moqcast.screen/peer")
+            .expect("first view");
+        assert!(snapshot.playback_ended(generation, Err("decoder failed".to_owned())));
+
+        assert!(
+            snapshot
+                .begin_watch("peer", "moqcast.screen/peer")
+                .is_none()
+        );
+        let stopping = snapshot.begin_stop_watch().expect("stop failed view");
+        assert!(snapshot.finish_stop_watch(stopping));
+        assert!(
+            snapshot
+                .begin_watch("peer", "moqcast.screen/peer")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn stopping_watch_does_not_change_a_healthy_session() {
+        let mut snapshot = AppSnapshot::default();
+        snapshot.peers.insert(
+            "peer".to_owned(),
+            PeerSnapshot {
+                ordinal: 1,
+                discovered: true,
+                session: PeerSession::Connected,
+            },
+        );
+        snapshot
+            .begin_watch("peer", "moqcast.screen/peer")
+            .expect("view");
+        let stopping = snapshot.begin_stop_watch().expect("stop");
+        assert!(snapshot.finish_stop_watch(stopping));
+
+        assert_eq!(snapshot.media.phase(), MediaPhase::Idle);
+        assert_eq!(snapshot.peers["peer"].session, PeerSession::Connected);
     }
 }

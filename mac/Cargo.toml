@@ -9,14 +9,13 @@ publish = false
 
 [features]
 default = ["app"]
-app = ["dep:eframe", "network"]
+app = ["dep:eframe", "watch"]
 network = ["dep:moq-tokio", "dep:url"]
+watch = ["network", "dep:hang", "dep:moq-mux", "dep:moq-video"]
 foundation = [
-    "network",
-    "dep:hang",
+    "watch",
     "dep:moq-audio",
-    "dep:moq-mux",
-    "dep:moq-video",
+    "moq-video/capture",
 ]
 
 [dependencies]
@@ -33,7 +32,7 @@ hang = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee
 moq-audio = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["playback"], optional = true }
 moq-mux = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", optional = true }
 moq-tokio = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["aws-lc-rs", "mdns", "quinn"], optional = true }
-moq-video = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["capture"], optional = true }
+moq-video = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, optional = true }
 
 [[bin]]
 name = "moqcast-macos"

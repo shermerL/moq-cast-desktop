@@ -1,4 +1,4 @@
-//! Build and dependency provenance shown by the macOS application.
+//! Internal build and dependency provenance for local verification.
 
 const MOQ_DEV_REVISION: &str = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53";
 const MOQ_BASELINE: &str = "moq-dev dev@81d39f7b";
@@ -72,7 +72,15 @@ mod tests {
         let foundation = manifest["features"]["foundation"]
             .as_array()
             .expect("foundation feature array");
-        assert_foundation_feature(foundation);
+        assert_feature(foundation, &["watch", "dep:moq-audio", "moq-video/capture"]);
+
+        let watch = manifest["features"]["watch"]
+            .as_array()
+            .expect("watch feature array");
+        assert_feature(
+            watch,
+            &["network", "dep:hang", "dep:moq-mux", "dep:moq-video"],
+        );
 
         let network = manifest["features"]["network"]
             .as_array()
@@ -114,17 +122,11 @@ mod tests {
         dependencies
     }
 
-    fn assert_foundation_feature(feature: &Array) {
+    fn assert_feature(feature: &Array, expected: &[&str]) {
         let actual = feature
             .iter()
             .filter_map(|value| value.as_str())
             .collect::<Vec<_>>();
-        let mut expected = MOQ_DEPENDENCIES
-            .iter()
-            .filter(|dependency| **dependency != "moq-tokio")
-            .map(|dependency| format!("dep:{dependency}"))
-            .collect::<Vec<_>>();
-        expected.insert(0, "network".to_owned());
         assert_eq!(actual, expected);
     }
 }

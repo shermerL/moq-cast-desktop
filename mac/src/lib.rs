@@ -7,7 +7,11 @@ mod build_info;
 mod contract;
 #[cfg(feature = "network")]
 mod network;
+#[cfg(feature = "watch")]
+mod playback;
 #[cfg(feature = "network")]
+mod remote;
+#[cfg(feature = "watch")]
 mod runtime;
 
 /// Start the native MoQCast macOS application.

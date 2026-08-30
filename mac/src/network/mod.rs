@@ -15,6 +15,7 @@ use self::{
         SessionEvent, SessionFoundation, SessionSubject, TransportDirection, TransportPhase,
     },
 };
+use crate::remote;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DialRole {
@@ -48,6 +49,7 @@ pub(crate) enum Event {
     PeerRemoved(String),
     InboundCount(usize),
     InboundRejected,
+    Screen(remote::Update),
     DiscoveryStopped,
     ListenerStopped,
 }
@@ -64,8 +66,10 @@ pub(crate) struct Services {
     discovery: mdns::Discovery,
     discovery_active: bool,
     sessions_active: bool,
+    remote_active: bool,
     registry: PeerRegistry,
     sessions: SessionFoundation,
+    remote: remote::Directory,
     peers: BTreeMap<String, PeerStatus>,
     inbound: BTreeSet<u64>,
     pending: VecDeque<Event>,
@@ -81,15 +85,19 @@ impl Services {
             .with_fingerprint(advertisement.fingerprint)
             .advertise()
             .await?;
+        let local_peer_id = discovery.id().to_owned();
         let registry = PeerRegistry::new(discovery.id());
         let sessions = bound.start(discovery.credential().to_owned()).await?;
+        let remote = remote::Directory::start(sessions.receive_origin(), local_peer_id);
 
         Ok(Self {
             discovery,
             discovery_active: true,
             sessions_active: true,
+            remote_active: true,
             registry,
             sessions,
+            remote,
             peers: BTreeMap::new(),
             inbound: BTreeSet::new(),
             pending: VecDeque::new(),
@@ -103,22 +111,27 @@ impl Services {
                 return Some(event);
             }
 
-            let input = match (self.discovery_active, self.sessions_active) {
-                (true, true) => tokio::select! {
-                    event = self.discovery.recv() => Input::Discovery(event),
-                    event = self.sessions.recv() => Input::Session(event),
-                },
-                (true, false) => Input::Discovery(self.discovery.recv().await),
-                (false, true) => Input::Session(self.sessions.recv().await),
-                (false, false) => return None,
+            let input = tokio::select! {
+                event = self.discovery.recv(), if self.discovery_active => Input::Discovery(event),
+                event = self.sessions.recv(), if self.sessions_active => Input::Session(event),
+                event = self.remote.recv(), if self.remote_active => Input::Remote(event),
+                else => return None,
             };
             self.handle_input(input).await;
         }
     }
 
     pub(crate) async fn shutdown(self) {
+        self.remote.stop().await;
         self.sessions.shutdown().await;
         drop(self.discovery);
+    }
+
+    pub(crate) fn remote_broadcast(
+        &self,
+        path: &str,
+    ) -> Option<moq_tokio::moq_net::broadcast::Consumer> {
+        self.remote.broadcast(path)
     }
 
     async fn handle_input(&mut self, input: Input) {
@@ -137,6 +150,8 @@ impl Services {
                 self.pending.push_back(Event::ListenerStopped);
             }
             Input::Session(None) => self.sessions_active = false,
+            Input::Remote(Some(update)) => self.pending.push_back(Event::Screen(update)),
+            Input::Remote(None) => self.remote_active = false,
         }
     }
 
@@ -261,6 +276,7 @@ impl Services {
 enum Input {
     Discovery(Option<mdns::Event>),
     Session(Option<SessionEvent>),
+    Remote(Option<remote::Update>),
 }
 
 fn should_connect(update: PeerUpdate, phase: PeerSession) -> bool {

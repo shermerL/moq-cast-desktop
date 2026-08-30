@@ -1,5 +1,6 @@
 //! Native macOS application shell for Nearby and direct-only sessions.
 
+mod player;
 mod theme;
 mod view;
 
@@ -9,11 +10,14 @@ use eframe::egui::{
 };
 
 use self::view::{
-    ConnectionView, ContentLayout, NavigationLayout, PeerPresentation, PresenceView, selected_peer,
+    ConnectionView, ContentLayout, NavigationLayout, PeerPresentation, PresenceView,
+    screen_availability, selected_peer,
 };
 use crate::network::PeerSession;
+use crate::playback::FrameIdentity;
+use crate::remote::ScreenAvailability;
 use crate::runtime::{
-    AppSnapshot, DiscoveryPhase, NearbyIssue, PeerSnapshot, RuntimeOwner, SessionPhase,
+    AppSnapshot, DiscoveryPhase, MediaPhase, NearbyIssue, PeerSnapshot, RuntimeOwner, SessionPhase,
 };
 
 const STORAGE_LOCALE: &str = "moqcast.macos.locale";
@@ -57,6 +61,10 @@ pub(crate) struct MoqCastApp {
     locale: Locale,
     selected_peer: Option<String>,
     runtime: RuntimeOwner,
+    player: player::Player,
+    playback_texture: Option<egui::TextureHandle>,
+    playback_identity: Option<FrameIdentity>,
+    playback_display: Option<(u32, u32)>,
 }
 
 impl MoqCastApp {
@@ -75,6 +83,10 @@ impl MoqCastApp {
             locale,
             selected_peer: None,
             runtime,
+            player: player::Player::default(),
+            playback_texture: None,
+            playback_identity: None,
+            playback_display: None,
         })
     }
 
@@ -94,6 +106,85 @@ impl MoqCastApp {
             || context.input_mut(|input| input.consume_shortcut(&shortcut(Key::Comma)))
         {
             self.page = Page::Settings;
+        }
+    }
+
+    fn update_playback_texture(&mut self, context: &egui::Context, snapshot: &AppSnapshot) {
+        let active = Self::media_active(snapshot);
+        if !active {
+            self.playback_texture = None;
+            self.playback_identity = None;
+            self.playback_display = None;
+            return;
+        }
+        let Some(frame) = self.runtime.playback_frame() else {
+            if snapshot.media.phase() != MediaPhase::Watching {
+                self.playback_texture = None;
+                self.playback_identity = None;
+                self.playback_display = None;
+            }
+            return;
+        };
+        if frame.identity.view_generation != snapshot.media.generation().value()
+            || self
+                .playback_identity
+                .is_some_and(|identity| identity >= frame.identity)
+        {
+            return;
+        }
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [frame.width, frame.height],
+            frame.rgba.as_slice(),
+        );
+        match self.playback_texture.as_mut() {
+            Some(texture) if texture.size() == [frame.width, frame.height] => {
+                texture.set(image, egui::TextureOptions::LINEAR);
+            }
+            _ => {
+                self.playback_texture = Some(context.load_texture(
+                    "moqcast-remote-screen",
+                    image,
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
+        }
+        self.playback_identity = Some(frame.identity);
+        self.playback_display = Some((frame.display_width, frame.display_height));
+    }
+
+    fn media_active(snapshot: &AppSnapshot) -> bool {
+        matches!(
+            snapshot.media.phase(),
+            MediaPhase::PreparingWatch
+                | MediaPhase::Watching
+                | MediaPhase::Stopping
+                | MediaPhase::Failed
+        )
+    }
+
+    fn player_device_name(&self, snapshot: &AppSnapshot) -> String {
+        snapshot
+            .media_peer
+            .as_deref()
+            .and_then(|peer| snapshot.peers.get(peer))
+            .map(|peer| device_name(peer, self.locale))
+            .unwrap_or_else(|| self.text("附近设备", "Nearby device").to_owned())
+    }
+
+    fn watch_player(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
+        let device_name = self.player_device_name(snapshot);
+        let texture = self.playback_texture.as_ref().zip(self.playback_display);
+        if matches!(
+            self.player.show(
+                ui,
+                self.locale,
+                snapshot.media.phase(),
+                &device_name,
+                texture
+            ),
+            Some(player::PlayerAction::Stop)
+        ) {
+            self.runtime.stop_watching();
         }
     }
 
@@ -347,11 +438,15 @@ impl MoqCastApp {
             });
     }
 
-    fn device_detail(&self, ui: &mut egui::Ui, snapshot: &AppSnapshot, selected: Option<&str>) {
-        let Some(peer) = selected.and_then(|id| snapshot.peers.get(id)) else {
+    fn device_detail(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot, selected: Option<&str>) {
+        let Some((peer_id, peer)) =
+            selected.and_then(|id| snapshot.peers.get(id).map(|peer| (id, peer)))
+        else {
             return;
         };
         let presentation = PeerPresentation::from(peer);
+        let screen_path = crate::contract::screen_path(peer_id);
+        let screen = screen_availability(peer_id, &snapshot.remote_screens);
         Frame::NONE
             .fill(theme::SURFACE)
             .stroke(Stroke::new(1.0, theme::BORDER))
@@ -385,11 +480,8 @@ impl MoqCastApp {
                 detail_row(
                     ui,
                     self.text("共享屏幕", "Shared screen"),
-                    self.text(
-                        "此版本尚未提供屏幕状态",
-                        "Screen status is not available in this build",
-                    ),
-                    None,
+                    screen_label(screen, self.locale),
+                    Some(screen_tone(screen)),
                 );
                 detail_row(
                     ui,
@@ -401,6 +493,29 @@ impl MoqCastApp {
                     },
                     None,
                 );
+                if peer.session == PeerSession::Connected
+                    && screen == ScreenAvailability::Available
+                    && snapshot.media.phase() == MediaPhase::Idle
+                {
+                    ui.add_space(14.0);
+                    let watch = ui.add_sized(
+                        [ui.available_width(), 36.0],
+                        egui::Button::new(
+                            RichText::new(self.text("观看", "Watch"))
+                                .strong()
+                                .color(Color32::WHITE),
+                        )
+                        .fill(theme::BRAND)
+                        .corner_radius(CornerRadius::same(6)),
+                    );
+                    if watch.clicked()
+                        && self
+                            .runtime
+                            .watch_screen(peer_id.to_owned(), screen_path.clone())
+                    {
+                        self.page = Page::Nearby;
+                    }
+                }
             });
     }
 
@@ -485,11 +600,44 @@ impl MoqCastApp {
 impl eframe::App for MoqCastApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let snapshot = self.runtime.snapshot();
+        self.update_playback_texture(ui.ctx(), &snapshot);
+        let media_active = Self::media_active(&snapshot);
+        let fullscreen = self.player.reconcile_fullscreen(ui.ctx(), media_active);
+        if fullscreen {
+            egui::CentralPanel::default()
+                .frame(Frame::NONE.fill(Color32::BLACK))
+                .show(ui, |ui| self.watch_player(ui, &snapshot));
+            return;
+        }
         self.handle_shortcuts(ui.ctx());
         self.top_bar(ui, &snapshot);
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(theme::CANVAS))
             .show(ui, |ui| {
+                if self.page == Page::Nearby && media_active {
+                    let content_width = ui.available_width().min(MAX_CONTENT_WIDTH);
+                    let side_margin = ((ui.available_width() - content_width) / 2.0).max(0.0);
+                    let page_padding = if ui.available_width() < 760.0 {
+                        20.0
+                    } else {
+                        28.0
+                    };
+                    ui.horizontal(|ui| {
+                        ui.add_space(side_margin + page_padding);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(
+                                (content_width - page_padding * 2.0).max(1.0),
+                                (ui.available_height() - page_padding * 2.0).max(1.0),
+                            ),
+                            Layout::top_down(Align::Min),
+                            |ui| {
+                                ui.add_space(page_padding);
+                                self.watch_player(ui, &snapshot);
+                            },
+                        );
+                    });
+                    return;
+                }
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let content_width = ui.available_width().min(MAX_CONTENT_WIDTH);
                     let side_margin = ((ui.available_width() - content_width) / 2.0).max(0.0);
@@ -828,6 +976,14 @@ fn connection_badge(connection: ConnectionView, locale: Locale) -> &'static str 
     }
 }
 
+fn screen_label(screen: ScreenAvailability, locale: Locale) -> &'static str {
+    match screen {
+        ScreenAvailability::Unavailable => text(locale, "未共享", "Not shared"),
+        ScreenAvailability::Available => text(locale, "可观看", "Available"),
+        ScreenAvailability::Withdrawn => text(locale, "共享已结束", "Share ended"),
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Tone {
     Neutral,
@@ -842,6 +998,14 @@ fn connection_tone(connection: ConnectionView) -> Tone {
         ConnectionView::ConnectingSecurely => Tone::Warning,
         ConnectionView::Rejected | ConnectionView::Failed => Tone::Error,
         ConnectionView::Waiting | ConnectionView::Disconnected => Tone::Neutral,
+    }
+}
+
+fn screen_tone(screen: ScreenAvailability) -> Tone {
+    match screen {
+        ScreenAvailability::Available => Tone::Success,
+        ScreenAvailability::Withdrawn => Tone::Warning,
+        ScreenAvailability::Unavailable => Tone::Neutral,
     }
 }
 
