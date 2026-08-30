@@ -21,7 +21,7 @@ package_version=${MOQCAST_PACKAGE_VERSION:-$manifest_version}
 marketing_version=${MOQCAST_MARKETING_VERSION:-${package_version%%-*}}
 build_version=${MOQCAST_BUILD_VERSION:-1}
 source_commit=${MOQCAST_SOURCE_COMMIT:-unknown}
-archive_name="MoQCast-macOS-universal2-${package_version}.zip"
+archive_name="MoQCast-macOS-${package_version}.zip"
 app_directory="$output_directory/MoQCast.app"
 archive_path="$output_directory/$archive_name"
 
