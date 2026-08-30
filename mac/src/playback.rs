@@ -1,8 +1,10 @@
 //! Catalog-driven H.264 and Opus playback with decoded-frame delivery.
 
 mod audio;
+mod sync;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use moq_mux::catalog::Stream;
 use tokio::sync::{mpsc, watch};
@@ -308,6 +310,20 @@ enum VideoEvent {
     Failed(String),
 }
 
+enum VideoEventDisposition {
+    Frame(moq_video::Frame),
+    WaitForCatalog,
+    FailOwner(String),
+}
+
+fn video_event_disposition(event: VideoEvent) -> VideoEventDisposition {
+    match event {
+        VideoEvent::Frame(frame) => VideoEventDisposition::Frame(frame),
+        VideoEvent::Ended => VideoEventDisposition::WaitForCatalog,
+        VideoEvent::Failed(error) => VideoEventDisposition::FailOwner(error),
+    }
+}
+
 struct VideoUpdate {
     generation: u64,
     event: VideoEvent,
@@ -376,6 +392,13 @@ async fn wait_for_cancel(cancel: &mut watch::Receiver<bool>) {
     }
 }
 
+async fn wait_for_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn run(
     generation: u64,
     path: String,
@@ -427,6 +450,12 @@ async fn run_inner(
     let (video_tx, mut video_rx) = mpsc::channel(1);
     let mut decoder_name = None;
     let mut video_task = None;
+    let media_clock = Arc::new(sync::MediaClock::default());
+    let mut video_scheduler = sync::VideoScheduler::default();
+    let mut queue_drops = 0_u64;
+    let mut due_skips = 0_u64;
+    let mut last_video_pts: Option<Duration> = None;
+    let mut video_discontinuity_reported = false;
 
     if let Some(video) = &selection.video {
         sequence.replace_decoder();
@@ -437,6 +466,7 @@ async fn run_inner(
         };
         decoder_name = Some(decoder.name().to_owned());
         tracing::info!(
+            broadcast = path,
             view_generation = generation,
             decoder_generation = sequence.decoder_generation,
             decoder = decoder.name(),
@@ -465,10 +495,62 @@ async fn run_inner(
         &selection.audio,
         &audio_tx,
         &audio_engine,
+        &media_clock,
     );
 
     let result = async {
         loop {
+            let advance = video_scheduler.advance(media_clock.audio_anchor(), Instant::now());
+            if let Some(source) = advance.source_changed {
+                tracing::info!(
+                    broadcast = path,
+                    view_generation = generation,
+                    clock_source = ?source,
+                    "remote video playback clock source changed"
+                );
+            }
+            if advance.skipped_due > 0 {
+                due_skips = due_skips.saturating_add(advance.skipped_due as u64);
+                tracing::debug!(
+                    broadcast = path,
+                    view_generation = generation,
+                    skipped_due = advance.skipped_due,
+                    skipped_due_total = due_skips,
+                    "remote video scheduler selected the latest due frame"
+                );
+            }
+            if let Some(decoded) = advance.due {
+                let selected = selection
+                    .video
+                    .as_ref()
+                    .expect("scheduled video frame has a selection");
+                let (identity, first_view_frame) = sequence.next();
+                let display = selected.identity.display;
+                let quarter_turns = selected.identity.quarter_turns;
+                let flip = selected.identity.flip;
+                let frame = tokio::task::spawn_blocking(move || {
+                    Frame::from_video(decoded, identity, display, quarter_turns, flip)
+                })
+                .await??;
+                let width = frame.display_width;
+                let height = frame.display_height;
+                frames.send_replace(Some(Arc::new(frame)));
+                wake();
+                if first_view_frame {
+                    events
+                        .send(Event::Started {
+                            generation,
+                            decoder: decoder_name
+                                .clone()
+                                .expect("scheduled video frame has a decoder name"),
+                            width,
+                            height,
+                        })
+                        .await
+                        .map_err(|_| anyhow::anyhow!("playback event receiver closed"))?;
+                }
+            }
+
             tokio::select! {
                 biased;
                 _ = wait_for_cancel(&mut cancel) => {
@@ -511,6 +593,7 @@ async fn run_inner(
                             &selection.audio,
                             &next.audio,
                         );
+                        video_scheduler.reset_fallback();
                         audio_task.stop(reason).await;
                         audio_generation = audio_generation.wrapping_add(1);
                         audio_task = audio::Task::spawn(
@@ -520,13 +603,28 @@ async fn run_inner(
                             &next.audio,
                             &audio_tx,
                             &audio_engine,
+                            &media_clock,
                         );
                     }
                     if changes.video {
                         if let Some(mut task) = video_task.take() {
+                            tracing::info!(
+                                broadcast = path,
+                                view_generation = generation,
+                                decoder_generation = sequence.decoder_generation,
+                                teardown_reason = "replacement",
+                                queue_drops,
+                                due_skips,
+                                "remote video generation stopped by playback owner"
+                            );
                             task.stop().await;
                         }
                         sequence.replace_decoder();
+                        video_scheduler.reset();
+                        queue_drops = 0;
+                        due_skips = 0;
+                        last_video_pts = None;
+                        video_discontinuity_reported = false;
                         decoder_name = None;
                         if let Some(video) = &next.video {
                             let decoder = tokio::select! {
@@ -536,6 +634,7 @@ async fn run_inner(
                             };
                             decoder_name = Some(decoder.name().to_owned());
                             tracing::info!(
+                                broadcast = path,
                                 view_generation = generation,
                                 decoder_generation = sequence.decoder_generation,
                                 decoder = decoder.name(),
@@ -578,50 +677,85 @@ async fn run_inner(
                     if update.generation != sequence.decoder_generation {
                         continue;
                     }
-                    match update.event {
-                        VideoEvent::Frame(decoded) => {
-                            let selected = selection
-                                .video
-                                .as_ref()
-                                .expect("active decoder has a selection");
-                            let (identity, first_view_frame) = sequence.next();
-                            let display = selected.identity.display;
-                            let quarter_turns = selected.identity.quarter_turns;
-                            let flip = selected.identity.flip;
-                            let frame = tokio::task::spawn_blocking(move || {
-                                Frame::from_video(decoded, identity, display, quarter_turns, flip)
-                            })
-                            .await??;
-                            let width = frame.display_width;
-                            let height = frame.display_height;
-                            frames.send_replace(Some(Arc::new(frame)));
-                            wake();
-                            if first_view_frame {
-                                events
-                                    .send(Event::Started {
-                                        generation,
-                                        decoder: decoder_name
-                                            .clone()
-                                            .expect("active decoder has a name"),
-                                        width,
-                                        height,
-                                    })
-                                    .await
-                                    .map_err(|_| {
-                                        anyhow::anyhow!("playback event receiver closed")
-                                    })?;
+                    match video_event_disposition(update.event) {
+                        VideoEventDisposition::Frame(decoded) => {
+                            let pts = sync::timestamp(decoded.timestamp);
+                            if let Some(previous) = last_video_pts
+                                && !video_discontinuity_reported
+                            {
+                                if pts < previous {
+                                    video_discontinuity_reported = true;
+                                    tracing::warn!(
+                                        broadcast = path,
+                                        view_generation = generation,
+                                        decoder_generation = sequence.decoder_generation,
+                                        previous_pts_us = previous.as_micros() as u64,
+                                        actual_pts_us = pts.as_micros() as u64,
+                                        "remote video PTS regressed"
+                                    );
+                                } else if pts.saturating_sub(previous) > Duration::from_secs(1) {
+                                    video_discontinuity_reported = true;
+                                    tracing::warn!(
+                                        broadcast = path,
+                                        view_generation = generation,
+                                        decoder_generation = sequence.decoder_generation,
+                                        gap_us = pts.saturating_sub(previous).as_micros() as u64,
+                                        "remote video PTS gap detected"
+                                    );
+                                }
+                            }
+                            last_video_pts = Some(pts);
+                            let pushed = video_scheduler.push(pts, decoded);
+                            if pushed.dropped.is_some() {
+                                queue_drops = queue_drops.saturating_add(1);
+                                if queue_drops == 1 {
+                                    tracing::warn!(
+                                        broadcast = path,
+                                        view_generation = generation,
+                                        decoder_generation = sequence.decoder_generation,
+                                        queue_capacity = sync::MAX_VIDEO_FRAMES,
+                                        rejected_incoming = !pushed.accepted,
+                                        "remote decoded video frame dropped by the bounded scheduler"
+                                    );
+                                }
                             }
                         }
-                        VideoEvent::Ended => anyhow::bail!("remote screen video track ended"),
-                        VideoEvent::Failed(error) => anyhow::bail!(error),
+                        VideoEventDisposition::WaitForCatalog => {
+                            if let Some(mut task) = video_task.take() {
+                                task.stop().await;
+                            }
+                            video_scheduler.reset();
+                            decoder_name = None;
+                            tracing::info!(
+                                broadcast = path,
+                                view_generation = generation,
+                                decoder_generation = sequence.decoder_generation,
+                                teardown_reason = "ended",
+                                queue_drops,
+                                due_skips,
+                                "remote video track ended; waiting for catalog replacement"
+                            );
+                        }
+                        VideoEventDisposition::FailOwner(error) => anyhow::bail!(error),
                     }
                 }
+                _ = media_clock.changed() => {}
+                _ = wait_for_deadline(advance.deadline) => {}
             }
         }
     }
     .await;
 
     if let Some(mut task) = video_task {
+        tracing::info!(
+            broadcast = path,
+            view_generation = generation,
+            decoder_generation = sequence.decoder_generation,
+            teardown_reason = "stop",
+            queue_drops,
+            due_skips,
+            "remote video generation stopped by playback owner"
+        );
         task.stop().await;
     }
     audio_task.stop(audio::OwnerTeardownReason::Stop).await;
@@ -829,5 +963,17 @@ mod tests {
             accept_audio_update(5, current).map(|snapshot| snapshot.phase),
             Some(AudioPhase::NoAudio)
         );
+    }
+
+    #[test]
+    fn video_track_end_waits_for_catalog_replacement() {
+        assert!(matches!(
+            video_event_disposition(VideoEvent::Ended),
+            VideoEventDisposition::WaitForCatalog
+        ));
+        assert!(matches!(
+            video_event_disposition(VideoEvent::Failed("decode".into())),
+            VideoEventDisposition::FailOwner(error) if error == "decode"
+        ));
     }
 }

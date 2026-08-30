@@ -1,11 +1,12 @@
 //! Remote Opus selection, decode, and default-output ownership.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{OnceCell, mpsc};
 use tokio::task::JoinHandle;
 
+use super::sync::{self, AudioLease, MediaClock};
 use super::{AudioPhase, AudioSnapshot};
 
 pub(super) const LIVE_EDGE_BUDGET: Duration = Duration::from_millis(100);
@@ -172,6 +173,7 @@ impl Task {
         selection: &Selection,
         updates: &mpsc::Sender<Update>,
         engine: &Arc<OnceCell<moq_audio::playback::Engine>>,
+        clock: &Arc<MediaClock>,
     ) -> Self {
         let broadcast = broadcast.clone();
         let selection = selection.clone();
@@ -182,8 +184,9 @@ impl Task {
             sender: updates.clone(),
         };
         let engine = engine.clone();
+        let clock = clock.audio(generation);
         let handle = tokio::spawn(async move {
-            run(broadcast, selection, events, engine).await;
+            run(broadcast, selection, events, engine, clock).await;
         });
         Self {
             handle: Some(handle),
@@ -224,6 +227,7 @@ async fn run(
     selection: Selection,
     events: Events,
     engine: Arc<OnceCell<moq_audio::playback::Engine>>,
+    clock: AudioLease,
 ) {
     events.send(AudioSnapshot::pending()).await;
 
@@ -361,6 +365,14 @@ async fn run(
 
     let mut decoded = false;
     let mut submitted = false;
+    let mut anchored = false;
+    let mut expected_end: Option<Duration> = None;
+    let mut discontinuity_reported = false;
+    let sample_rate = playback.consumer.sample_rate();
+    let channels = playback.consumer.channels();
+    let stride = (channels as usize * size_of::<f32>()).max(size_of::<f32>());
+    // This limits how far a writer can run ahead. It is not startup prebuffering.
+    let chunk = (sample_rate as usize * stride).max(stride);
     loop {
         let frame = match playback.consumer.read().await {
             Ok(Some(frame)) => frame,
@@ -417,24 +429,72 @@ async fn run(
                 .send(playback.snapshot(AudioPhase::PcmDecoded, &name, &codec))
                 .await;
         }
-        if let Err(error) = playback.sink.write(&frame.data) {
-            tracing::warn!(
+        let start = sync::timestamp(frame.timestamp);
+        let end = sync::pcm_frame_end(frame.timestamp, frame.data.len(), sample_rate, channels);
+        if let Some(expected) = expected_end
+            && !discontinuity_reported
+        {
+            let tolerance = Duration::from_millis(1);
+            if start.saturating_add(tolerance) < expected {
+                discontinuity_reported = true;
+                tracing::warn!(
+                    broadcast = %events.path,
+                    track = %name,
+                    audio_generation = events.generation,
+                    expected_pts_us = expected.as_micros() as u64,
+                    actual_pts_us = start.as_micros() as u64,
+                    "remote audio PTS regressed; continuing with the new wire timeline"
+                );
+            } else if start > expected.saturating_add(tolerance) {
+                discontinuity_reported = true;
+                tracing::warn!(
+                    broadcast = %events.path,
+                    track = %name,
+                    audio_generation = events.generation,
+                    expected_pts_us = expected.as_micros() as u64,
+                    actual_pts_us = start.as_micros() as u64,
+                    gap_us = start.saturating_sub(expected).as_micros() as u64,
+                    "remote audio PTS gap detected; continuing with the new wire timeline"
+                );
+            }
+        }
+        expected_end = Some(end);
+
+        for part in frame.data.chunks(chunk) {
+            let buffered = playback.sink.buffered();
+            if buffered > sync::AUDIO_PACING_CEILING {
+                tokio::time::sleep(buffered - sync::AUDIO_PACING_CEILING).await;
+            }
+            if let Err(error) = playback.sink.write(part) {
+                tracing::warn!(
+                    broadcast = %events.path,
+                    track = %name,
+                    audio_generation = events.generation,
+                    error = %error,
+                    teardown_reason = "sink_error",
+                    "remote PCM submission failed; video continues"
+                );
+                events
+                    .send(failed_snapshot(
+                        &playback,
+                        &name,
+                        &codec,
+                        "Remote PCM submission failed; video is continuing.",
+                    ))
+                    .await;
+                return;
+            }
+        }
+        let buffered = playback.sink.buffered();
+        if clock.anchor(end, buffered, Instant::now()) && !anchored {
+            anchored = true;
+            tracing::info!(
                 broadcast = %events.path,
                 track = %name,
                 audio_generation = events.generation,
-                error = %error,
-                teardown_reason = "sink_error",
-                "remote PCM submission failed; video continues"
+                buffered_ms = buffered.as_millis() as u64,
+                "remote playback clock anchored to submitted CoreAudio PCM"
             );
-            events
-                .send(failed_snapshot(
-                    &playback,
-                    &name,
-                    &codec,
-                    "Remote PCM submission failed; video is continuing.",
-                ))
-                .await;
-            return;
         }
         if !submitted {
             submitted = true;
