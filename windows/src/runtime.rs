@@ -43,6 +43,7 @@ pub(crate) enum DiscoveryState {
     Starting,
     Ready,
     Empty,
+    Stopping,
     Failed,
     Stopped,
 }
@@ -138,6 +139,15 @@ impl RuntimeSnapshot {
         self.lan_session_id = Some(short_lan_session_id(&local_id));
         self.local_id = Some(local_id);
         self.last_error = None;
+    }
+
+    fn begin_stop_scan(&mut self) -> bool {
+        if !self.discovery.is_active() {
+            return false;
+        }
+        self.discovery = DiscoveryState::Stopping;
+        self.last_error = None;
+        true
     }
 
     fn stopped_scan(&mut self) {
@@ -946,6 +956,10 @@ async fn handle_command(command: RuntimeCommand, context: RuntimeContext<'_>) ->
             false
         }
         RuntimeCommand::StopScan => {
+            if !snapshot.begin_stop_scan() {
+                return false;
+            }
+            let _ = snapshots.send(snapshot.clone());
             stop_active_media(snapshot, publication, view, playback).await;
             services.stop(snapshot).await;
             false
@@ -1381,6 +1395,9 @@ mod tests {
             .media
             .set_video_encoding_policy(VideoEncodingPolicy::NativeQhdHardware);
 
+        assert!(snapshot.begin_stop_scan());
+        assert_eq!(snapshot.discovery, DiscoveryState::Stopping);
+        assert!(!snapshot.begin_stop_scan());
         snapshot.stopped_scan();
 
         assert_eq!(snapshot.discovery, DiscoveryState::Stopped);

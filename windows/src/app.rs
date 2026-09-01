@@ -7,7 +7,7 @@ use crate::{
     diagnostics::DiagnosticsUi,
     media::{MediaPhase, VideoEncodingPolicy},
     playback::{PlaybackFrameIdentity, ViewAudioPhase, ViewPhase},
-    player::{LivePlayer, PlayerAction},
+    player::{LivePlayer, PlayerAction, TOOLBAR_HEIGHT},
     remote::ScreenAvailability,
     runtime::{
         DiscoveryState, PeerView, RuntimeCommand, RuntimeOwner, RuntimeSnapshot, TransportPhaseView,
@@ -17,6 +17,10 @@ use crate::{
 const CONTENT_MAX_WIDTH: f32 = 1040.0;
 const CONTENT_TOP_SPACING: f32 = 24.0;
 const NEARBY_SPLIT_MIN_WIDTH: f32 = 760.0;
+const NEARBY_LIST_MAX_WIDTH: f32 = 360.0;
+const COMPACT_NAVIGATION_HEIGHT: f32 = 96.0;
+const DESKTOP_NAVIGATION_HEIGHT: f32 = 52.0;
+const SETTINGS_STACK_WIDTH: f32 = 720.0;
 const STORAGE_DETAILED_DIAGNOSTICS: &str = "moqcast.detailed-diagnostics";
 const STORAGE_DEVELOPER_MODE: &str = "moqcast.developer-mode";
 const STORAGE_LOCALE: &str = "moqcast.locale";
@@ -102,6 +106,8 @@ pub(crate) struct MoqCastApp {
     developer_mode: bool,
     settings_pane: SettingsPane,
     selected_peer: Option<String>,
+    confirm_turn_off_nearby: bool,
+    nearby_turn_off_pending: bool,
     diagnostics: DiagnosticsUi,
     runtime: RuntimeOwner,
     snapshot: RuntimeSnapshot,
@@ -144,6 +150,8 @@ impl MoqCastApp {
             developer_mode,
             settings_pane: SettingsPane::Preferences,
             selected_peer: None,
+            confirm_turn_off_nearby: false,
+            nearby_turn_off_pending: false,
             diagnostics: DiagnosticsUi::new(diagnostics, detailed_diagnostics),
             runtime,
             snapshot,
@@ -157,21 +165,49 @@ impl MoqCastApp {
         }
     }
 
-    fn send(&mut self, command: RuntimeCommand) {
-        self.command_error = self
-            .runtime
-            .try_send(command)
-            .err()
-            .map(|error| match self.locale {
-                Locale::Chinese => format!("命令未发送：{error}"),
-                Locale::English => format!("Command was not sent: {error}"),
-            });
+    fn send(&mut self, command: RuntimeCommand) -> bool {
+        match self.runtime.try_send(command) {
+            Ok(()) => {
+                self.command_error = None;
+                true
+            }
+            Err(error) => {
+                self.command_error = Some(match self.locale {
+                    Locale::Chinese => format!("命令未发送：{error}"),
+                    Locale::English => format!("Command was not sent: {error}"),
+                });
+                false
+            }
+        }
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
+        if navigation_height(ui.available_width()) == COMPACT_NAVIGATION_HEIGHT {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("MoQCast Desktop").size(17.0).strong());
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.small(discovery_summary(self.locale, &self.snapshot));
+                    });
+                });
+                ui.add_space(4.0);
+                self.navigation_buttons(ui);
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("MoQCast Desktop").size(17.0).strong());
+                ui.add_space(24.0);
+                self.navigation_buttons(ui);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.small(discovery_summary(self.locale, &self.snapshot));
+                });
+            });
+        }
+    }
+
+    fn navigation_buttons(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("MoQCast Desktop").size(17.0).strong());
-            ui.add_space(24.0);
+            ui.spacing_mut().item_spacing.x = 4.0;
             ui.selectable_value(&mut self.page, Page::Nearby, self.locale.nearby());
             ui.selectable_value(
                 &mut self.page,
@@ -180,10 +216,60 @@ impl MoqCastApp {
             );
             ui.selectable_value(&mut self.page, Page::Watch, self.locale.watch());
             ui.selectable_value(&mut self.page, Page::Settings, self.locale.settings());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.small(discovery_summary(self.locale, &self.snapshot));
+        });
+    }
+
+    fn request_turn_off_nearby(&mut self) {
+        if self.nearby_turn_off_pending || self.snapshot.discovery == DiscoveryState::Stopping {
+            return;
+        }
+        if self.send(RuntimeCommand::StopScan) {
+            self.nearby_turn_off_pending = true;
+        }
+    }
+
+    fn show_turn_off_nearby_confirmation(&mut self, context: &egui::Context) {
+        if !self.confirm_turn_off_nearby {
+            return;
+        }
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new(match self.locale {
+            Locale::Chinese => "关闭附近设备？",
+            Locale::English => "Turn off Nearby?",
+        })
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(context, |ui| {
+            ui.label(match self.locale {
+                Locale::Chinese => "关闭会停止当前观看或共享，并断开附近连接。",
+                Locale::English => {
+                    "Turning off Nearby stops the current watch or share and closes nearby connections."
+                }
+            });
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                cancel = ui
+                    .button(match self.locale {
+                        Locale::Chinese => "取消",
+                        Locale::English => "Cancel",
+                    })
+                    .clicked();
+                confirm = ui
+                    .button(match self.locale {
+                        Locale::Chinese => "关闭附近设备",
+                        Locale::English => "Turn off Nearby",
+                    })
+                    .clicked();
             });
         });
+        if cancel {
+            self.confirm_turn_off_nearby = false;
+        } else if confirm {
+            self.confirm_turn_off_nearby = false;
+            self.request_turn_off_nearby();
+        }
     }
 
     fn nearby(&mut self, ui: &mut egui::Ui) {
@@ -197,12 +283,18 @@ impl MoqCastApp {
                 }
             },
         );
-        let scan_active = self.snapshot.discovery.is_active();
-        let scan_label = match (self.locale, scan_active) {
-            (Locale::Chinese, true) => "停止扫描",
-            (Locale::Chinese, false) => "开始扫描",
-            (Locale::English, true) => "Stop scan",
-            (Locale::English, false) => "Start scan",
+        let nearby_active = self.snapshot.discovery.is_active();
+        let turning_off =
+            self.nearby_turn_off_pending || self.snapshot.discovery == DiscoveryState::Stopping;
+        let nearby_action = match (self.locale, self.snapshot.discovery, turning_off) {
+            (Locale::Chinese, _, true) => "正在关闭",
+            (Locale::English, _, true) => "Turning off",
+            (Locale::Chinese, DiscoveryState::Failed, false) => "重试",
+            (Locale::English, DiscoveryState::Failed, false) => "Try again",
+            (Locale::Chinese, _, false) if nearby_active => "关闭附近设备",
+            (Locale::English, _, false) if nearby_active => "Turn off Nearby",
+            (Locale::Chinese, _, false) => "开启附近设备",
+            (Locale::English, _, false) => "Turn on Nearby",
         };
         ui.separator();
         ui.horizontal(|ui| {
@@ -216,22 +308,39 @@ impl MoqCastApp {
                     .color(ui.visuals().weak_text_color()),
                 );
                 ui.label(RichText::new(&self.snapshot.local_device_name).strong());
-                ui.small(match (self.locale, scan_active) {
-                    (Locale::Chinese, true) => "正在扫描附近设备",
-                    (Locale::English, true) => "Scanning for nearby devices",
-                    (Locale::Chinese, false) => "扫描已停止，已连接设备不受影响",
-                    (Locale::English, false) => {
-                        "Scanning stopped; connected devices are not affected"
+                ui.small(match (self.locale, self.snapshot.discovery) {
+                    (Locale::Chinese, DiscoveryState::Starting) => "正在开启附近设备",
+                    (Locale::English, DiscoveryState::Starting) => "Turning on Nearby",
+                    (Locale::Chinese, DiscoveryState::Ready | DiscoveryState::Empty) => {
+                        "附近设备已开启，正在自动查找"
                     }
+                    (Locale::English, DiscoveryState::Ready | DiscoveryState::Empty) => {
+                        "Nearby is on and discovering automatically"
+                    }
+                    (Locale::Chinese, DiscoveryState::Stopping) => "正在停止媒体并关闭附近连接",
+                    (Locale::English, DiscoveryState::Stopping) => {
+                        "Stopping media and closing Nearby connections"
+                    }
+                    (Locale::Chinese, DiscoveryState::Stopped) => "附近设备已关闭",
+                    (Locale::English, DiscoveryState::Stopped) => "Nearby is off",
+                    (Locale::Chinese, DiscoveryState::Failed) => "附近设备不可用",
+                    (Locale::English, DiscoveryState::Failed) => "Nearby is unavailable",
                 });
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button(scan_label).clicked() {
-                    self.send(if scan_active {
-                        RuntimeCommand::StopScan
+                if ui
+                    .add_enabled(!turning_off, egui::Button::new(nearby_action))
+                    .clicked()
+                {
+                    if nearby_active {
+                        if has_active_media(&self.snapshot) {
+                            self.confirm_turn_off_nearby = true;
+                        } else {
+                            self.request_turn_off_nearby();
+                        }
                     } else {
-                        RuntimeCommand::StartScan
-                    });
+                        self.send(RuntimeCommand::StartScan);
+                    }
                 }
             });
         });
@@ -258,13 +367,28 @@ impl MoqCastApp {
             .and_then(|id| peers.iter().find(|peer| peer.id == id))
             .cloned();
         if nearby_uses_stacked_layout(ui.available_width()) {
-            self.peer_list(ui, &peers);
+            egui::ScrollArea::vertical()
+                .max_height(260.0)
+                .show(ui, |ui| self.peer_list(ui, &peers));
             ui.separator();
             self.peer_detail(ui, selected.as_ref());
         } else {
-            ui.columns(2, |columns| {
-                self.peer_list(&mut columns[0], &peers);
-                self.peer_detail(&mut columns[1], selected.as_ref());
+            let list_width = nearby_list_width(ui.available_width());
+            let height = ui.available_height();
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(list_width, height),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| self.peer_list(ui, &peers));
+                    },
+                );
+                ui.separator();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), height),
+                    Layout::top_down(Align::Min),
+                    |ui| self.peer_detail(ui, selected.as_ref()),
+                );
             });
         }
     }
@@ -285,13 +409,19 @@ impl MoqCastApp {
                 "Nearby services unavailable",
                 "Check local network and firewall settings, then try again.",
             ),
-            (Locale::Chinese, DiscoveryState::Stopped) => {
-                ("扫描已停止", "已连接设备不受影响；需要时可以重新开始扫描。")
+            (Locale::Chinese, DiscoveryState::Stopping) => {
+                ("正在关闭附近设备", "正在停止媒体并关闭局域网连接。")
             }
-            (Locale::English, DiscoveryState::Stopped) => (
-                "Scanning stopped",
-                "Connected devices are not affected; start scanning again when needed.",
+            (Locale::English, DiscoveryState::Stopping) => (
+                "Turning off Nearby",
+                "Stopping media and closing LAN connections.",
             ),
+            (Locale::Chinese, DiscoveryState::Stopped) => {
+                ("附近设备已关闭", "需要时可以重新开启附近设备。")
+            }
+            (Locale::English, DiscoveryState::Stopped) => {
+                ("Nearby is off", "Turn on Nearby again when you need it.")
+            }
             (Locale::Chinese, _) => (
                 "暂未发现附近设备",
                 "请确认另一台设备已打开 MoQCast，然后重新扫描。",
@@ -319,7 +449,7 @@ impl MoqCastApp {
         for peer in peers {
             let selected = self.selected_peer.as_deref() == Some(peer.id.as_str());
             let response = ui.add_sized(
-                [ui.available_width(), 58.0],
+                [ui.available_width(), 72.0],
                 egui::Button::selectable(
                     selected,
                     format!(
@@ -363,7 +493,9 @@ impl MoqCastApp {
                 Locale::English => "Choose Watch to open this screen.",
             });
             ui.add_space(16.0);
-            let enabled = self.snapshot.has_mesh_session()
+            let enabled = self.snapshot.discovery.is_active()
+                && !self.nearby_turn_off_pending
+                && self.snapshot.has_mesh_session()
                 && matches!(
                     self.snapshot.media.phase,
                     MediaPhase::Idle | MediaPhase::Failed
@@ -395,10 +527,13 @@ impl MoqCastApp {
     fn screen_share(&mut self, ui: &mut egui::Ui) {
         page_header(
             ui,
-            self.locale.screen_share(),
             match self.locale {
-                Locale::Chinese => "共享本机主显示器与可用的系统音频。",
-                Locale::English => "Share the primary display and system audio when available.",
+                Locale::Chinese => "共享这台电脑的屏幕",
+                Locale::English => "Share this computer's screen",
+            },
+            match self.locale {
+                Locale::Chinese => "管理本次共享使用的屏幕来源和系统音频。",
+                Locale::English => "Manage the screen source and system audio used for this share.",
             },
         );
         ui.separator();
@@ -490,7 +625,9 @@ impl MoqCastApp {
         ui.add_space(16.0);
         match self.snapshot.media.phase {
             MediaPhase::Idle | MediaPhase::Failed => {
-                let enabled = self.snapshot.local_id.is_some()
+                let enabled = self.snapshot.discovery.is_active()
+                    && !self.nearby_turn_off_pending
+                    && self.snapshot.local_id.is_some()
                     && matches!(
                         self.snapshot.view.phase,
                         ViewPhase::Idle | ViewPhase::Failed
@@ -555,15 +692,15 @@ impl MoqCastApp {
             self.snapshot.view.phase,
             ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping
         );
-        let stage = watch_stage_size(ui.available_size());
+        let stage = watch_player_size(ui.available_size());
         if active {
             ui.allocate_ui_with_layout(stage, Layout::top_down(Align::Center), |ui| {
                 if matches!(
                     self.player.show(
                         ui,
+                        self.locale,
                         &self.snapshot.view,
                         self.playback_texture.as_ref(),
-                        false,
                     ),
                     Some(PlayerAction::Stop)
                 ) {
@@ -573,7 +710,8 @@ impl MoqCastApp {
             return;
         }
 
-        let (rect, _) = ui.allocate_exact_size(stage, Sense::hover());
+        let empty_stage = egui::vec2(stage.x, (stage.y - TOOLBAR_HEIGHT).max(1.0));
+        let (rect, _) = ui.allocate_exact_size(empty_stage, Sense::hover());
         ui.painter().rect_filled(rect, 6.0, Color32::BLACK);
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
             ui.centered_and_justified(|ui| {
@@ -590,9 +728,15 @@ impl MoqCastApp {
                     );
                     ui.add_space(6.0);
                     ui.label(
-                        RichText::new(match self.locale {
-                            Locale::Chinese => "前往附近设备，选择正在共享屏幕的设备。",
-                            Locale::English => {
+                        RichText::new(match (self.locale, self.snapshot.view.phase) {
+                            (Locale::Chinese, ViewPhase::Failed) => {
+                                "媒体已停止，附近设备仍保持连接。"
+                            }
+                            (Locale::English, ViewPhase::Failed) => {
+                                "Media stopped, but the nearby device stays connected."
+                            }
+                            (Locale::Chinese, _) => "前往附近设备，选择正在共享屏幕的设备。",
+                            (Locale::English, _) => {
                                 "Open Nearby and select a device that is sharing a screen."
                             }
                         })
@@ -1005,13 +1149,23 @@ impl MoqCastApp {
 impl eframe::App for MoqCastApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.snapshot = self.runtime.snapshot();
+        match self.snapshot.discovery {
+            DiscoveryState::Stopping => self.nearby_turn_off_pending = true,
+            DiscoveryState::Stopped | DiscoveryState::Failed => {
+                self.nearby_turn_off_pending = false;
+                self.confirm_turn_off_nearby = false;
+            }
+            DiscoveryState::Starting | DiscoveryState::Ready | DiscoveryState::Empty => {}
+        }
         let context = ui.ctx().clone();
         self.update_playback_texture(&context);
         let viewing = matches!(
             self.snapshot.view.phase,
             ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping
         );
-        let viewport_fullscreen = LivePlayer::fullscreen(&context);
+        let viewport_fullscreen = self
+            .player
+            .reconcile_fullscreen(&context, self.snapshot.view.phase == ViewPhase::Viewing);
         if viewport_fullscreen != self.viewport_fullscreen {
             tracing::info!(
                 fullscreen = viewport_fullscreen,
@@ -1024,10 +1178,7 @@ impl eframe::App for MoqCastApp {
             );
             self.viewport_fullscreen = viewport_fullscreen;
         }
-        if viewport_fullscreen && !viewing {
-            context.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-        }
-        let fullscreen = viewing && viewport_fullscreen;
+        let fullscreen = self.snapshot.view.phase == ViewPhase::Viewing && viewport_fullscreen;
 
         if fullscreen {
             egui::CentralPanel::default()
@@ -1036,9 +1187,9 @@ impl eframe::App for MoqCastApp {
                     if matches!(
                         self.player.show(
                             ui,
+                            self.locale,
                             &self.snapshot.view,
                             self.playback_texture.as_ref(),
-                            true,
                         ),
                         Some(PlayerAction::Stop)
                     ) {
@@ -1051,7 +1202,7 @@ impl eframe::App for MoqCastApp {
         }
 
         egui::Panel::top("navigation")
-            .exact_size(52.0)
+            .exact_size(navigation_height(context.content_rect().width()))
             .show(ui, |ui| {
                 ui.add_space(7.0);
                 self.top_bar(ui);
@@ -1074,6 +1225,7 @@ impl eframe::App for MoqCastApp {
                 }
             });
         });
+        self.show_turn_off_nearby_confirmation(&context);
         self.diagnostics.show_window(&context, self.locale);
         context.request_repaint_after(std::time::Duration::from_millis(if viewing {
             33
@@ -1125,16 +1277,27 @@ fn setting_control_row(
     help: &str,
     control: impl FnOnce(&mut egui::Ui),
 ) {
-    ui.horizontal(|ui| {
-        ui.set_min_height(56.0);
+    if settings_use_stacked_rows(ui.available_width()) {
         ui.vertical(|ui| {
             ui.label(RichText::new(title).strong());
             if !help.is_empty() {
                 ui.small(help);
             }
+            ui.add_space(8.0);
+            control(ui);
         });
-        ui.with_layout(Layout::right_to_left(Align::Center), control);
-    });
+    } else {
+        ui.horizontal(|ui| {
+            ui.set_min_height(56.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new(title).strong());
+                if !help.is_empty() {
+                    ui.small(help);
+                }
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), control);
+        });
+    }
 }
 
 fn setting_value_row(ui: &mut egui::Ui, title: &str, help: &str, value: &str) {
@@ -1158,6 +1321,32 @@ fn selected_peer(peers: &[PeerView], selected: Option<&str>) -> Option<String> {
 
 fn nearby_uses_stacked_layout(width: f32) -> bool {
     width < NEARBY_SPLIT_MIN_WIDTH
+}
+
+fn nearby_list_width(available_width: f32) -> f32 {
+    available_width.min(NEARBY_LIST_MAX_WIDTH).max(1.0)
+}
+
+fn navigation_height(width: f32) -> f32 {
+    if width < NEARBY_SPLIT_MIN_WIDTH {
+        COMPACT_NAVIGATION_HEIGHT
+    } else {
+        DESKTOP_NAVIGATION_HEIGHT
+    }
+}
+
+fn settings_use_stacked_rows(width: f32) -> bool {
+    width < SETTINGS_STACK_WIDTH
+}
+
+fn has_active_media(snapshot: &RuntimeSnapshot) -> bool {
+    matches!(
+        snapshot.media.phase,
+        MediaPhase::Preparing | MediaPhase::Sharing | MediaPhase::Stopping
+    ) || matches!(
+        snapshot.view.phase,
+        ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping
+    )
 }
 
 fn peer_display_name(locale: Locale, id: &str) -> String {
@@ -1216,14 +1405,16 @@ fn discovery_summary(locale: Locale, snapshot: &RuntimeSnapshot) -> String {
         (Locale::English, DiscoveryState::Ready) => {
             format!("{} nearby", snapshot.present_peer_count())
         }
-        (Locale::Chinese, DiscoveryState::Empty) => "正在扫描".to_owned(),
-        (Locale::English, DiscoveryState::Empty) => "Scanning".to_owned(),
-        (Locale::Chinese, DiscoveryState::Starting) => "正在启动".to_owned(),
-        (Locale::English, DiscoveryState::Starting) => "Starting".to_owned(),
+        (Locale::Chinese, DiscoveryState::Empty) => "附近设备已开启".to_owned(),
+        (Locale::English, DiscoveryState::Empty) => "Nearby is on".to_owned(),
+        (Locale::Chinese, DiscoveryState::Starting) => "正在开启".to_owned(),
+        (Locale::English, DiscoveryState::Starting) => "Turning on".to_owned(),
+        (Locale::Chinese, DiscoveryState::Stopping) => "正在关闭".to_owned(),
+        (Locale::English, DiscoveryState::Stopping) => "Turning off".to_owned(),
         (Locale::Chinese, DiscoveryState::Failed) => "附近服务不可用".to_owned(),
         (Locale::English, DiscoveryState::Failed) => "Nearby unavailable".to_owned(),
-        (Locale::Chinese, DiscoveryState::Stopped) => "扫描已停止".to_owned(),
-        (Locale::English, DiscoveryState::Stopped) => "Scan stopped".to_owned(),
+        (Locale::Chinese, DiscoveryState::Stopped) => "附近设备已关闭".to_owned(),
+        (Locale::English, DiscoveryState::Stopped) => "Nearby is off".to_owned(),
     }
 }
 
@@ -1246,14 +1437,15 @@ fn share_audio_status(locale: Locale, phase: AudioPhase) -> &'static str {
     }
 }
 
-fn watch_stage_size(available: egui::Vec2) -> egui::Vec2 {
+fn watch_player_size(available: egui::Vec2) -> egui::Vec2 {
     let available = egui::vec2(available.x.max(1.0), available.y.max(1.0));
     let width = available.x.min(960.0);
-    let height = width * 9.0 / 16.0;
-    if height <= available.y {
-        egui::vec2(width, height)
+    let stage_height = width * 9.0 / 16.0;
+    if stage_height + TOOLBAR_HEIGHT <= available.y {
+        egui::vec2(width, stage_height + TOOLBAR_HEIGHT)
     } else {
-        egui::vec2(available.y * 16.0 / 9.0, available.y)
+        let stage_height = (available.y - TOOLBAR_HEIGHT).max(1.0);
+        egui::vec2(stage_height * 16.0 / 9.0, stage_height + TOOLBAR_HEIGHT)
     }
 }
 
@@ -1378,6 +1570,42 @@ mod tests {
     }
 
     #[test]
+    fn narrow_windows_use_two_row_navigation_and_stacked_settings() {
+        assert_eq!(navigation_height(720.0), 96.0);
+        assert_eq!(navigation_height(1024.0), 52.0);
+        assert!(settings_use_stacked_rows(680.0));
+        assert!(!settings_use_stacked_rows(900.0));
+    }
+
+    #[test]
+    fn nearby_and_watch_layouts_reserve_stable_regions() {
+        assert_eq!(nearby_list_width(1040.0), 360.0);
+        assert_eq!(nearby_list_width(800.0), 360.0);
+
+        assert_eq!(
+            watch_player_size(egui::vec2(1000.0, 700.0)),
+            egui::vec2(960.0, 592.0)
+        );
+        assert_size(
+            watch_player_size(egui::vec2(800.0, 300.0)),
+            egui::vec2(440.888_9, 300.0),
+        );
+    }
+
+    #[test]
+    fn nearby_turn_off_confirmation_tracks_active_media() {
+        let mut snapshot = RuntimeSnapshot::default();
+        assert!(!has_active_media(&snapshot));
+
+        snapshot.media.phase = MediaPhase::Sharing;
+        assert!(has_active_media(&snapshot));
+
+        snapshot.media.phase = MediaPhase::Idle;
+        snapshot.view.phase = ViewPhase::Viewing;
+        assert!(has_active_media(&snapshot));
+    }
+
+    #[test]
     fn nearby_layout_and_selection_are_stable_across_resizes_and_lost_peers() {
         assert!(!nearby_uses_stacked_layout(900.0));
         assert!(nearby_uses_stacked_layout(700.0));
@@ -1405,16 +1633,9 @@ mod tests {
         assert_eq!(peer_status(Locale::Chinese, &visible), "屏幕可观看");
     }
 
-    #[test]
-    fn watch_stage_is_stable_sixteen_by_nine_and_height_bounded() {
-        assert_eq!(
-            watch_stage_size(egui::vec2(1000.0, 700.0)),
-            egui::vec2(960.0, 540.0)
-        );
-        assert_eq!(
-            watch_stage_size(egui::vec2(800.0, 300.0)),
-            egui::vec2(533.333_3, 300.0)
-        );
+    fn assert_size(actual: egui::Vec2, expected: egui::Vec2) {
+        assert!((actual.x - expected.x).abs() < 0.001);
+        assert!((actual.y - expected.y).abs() < 0.001);
     }
 
     #[test]
