@@ -136,6 +136,26 @@ fn shared_navigation_uses_the_compact_height_below_the_split_breakpoint() {
 }
 
 #[test]
+fn scrollable_pages_have_independent_stable_ids() {
+    let nearby = Page::Nearby.scroll_id();
+    let share = Page::ScreenShare.scroll_id();
+    let settings = Page::Settings.scroll_id();
+    assert_ne!(nearby, share);
+    assert_ne!(nearby, settings);
+    assert_ne!(share, settings);
+    assert_eq!(nearby, Page::Nearby.scroll_id());
+}
+
+#[test]
+fn centered_page_content_leaves_the_scrollbar_at_the_viewport_edge() {
+    let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1040.0, 700.0));
+    let content = moqcast_ui::page_content_rect(viewport, PageWidth::Narrow);
+    assert_eq!(content.center().x, viewport.center().x);
+    assert!(content.right() < viewport.right());
+    assert_eq!(content.width(), Size::PAGE_NARROW_MAX);
+}
+
+#[test]
 fn ordinary_ui_copy_keeps_internal_provenance_private() {
     let source = include_str!("../app.rs");
     let forbidden = [

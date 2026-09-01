@@ -67,6 +67,7 @@ fn tokens_match_the_frozen_contract() {
     assert_eq!(Size::SECTION_CONTENT_SPACING, 16.0);
     assert_eq!(Size::ROW_HORIZONTAL_INSET, 16.0);
     assert_eq!(Size::SETTING_ROW, 68.0);
+    assert_eq!(Size::DETAIL_ROW, 48.0);
     assert_eq!(Size::DEVICE_ROW, 72.0);
     assert_eq!(Size::SETTING_CONTROL_MAX, 300.0);
     assert_eq!(Size::SETTINGS_BREAKPOINT, 640.0);

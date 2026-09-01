@@ -8,11 +8,12 @@ mod view;
 
 use eframe::egui::{self, Align, Color32, Frame, Key, Layout, Modifiers};
 use moqcast_ui::{
-    BadgeTone, COLORS, DeviceRowSpec, NavItemSpec, PageWidth, SelectSpec, SettingRowSpec, Size,
-    Spacing, StatePanelKind, StatePanelSpec, SwitchSpec, Theme, TypographyRole,
-    app_bar_content_rect, danger_button, device_row, install_ui_font, major_section_break,
-    nav_item, page_header, page_shell, primary_button, secondary_button, section_header, select,
-    setting_row, state_panel, status_badge, switch, typography,
+    BadgeTone, COLORS, DetailRowSpec, DeviceRowSpec, NavItemSpec, PageWidth, SelectSpec,
+    SettingRowSpec, Size, Spacing, StatePanelKind, StatePanelSpec, SwitchSpec, Theme,
+    TypographyRole, app_bar_content_rect, danger_button, detail_row as compact_detail_row,
+    device_row, install_ui_font, nav_item, page_header, page_shell, primary_button,
+    secondary_button, section_header, select, setting_row, state_panel, status_badge, status_strip,
+    switch, typography,
 };
 
 use self::view::{
@@ -29,7 +30,7 @@ use crate::runtime::{
 
 const STORAGE_LOCALE: &str = "moqcast.macos.locale";
 const STORAGE_DEVELOPER_MODE: &str = "moqcast.macos.developer-mode";
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 enum Page {
     #[default]
     Nearby,
@@ -45,6 +46,10 @@ impl Page {
             Self::ScreenShare | Self::Watch => PageWidth::Medium,
             Self::Settings => PageWidth::Narrow,
         }
+    }
+
+    fn scroll_id(self) -> egui::Id {
+        egui::Id::new(("mac-page-scroll", self))
     }
 }
 
@@ -654,13 +659,12 @@ impl MoqCastApp {
             CapturePermission::Allowed => self.text("已允许", "Allowed"),
             CapturePermission::Denied => self.text("需要系统权限", "System permission required"),
         };
-        action_row(
+        detail_row(
             ui,
             self.text("屏幕录制权限", "Screen recording permission"),
             permission,
-            |_| {},
+            None,
         );
-        ui.separator();
 
         let source = snapshot
             .share_selection
@@ -701,6 +705,7 @@ impl MoqCastApp {
                 self.capture_permission = CapturePermission::Denied;
             }
         }
+        ui.separator();
         let audio_supported = snapshot
             .share_selection
             .as_ref()
@@ -751,7 +756,7 @@ impl MoqCastApp {
             TypographyRole::Help,
             COLORS.muted.into(),
         ));
-        major_section_break(ui);
+        ui.add_space(Spacing::XL);
 
         let share_owned = snapshot.media_owner == Some(MediaOwner::Share);
         let watch_owned = snapshot.media_owner == Some(MediaOwner::Watch);
@@ -862,7 +867,7 @@ impl MoqCastApp {
         };
 
         let mut action = None;
-        status_panel(ui, title, body, tone, |ui| {
+        status_section(ui, title, body, tone, |ui| {
             if share_owned
                 && matches!(
                     snapshot.media.phase(),
@@ -1010,7 +1015,7 @@ impl MoqCastApp {
                 ));
             },
         );
-        major_section_break(ui);
+        ui.add_space(Spacing::XL);
         section_header(ui, self.text("高级", "Advanced"), None);
         let was_developer_mode = self.developer_mode;
         let developer_mode_label = self.text("开发者模式", "Developer mode");
@@ -1036,7 +1041,7 @@ impl MoqCastApp {
             }
         }
         if self.developer_mode {
-            major_section_break(ui);
+            ui.add_space(Spacing::XL);
             self.diagnostics.show_settings(ui, self.locale);
         }
     }
@@ -1060,19 +1065,24 @@ impl eframe::App for MoqCastApp {
         egui::CentralPanel::default()
             .frame(Frame::new().fill(COLORS.surface.into()))
             .show(ui, |ui| {
-                page_shell(ui, self.page.content_width(), |ui| match self.page {
-                    Page::Watch => self.watch(ui, &snapshot),
-                    Page::Nearby | Page::ScreenShare | Page::Settings => {
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| match self.page {
+                let page = self.page;
+                if page == Page::Watch {
+                    page_shell(ui, page.content_width(), |ui| self.watch(ui, &snapshot));
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt(page.scroll_id())
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            page_shell(ui, page.content_width(), |ui| match page {
                                 Page::Nearby => self.nearby(ui, &snapshot),
                                 Page::ScreenShare => self.screen_share(ui, &snapshot),
                                 Page::Settings => self.settings(ui),
-                                Page::Watch => unreachable!("Watch does not use the page scroller"),
+                                Page::Watch => {
+                                    unreachable!("Watch does not use the page scroller")
+                                }
                             });
-                    }
-                });
+                        });
+                }
             });
         self.diagnostics.show_window(ui.ctx(), self.locale);
     }
@@ -1215,7 +1225,7 @@ fn issue_notice(ui: &mut egui::Ui, issue: NearbyIssue, locale: Locale) {
 }
 
 fn detail_row(ui: &mut egui::Ui, label: &str, value: &str, tone: Option<BadgeTone>) {
-    setting_row(ui, SettingRowSpec::new(label), |ui| match tone {
+    compact_detail_row(ui, DetailRowSpec::new(label), |ui| match tone {
         Some(tone) => {
             status_badge(ui, value, tone);
         }
@@ -1230,7 +1240,7 @@ fn action_row(ui: &mut egui::Ui, label: &str, hint: &str, action: impl FnOnce(&m
     setting_row(ui, SettingRowSpec::new(label).description(hint), action);
 }
 
-fn status_panel(
+fn status_section(
     ui: &mut egui::Ui,
     title: &str,
     body: &str,
@@ -1242,7 +1252,7 @@ fn status_panel(
         Tone::Warning => StatePanelKind::Pending,
         Tone::Error => StatePanelKind::Failed,
     };
-    state_panel(ui, StatePanelSpec::new(kind, title, body), action);
+    status_strip(ui, StatePanelSpec::new(kind, title, body), action);
 }
 
 fn share_action_available(permission: CapturePermission, snapshot: &AppSnapshot) -> bool {
