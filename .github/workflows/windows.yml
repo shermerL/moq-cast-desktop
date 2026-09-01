@@ -6,11 +6,13 @@ on:
     paths:
       - "windows/**"
       - "shared/diagnostics/**"
+      - "shared/ui/**"
       - ".github/workflows/windows.yml"
   pull_request:
     paths:
       - "windows/**"
       - "shared/diagnostics/**"
+      - "shared/ui/**"
       - ".github/workflows/windows.yml"
   workflow_dispatch:
 
@@ -43,7 +45,7 @@ jobs:
             ~/.cargo/git
             windows/target
             shared/diagnostics/target
-          key: windows-cargo-${{ runner.os }}-rust1.95.0-${{ hashFiles('windows/Cargo.lock', 'shared/diagnostics/Cargo.lock') }}
+          key: windows-cargo-${{ runner.os }}-rust1.95.0-${{ hashFiles('windows/Cargo.lock', 'shared/diagnostics/Cargo.lock', 'shared/ui/Cargo.lock') }}
           restore-keys: |
             windows-cargo-${{ runner.os }}-rust1.95.0-
       - name: Check formatting

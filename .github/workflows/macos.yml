@@ -6,11 +6,13 @@ on:
     paths:
       - "mac/**"
       - "shared/diagnostics/**"
+      - "shared/ui/**"
       - ".github/workflows/macos.yml"
   pull_request:
     paths:
       - "mac/**"
       - "shared/diagnostics/**"
+      - "shared/ui/**"
       - ".github/workflows/macos.yml"
   workflow_dispatch:
 
@@ -42,7 +44,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: macos-cargo-${{ runner.arch }}-rust1.95.0-${{ hashFiles('mac/Cargo.lock', 'shared/diagnostics/Cargo.lock') }}
+          key: macos-cargo-${{ runner.arch }}-rust1.95.0-${{ hashFiles('mac/Cargo.lock', 'shared/diagnostics/Cargo.lock', 'shared/ui/Cargo.lock') }}
           restore-keys: |
             macos-cargo-${{ runner.arch }}-rust1.95.0-
       - name: Verify shared diagnostics
