@@ -2,6 +2,7 @@
 
 mod capture_picker;
 mod player;
+mod system_lifecycle;
 mod theme;
 mod view;
 
@@ -19,7 +20,7 @@ use crate::playback::FrameIdentity;
 use crate::remote::ScreenAvailability;
 use crate::runtime::{
     AppSnapshot, DiscoveryPhase, MediaOwner, MediaPhase, NearbyIssue, PeerSnapshot, RuntimeOwner,
-    SessionPhase, ShareAudioPhase,
+    RuntimePhase, SessionPhase, ShareAudioPhase,
 };
 
 const STORAGE_LOCALE: &str = "moqcast.macos.locale";
@@ -70,6 +71,7 @@ pub(crate) struct MoqCastApp {
     locale: Locale,
     selected_peer: Option<String>,
     runtime: RuntimeOwner,
+    system_lifecycle: Option<system_lifecycle::Observer>,
     player: player::Player,
     playback_texture: Option<egui::TextureHandle>,
     playback_identity: Option<FrameIdentity>,
@@ -91,6 +93,7 @@ impl MoqCastApp {
         );
         let repaint = context.egui_ctx.clone();
         let runtime = RuntimeOwner::start(move || repaint.request_repaint())?;
+        let system_lifecycle = Some(system_lifecycle::Observer::new(runtime.system_lifecycle()));
         let capture_permission = if capture_picker::permission_allowed() {
             CapturePermission::Allowed
         } else {
@@ -101,6 +104,7 @@ impl MoqCastApp {
             locale,
             selected_peer: None,
             runtime,
+            system_lifecycle,
             player: player::Player::default(),
             playback_texture: None,
             playback_identity: None,
@@ -403,6 +407,20 @@ impl MoqCastApp {
                     "Check Local Network permission, then try again.",
                 ),
             ),
+            DiscoveryPhase::Stopped
+                if snapshot.runtime.phase() == RuntimePhase::Suspended
+                    && snapshot.peers.is_empty() =>
+            {
+                self.placeholder(
+                    ui,
+                    false,
+                    self.text("Mac 正在睡眠", "Mac is sleeping"),
+                    self.text(
+                        "附近设备和媒体服务将在唤醒后自动恢复。",
+                        "Nearby and media services will resume after wake.",
+                    ),
+                );
+            }
             DiscoveryPhase::Stopped if snapshot.peers.is_empty() => self.recovery_placeholder(
                 ui,
                 self.text("附近设备服务已停止", "Nearby services stopped"),
@@ -1034,6 +1052,7 @@ impl eframe::App for MoqCastApp {
     }
 
     fn on_exit(&mut self) {
+        self.system_lifecycle.take();
         self.runtime.shutdown();
     }
 }
@@ -1046,6 +1065,9 @@ fn text(locale: Locale, chinese: &'static str, english: &'static str) -> &'stati
 }
 
 fn global_summary(snapshot: &AppSnapshot, locale: Locale) -> String {
+    if snapshot.runtime.phase() == RuntimePhase::Suspended {
+        return text(locale, "已暂停", "Suspended").to_owned();
+    }
     match snapshot.discovery.phase() {
         DiscoveryPhase::Starting => text(locale, "正在启动", "Starting").to_owned(),
         DiscoveryPhase::Scanning => text(locale, "正在扫描", "Scanning").to_owned(),
@@ -1085,6 +1107,9 @@ fn local_count_summary(snapshot: &AppSnapshot, locale: Locale) -> String {
 }
 
 fn local_status(snapshot: &AppSnapshot, locale: Locale) -> &'static str {
+    if snapshot.runtime.phase() == RuntimePhase::Suspended {
+        return text(locale, "睡眠期间已暂停", "Paused while the Mac sleeps");
+    }
     match (snapshot.discovery.phase(), snapshot.session.phase()) {
         (DiscoveryPhase::Starting, _) => {
             text(locale, "正在启动附近设备服务", "Starting Nearby services")
@@ -1311,7 +1336,8 @@ fn share_action_available(permission: CapturePermission, snapshot: &AppSnapshot)
 }
 
 fn system_audio_action_available(snapshot: &AppSnapshot) -> bool {
-    snapshot.media.phase() == MediaPhase::Idle
+    snapshot.session.phase() == SessionPhase::Listening
+        && snapshot.media.phase() == MediaPhase::Idle
         && snapshot
             .share_selection
             .as_ref()

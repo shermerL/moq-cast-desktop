@@ -144,6 +144,22 @@ fn share_action_requires_permission_source_and_idle_media() {
 }
 
 #[test]
+fn system_audio_action_requires_listening_session() {
+    let mut snapshot = AppSnapshot {
+        share_selection: Some(crate::publication::Selection::Display {
+            display_id: 7,
+            primary: true,
+            label: "Display 7".to_owned(),
+        }),
+        ..Default::default()
+    };
+
+    assert!(!system_audio_action_available(&snapshot));
+    snapshot.session.begin(SessionPhase::Listening);
+    assert!(system_audio_action_available(&snapshot));
+}
+
+#[test]
 fn system_audio_action_requires_an_idle_primary_display() {
     let mut snapshot = AppSnapshot {
         share_selection: Some(crate::publication::Selection::Display {

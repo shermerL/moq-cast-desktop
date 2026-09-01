@@ -77,6 +77,7 @@ pub(crate) enum RuntimePhase {
     #[default]
     Starting,
     Ready,
+    Suspended,
     Stopped,
 }
 
@@ -513,6 +514,27 @@ type NetworkStartFuture =
     Pin<Box<dyn Future<Output = Result<network::Services, NearbyIssue>> + Send>>;
 type NetworkStart = Arc<dyn Fn() -> NetworkStartFuture + Send + Sync>;
 
+#[derive(Clone)]
+pub(crate) struct SystemLifecycle {
+    events: mpsc::UnboundedSender<SystemEvent>,
+}
+
+impl SystemLifecycle {
+    pub(crate) fn suspend(&self) -> bool {
+        self.events.send(SystemEvent::Suspend).is_ok()
+    }
+
+    pub(crate) fn resume(&self) -> bool {
+        self.events.send(SystemEvent::Resume).is_ok()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SystemEvent {
+    Suspend,
+    Resume,
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum RuntimeStartError {
     #[error("failed to create the async runtime: {0}")]
@@ -523,6 +545,7 @@ pub(crate) enum RuntimeStartError {
 
 pub(crate) struct RuntimeOwner {
     commands: mpsc::Sender<RuntimeCommand>,
+    system_events: mpsc::UnboundedSender<SystemEvent>,
     snapshot: watch::Receiver<Arc<AppSnapshot>>,
     frames: watch::Receiver<Option<Arc<PlaybackFrame>>>,
     owner: Option<thread::JoinHandle<()>>,
@@ -560,17 +583,28 @@ impl RuntimeOwner {
             .build()
             .map_err(RuntimeStartError::AsyncRuntime)?;
         let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
+        let (system_events, system_event_rx) = mpsc::unbounded_channel();
         let (snapshot_tx, snapshot) = watch::channel(Arc::new(AppSnapshot::default()));
         let (frames_tx, frames) = watch::channel(None);
         let wake = Arc::new(wake);
         let start: NetworkStart = Arc::new(move || Box::pin(start()));
         let owner = thread::Builder::new()
             .name("moqcast-macos-runtime".to_owned())
-            .spawn(move || runtime.block_on(run(command_rx, snapshot_tx, frames_tx, start, wake)))
+            .spawn(move || {
+                runtime.block_on(run(
+                    command_rx,
+                    system_event_rx,
+                    snapshot_tx,
+                    frames_tx,
+                    start,
+                    wake,
+                ))
+            })
             .map_err(RuntimeStartError::OwnerThread)?;
 
         Ok(Self {
             commands,
+            system_events,
             snapshot,
             frames,
             owner: Some(owner),
@@ -621,6 +655,12 @@ impl RuntimeOwner {
             .is_ok()
     }
 
+    pub(crate) fn system_lifecycle(&self) -> SystemLifecycle {
+        SystemLifecycle {
+            events: self.system_events.clone(),
+        }
+    }
+
     pub(crate) fn shutdown(&mut self) {
         let Some(owner) = self.owner.take() else {
             return;
@@ -640,6 +680,7 @@ impl Drop for RuntimeOwner {
 
 async fn run(
     mut commands: mpsc::Receiver<RuntimeCommand>,
+    mut system_events: mpsc::UnboundedReceiver<SystemEvent>,
     snapshot_tx: watch::Sender<Arc<AppSnapshot>>,
     frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
     start: NetworkStart,
@@ -658,8 +699,22 @@ async fn run(
     let (playback_events_tx, mut playback_events) = mpsc::channel(PLAYBACK_EVENT_CAPACITY);
     let mut playback = playback::Owner::default();
     let mut publication = publication::Owner::default();
+    let mut suspended = false;
 
     'runtime: loop {
+        if suspended {
+            match wait_while_suspended(&mut commands, &mut system_events).await {
+                SuspendedAction::Resume => {
+                    suspended = false;
+                    snapshot.runtime.begin(RuntimePhase::Ready);
+                    tracing::info!("resuming Nearby network services after system wake");
+                }
+                SuspendedAction::Shutdown => {
+                    stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
+                    return;
+                }
+            }
+        }
         let generations = begin_network_start(&mut snapshot);
         tracing::info!(
             discovery_generation = generations.discovery.value(),
@@ -676,8 +731,14 @@ async fn run(
                         tracing::warn!(?issue, "Nearby network services failed to start");
                         mark_network_failed(&mut snapshot, generations, issue);
                         publish_snapshot(&snapshot_tx, &snapshot, &wake);
-                        match wait_for_network_restart(&mut commands).await {
+                        match wait_for_network_restart(&mut commands, &mut system_events).await {
                             RecoveryAction::Restart => continue 'runtime,
+                            RecoveryAction::Suspend => {
+                                teardown_media(&mut snapshot, &mut playback, &mut publication, &frames).await;
+                                suspend_snapshot(&mut snapshot, &snapshot_tx, &wake);
+                                suspended = true;
+                                continue 'runtime;
+                            }
                             RecoveryAction::Shutdown => {
                                 teardown_media(&mut snapshot, &mut playback, &mut publication, &frames).await;
                                 stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
@@ -698,6 +759,16 @@ async fn run(
                         "ignored media command while Nearby network services are starting"
                     ),
                 },
+                Some(event) = system_events.recv() => match event {
+                    SystemEvent::Suspend => {
+                        teardown_media(&mut snapshot, &mut playback, &mut publication, &frames).await;
+                        drop(start_attempt);
+                        suspend_snapshot(&mut snapshot, &snapshot_tx, &wake);
+                        suspended = true;
+                        continue 'runtime;
+                    }
+                    SystemEvent::Resume => {}
+                },
             }
         };
 
@@ -712,6 +783,7 @@ async fn run(
 
         let action = ServiceRun {
             commands: &mut commands,
+            system_events: &mut system_events,
             snapshot: &mut snapshot,
             services: &mut services,
             generations,
@@ -737,12 +809,22 @@ async fn run(
                 tracing::info!("restarting Nearby network services");
                 continue;
             }
+            RecoveryAction::Suspend => {
+                suspend_snapshot(&mut snapshot, &snapshot_tx, &wake);
+                suspended = true;
+                continue;
+            }
             RecoveryAction::Failed => {
                 tracing::warn!("Nearby network services ended; waiting for explicit restart");
                 mark_network_failed(&mut snapshot, generations, NearbyIssue::ServicesStopped);
                 publish_snapshot(&snapshot_tx, &snapshot, &wake);
-                match wait_for_network_restart(&mut commands).await {
+                match wait_for_network_restart(&mut commands, &mut system_events).await {
                     RecoveryAction::Restart => continue,
+                    RecoveryAction::Suspend => {
+                        suspend_snapshot(&mut snapshot, &snapshot_tx, &wake);
+                        suspended = true;
+                        continue;
+                    }
                     RecoveryAction::Shutdown => {
                         stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
                         return;
@@ -763,8 +845,15 @@ struct NetworkGenerations {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecoveryAction {
     Restart,
+    Suspend,
     Shutdown,
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SuspendedAction {
+    Resume,
+    Shutdown,
 }
 
 fn begin_network_start(snapshot: &mut AppSnapshot) -> NetworkGenerations {
@@ -801,18 +890,47 @@ fn mark_network_failed(
     true
 }
 
-async fn wait_for_network_restart(commands: &mut mpsc::Receiver<RuntimeCommand>) -> RecoveryAction {
+async fn wait_for_network_restart(
+    commands: &mut mpsc::Receiver<RuntimeCommand>,
+    system_events: &mut mpsc::UnboundedReceiver<SystemEvent>,
+) -> RecoveryAction {
     loop {
-        match commands.recv().await {
-            Some(RuntimeCommand::RestartNetwork) => return RecoveryAction::Restart,
-            Some(RuntimeCommand::Shutdown) | None => return RecoveryAction::Shutdown,
-            Some(_) => {}
+        tokio::select! {
+            command = commands.recv() => match command {
+                Some(RuntimeCommand::RestartNetwork) => return RecoveryAction::Restart,
+                Some(RuntimeCommand::Shutdown) | None => return RecoveryAction::Shutdown,
+                Some(_) => {}
+            },
+            Some(event) = system_events.recv() => match event {
+                SystemEvent::Suspend => return RecoveryAction::Suspend,
+                SystemEvent::Resume => {}
+            },
+        }
+    }
+}
+
+async fn wait_while_suspended(
+    commands: &mut mpsc::Receiver<RuntimeCommand>,
+    system_events: &mut mpsc::UnboundedReceiver<SystemEvent>,
+) -> SuspendedAction {
+    loop {
+        tokio::select! {
+            command = commands.recv() => match command {
+                Some(RuntimeCommand::Shutdown) | None => return SuspendedAction::Shutdown,
+                Some(RuntimeCommand::RestartNetwork) => {}
+                Some(_) => tracing::debug!("ignored media command while the runtime is suspended"),
+            },
+            Some(event) = system_events.recv() => match event {
+                SystemEvent::Resume => return SuspendedAction::Resume,
+                SystemEvent::Suspend => {}
+            },
         }
     }
 }
 
 struct ServiceRun<'a> {
     commands: &'a mut mpsc::Receiver<RuntimeCommand>,
+    system_events: &'a mut mpsc::UnboundedReceiver<SystemEvent>,
     snapshot: &'a mut AppSnapshot,
     services: &'a mut network::Services,
     generations: NetworkGenerations,
@@ -833,6 +951,7 @@ impl ServiceRun<'_> {
             let input = if scan_finished {
                 tokio::select! {
                     command = self.commands.recv() => RuntimeInput::Command(command),
+                    Some(event) = self.system_events.recv() => RuntimeInput::System(event),
                     event = self.services.recv() => RuntimeInput::Network(event),
                     event = self.playback_events.recv() => RuntimeInput::Playback(event),
                     event = self.publication.recv() => RuntimeInput::Publication(event),
@@ -840,6 +959,7 @@ impl ServiceRun<'_> {
             } else {
                 tokio::select! {
                     command = self.commands.recv() => RuntimeInput::Command(command),
+                    Some(event) = self.system_events.recv() => RuntimeInput::System(event),
                     event = self.services.recv() => RuntimeInput::Network(event),
                     event = self.playback_events.recv() => RuntimeInput::Playback(event),
                     event = self.publication.recv() => RuntimeInput::Publication(event),
@@ -890,6 +1010,8 @@ impl ServiceRun<'_> {
                     stop_share(self.snapshot, self.publication);
                     None
                 }
+                RuntimeInput::System(SystemEvent::Suspend) => Some(RecoveryAction::Suspend),
+                RuntimeInput::System(SystemEvent::Resume) => None,
                 RuntimeInput::Network(Some(event)) => {
                     apply_network_event(
                         self.snapshot,
@@ -951,6 +1073,7 @@ async fn teardown_media(
 
 enum RuntimeInput {
     Command(Option<RuntimeCommand>),
+    System(SystemEvent),
     Network(Option<NetworkEvent>),
     Playback(Option<PlaybackEvent>),
     Publication(PublicationEvent),
@@ -1247,6 +1370,22 @@ fn stop_snapshot(
     tracing::info!(stage = "shutdown", "macOS runtime owner stopped");
 }
 
+fn suspend_snapshot(
+    snapshot: &mut AppSnapshot,
+    snapshot_tx: &watch::Sender<Arc<AppSnapshot>>,
+    wake: &Arc<dyn Fn() + Send + Sync>,
+) {
+    snapshot.runtime.begin(RuntimePhase::Suspended);
+    snapshot.discovery.begin(DiscoveryPhase::Stopped);
+    snapshot.session.begin(SessionPhase::Stopped);
+    snapshot.peers.clear();
+    snapshot.remote_screens.clear();
+    snapshot.inbound_sessions = 0;
+    snapshot.nearby_issue = None;
+    publish_snapshot(snapshot_tx, snapshot, wake);
+    tracing::info!(stage = "suspend", "macOS runtime owner suspended");
+}
+
 fn publish_snapshot(
     snapshot_tx: &watch::Sender<Arc<AppSnapshot>>,
     snapshot: &AppSnapshot,
@@ -1310,12 +1449,20 @@ mod tests {
             .expect("test runtime")
             .block_on(async {
                 let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
+                let (_system_events, system_event_rx) = mpsc::unbounded_channel();
                 let (snapshot_tx, mut snapshot_rx) =
                     watch::channel(Arc::new(AppSnapshot::default()));
                 let (frames, _) = watch::channel(None);
                 let start: NetworkStart =
                     Arc::new(|| Box::pin(async { Err(NearbyIssue::LocalNetworkUnavailable) }));
-                let owner = run(command_rx, snapshot_tx, frames, start, Arc::new(|| {}));
+                let owner = run(
+                    command_rx,
+                    system_event_rx,
+                    snapshot_tx,
+                    frames,
+                    start,
+                    Arc::new(|| {}),
+                );
                 let observe = async move {
                     loop {
                         snapshot_rx.changed().await.expect("startup snapshot");
@@ -1375,10 +1522,18 @@ mod tests {
                     })
                 };
                 let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
+                let (_system_events, system_event_rx) = mpsc::unbounded_channel();
                 let (snapshot_tx, mut snapshot_rx) =
                     watch::channel(Arc::new(AppSnapshot::default()));
                 let (frames, _) = watch::channel(None);
-                let owner = run(command_rx, snapshot_tx, frames, start, Arc::new(|| {}));
+                let owner = run(
+                    command_rx,
+                    system_event_rx,
+                    snapshot_tx,
+                    frames,
+                    start,
+                    Arc::new(|| {}),
+                );
                 let observe = async move {
                     loop {
                         snapshot_rx.changed().await.expect("first failure");
@@ -1516,6 +1671,99 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_ne!(runtime.snapshot().discovery.generation(), first_generation);
         runtime.shutdown();
+    }
+
+    #[test]
+    fn suspend_resume_is_idempotent_while_network_start_is_pending() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::mpsc as std_mpsc;
+
+        struct DropSignal(Arc<AtomicBool>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let first_dropped = Arc::new(AtomicBool::new(false));
+        let (first_entered_tx, first_entered_rx) = std_mpsc::channel();
+        let (second_started_tx, second_started_rx) = std_mpsc::channel();
+        let (wake_tx, wake_rx) = std_mpsc::channel();
+        let mut runtime = RuntimeOwner::start_with(
+            {
+                let attempts = attempts.clone();
+                let first_dropped = first_dropped.clone();
+                move || {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    let first_dropped = first_dropped.clone();
+                    let first_entered_tx = first_entered_tx.clone();
+                    let second_started_tx = second_started_tx.clone();
+                    async move {
+                        if attempt == 0 {
+                            let _drop = DropSignal(first_dropped);
+                            first_entered_tx.send(()).expect("first start entered");
+                            std::future::pending::<()>().await;
+                            unreachable!();
+                        }
+                        second_started_tx.send(()).expect("second start invoked");
+                        Err(NearbyIssue::LocalNetworkUnavailable)
+                    }
+                }
+            },
+            move || {
+                let _ = wake_tx.send(());
+            },
+        )
+        .expect("runtime starts");
+        let lifecycle = runtime.system_lifecycle();
+        first_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first start future was polled");
+        let first_generation = runtime.snapshot().discovery.generation();
+
+        assert!(lifecycle.suspend());
+        while runtime.snapshot().runtime.phase() != RuntimePhase::Suspended {
+            wake_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("suspended snapshot");
+        }
+        assert!(first_dropped.load(Ordering::SeqCst));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        assert!(lifecycle.suspend());
+        assert!(lifecycle.resume());
+        second_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("resume invoked the factory once");
+        while runtime.snapshot().discovery.phase() != DiscoveryPhase::Failed {
+            wake_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("resumed snapshot");
+        }
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_ne!(runtime.snapshot().discovery.generation(), first_generation);
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn system_lifecycle_does_not_wait_for_the_bounded_command_queue() {
+        let (commands, _command_rx) = mpsc::channel(1);
+        commands
+            .try_send(RuntimeCommand::RestartNetwork)
+            .expect("command queue filled");
+        let (events, mut event_rx) = mpsc::unbounded_channel();
+        let lifecycle = SystemLifecycle { events };
+
+        assert!(lifecycle.suspend());
+        assert!(lifecycle.resume());
+        assert_eq!(event_rx.try_recv(), Ok(SystemEvent::Suspend));
+        assert_eq!(event_rx.try_recv(), Ok(SystemEvent::Resume));
+
+        drop(event_rx);
+        assert!(!lifecycle.suspend());
     }
 
     #[test]

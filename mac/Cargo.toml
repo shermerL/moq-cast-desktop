@@ -9,7 +9,7 @@ publish = false
 
 [features]
 default = ["app"]
-app = ["dep:eframe", "publish"]
+app = ["dep:block2", "dep:eframe", "dep:objc2-app-kit", "publish"]
 network = ["dep:moq-tokio", "dep:url"]
 watch = [
     "network",
@@ -42,14 +42,16 @@ tracing-subscriber = "0.3.23"
 url = { version = "2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "0.6.2", optional = true }
 hang = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", optional = true }
 moq-audio = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, optional = true }
 moq-mux = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", optional = true }
 moq-tokio = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["aws-lc-rs", "mdns", "quinn"], optional = true }
 moq-video = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, optional = true }
 objc2 = { version = "0.6.4", optional = true }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWorkspace"], optional = true }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGDirectDisplay", "CGWindow"], optional = true }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSError", "NSString"], optional = true }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSError", "NSNotification", "NSOperation", "NSString", "block2"], optional = true }
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["SCContentSharingPicker", "SCShareableContent", "SCStream"], optional = true }
 
 [[bin]]
