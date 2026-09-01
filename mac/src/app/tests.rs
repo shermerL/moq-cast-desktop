@@ -28,10 +28,10 @@ fn layout_breakpoints_match_the_frozen_preview() {
     assert_eq!(ContentLayout::for_width(919.0), ContentLayout::SingleColumn);
     assert_eq!(ContentLayout::for_width(920.0), ContentLayout::ListDetail);
     assert_eq!(
-        NavigationLayout::for_width(759.0),
+        NavigationLayout::for_width(919.0),
         NavigationLayout::TwoRows
     );
-    assert_eq!(NavigationLayout::for_width(760.0), NavigationLayout::OneRow);
+    assert_eq!(NavigationLayout::for_width(920.0), NavigationLayout::OneRow);
 }
 
 #[test]
@@ -95,13 +95,44 @@ fn selection_survives_lost_while_the_session_is_healthy() {
 #[test]
 fn configured_fonts_cover_core_simplified_chinese() {
     let context = egui::Context::default();
-    configure_fonts(&context);
+    install_ui_font(
+        &context,
+        std::borrow::Cow::Borrowed(moqcast_ui::NOTO_SANS_SC),
+    );
     let mut output = context.run_ui(Default::default(), |ui| {
         ui.fonts_mut(|fonts| {
             assert!(fonts.has_glyphs(&egui::FontId::proportional(13.0), "附近设备屏幕共享设置"));
         });
     });
     output.textures_delta.clear();
+}
+
+#[test]
+fn watch_idle_and_failed_use_state_panels_while_active_phases_use_the_player() {
+    assert_eq!(
+        watch_projection(None, MediaPhase::Idle),
+        WatchProjection::Empty
+    );
+    assert_eq!(
+        watch_projection(Some(MediaOwner::Watch), MediaPhase::Failed),
+        WatchProjection::Failed
+    );
+    for phase in [
+        MediaPhase::PreparingWatch,
+        MediaPhase::Watching,
+        MediaPhase::Stopping,
+    ] {
+        assert_eq!(
+            watch_projection(Some(MediaOwner::Watch), phase),
+            WatchProjection::Player
+        );
+    }
+}
+
+#[test]
+fn shared_navigation_uses_the_compact_height_below_the_split_breakpoint() {
+    assert_eq!(navigation_height(919.0), Size::APP_BAR_COMPACT);
+    assert_eq!(navigation_height(920.0), Size::APP_BAR);
 }
 
 #[test]
@@ -112,6 +143,8 @@ fn ordinary_ui_copy_keeps_internal_provenance_private() {
         ["A", "BI"].concat(),
         ["build", " variant"].concat(),
         ["dependency", " identity"].concat(),
+        ["unattributed incoming", " sessions"].concat(),
+        ["未归属传入", "连接"].concat(),
     ];
     for forbidden in forbidden {
         assert!(

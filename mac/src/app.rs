@@ -4,12 +4,15 @@ mod capture_picker;
 mod diagnostics;
 mod player;
 mod system_lifecycle;
-mod theme;
 mod view;
 
-use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Key, Layout, Margin,
-    Modifiers, RichText, Sense, Stroke,
+use eframe::egui::{self, Align, Color32, Frame, Key, Layout, Modifiers};
+use moqcast_ui::{
+    BadgeTone, COLORS, DeviceRowSpec, NavItemSpec, PageWidth, SelectSpec, SettingRowSpec, Size,
+    Spacing, StatePanelKind, StatePanelSpec, SwitchSpec, Theme, TypographyRole,
+    app_bar_content_rect, danger_button, device_row, install_ui_font, major_section_break,
+    nav_item, page_header, page_shell, primary_button, secondary_button, section_header, select,
+    setting_row, state_panel, status_badge, switch, typography,
 };
 
 use self::view::{
@@ -26,16 +29,23 @@ use crate::runtime::{
 
 const STORAGE_LOCALE: &str = "moqcast.macos.locale";
 const STORAGE_DEVELOPER_MODE: &str = "moqcast.macos.developer-mode";
-const MAX_CONTENT_WIDTH: f32 = 1040.0;
-const DETAIL_WIDTH: f32 = 360.0;
-const DEVICE_ROW_HEIGHT: f32 = 60.0;
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Page {
     #[default]
     Nearby,
     ScreenShare,
+    Watch,
     Settings,
+}
+
+impl Page {
+    fn content_width(self) -> PageWidth {
+        match self {
+            Self::Nearby => PageWidth::Wide,
+            Self::ScreenShare | Self::Watch => PageWidth::Medium,
+            Self::Settings => PageWidth::Narrow,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -50,6 +60,13 @@ enum CapturePermission {
     NotRequested,
     Allowed,
     Denied,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WatchProjection {
+    Empty,
+    Failed,
+    Player,
 }
 
 impl Locale {
@@ -91,8 +108,11 @@ impl MoqCastApp {
         context: &eframe::CreationContext<'_>,
         diagnostics: moqcast_diagnostics::Handle,
     ) -> anyhow::Result<Self> {
-        configure_fonts(&context.egui_ctx);
-        theme::apply(&context.egui_ctx);
+        install_ui_font(
+            &context.egui_ctx,
+            std::borrow::Cow::Borrowed(moqcast_ui::NOTO_SANS_SC),
+        );
+        Theme.apply(&context.egui_ctx);
         let locale = Locale::from_storage(
             context
                 .storage
@@ -142,7 +162,10 @@ impl MoqCastApp {
         if context.input_mut(|input| input.consume_shortcut(&shortcut(Key::Num2))) {
             self.page = Page::ScreenShare;
         }
-        if context.input_mut(|input| input.consume_shortcut(&shortcut(Key::Num3)))
+        if context.input_mut(|input| input.consume_shortcut(&shortcut(Key::Num3))) {
+            self.page = Page::Watch;
+        }
+        if context.input_mut(|input| input.consume_shortcut(&shortcut(Key::Num4)))
             || context.input_mut(|input| input.consume_shortcut(&shortcut(Key::Comma)))
         {
             self.page = Page::Settings;
@@ -150,7 +173,7 @@ impl MoqCastApp {
     }
 
     fn update_playback_texture(&mut self, context: &egui::Context, snapshot: &AppSnapshot) {
-        let active = Self::media_active(snapshot);
+        let active = Self::player_active(snapshot);
         if !active {
             self.playback_texture = None;
             self.playback_identity = None;
@@ -192,15 +215,8 @@ impl MoqCastApp {
         self.playback_display = Some((frame.display_width, frame.display_height));
     }
 
-    fn media_active(snapshot: &AppSnapshot) -> bool {
-        snapshot.media_owner == Some(MediaOwner::Watch)
-            && matches!(
-                snapshot.media.phase(),
-                MediaPhase::PreparingWatch
-                    | MediaPhase::Watching
-                    | MediaPhase::Stopping
-                    | MediaPhase::Failed
-            )
+    fn player_active(snapshot: &AppSnapshot) -> bool {
+        watch_projection(snapshot.media_owner, snapshot.media.phase()) == WatchProjection::Player
     }
 
     fn poll_capture_picker(&mut self, context: &egui::Context) {
@@ -268,96 +284,102 @@ impl MoqCastApp {
     fn top_bar(&mut self, root: &mut egui::Ui, snapshot: &AppSnapshot) {
         let summary = global_summary(snapshot, self.locale);
         egui::Panel::top("navigation")
-            .frame(
-                Frame::NONE
-                    .fill(theme::SURFACE)
-                    .inner_margin(Margin::symmetric(18, 8)),
-            )
+            .frame(Frame::new().fill(COLORS.chrome.into()))
+            .exact_size(navigation_height(root.ctx().content_rect().width()))
             .show(root, |ui| {
-                match NavigationLayout::for_width(ui.ctx().content_rect().width()) {
-                    NavigationLayout::OneRow => {
-                        ui.set_min_height(36.0);
-                        ui.horizontal_centered(|ui| {
-                            ui.label(
-                                RichText::new("MoQCast")
-                                    .size(15.0)
-                                    .strong()
-                                    .color(theme::BRAND_PRESSED),
+                let content =
+                    app_bar_content_rect(ui.max_rect()).shrink2(egui::vec2(0.0, Spacing::SM));
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(content)
+                        .layout(Layout::top_down(Align::Min)),
+                    |ui| match NavigationLayout::for_width(ui.ctx().content_rect().width()) {
+                        NavigationLayout::OneRow => {
+                            ui.allocate_ui_with_layout(
+                                content.size(),
+                                Layout::left_to_right(Align::Center),
+                                |ui| {
+                                    ui.label(typography(
+                                        "MoQCast Desktop",
+                                        TypographyRole::Row,
+                                        COLORS.text.into(),
+                                    ));
+                                    ui.add_space(Spacing::XL);
+                                    self.navigation(ui);
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        ui.label(typography(
+                                            &summary,
+                                            TypographyRole::Meta,
+                                            COLORS.muted.into(),
+                                        ));
+                                    });
+                                },
                             );
-                            ui.add_space(18.0);
-                            self.navigation(ui, false);
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(RichText::new(summary).small().color(theme::MUTED));
-                            });
-                        });
-                    }
-                    NavigationLayout::TwoRows => {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("MoQCast")
-                                    .size(15.0)
-                                    .strong()
-                                    .color(theme::BRAND_PRESSED),
+                        }
+                        NavigationLayout::TwoRows => {
+                            let top_height = (content.height() - Spacing::XS - Size::NAV).max(1.0);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(content.width(), top_height),
+                                Layout::left_to_right(Align::Center),
+                                |ui| {
+                                    ui.label(typography(
+                                        "MoQCast Desktop",
+                                        TypographyRole::Row,
+                                        COLORS.text.into(),
+                                    ));
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        ui.label(typography(
+                                            &summary,
+                                            TypographyRole::Meta,
+                                            COLORS.muted.into(),
+                                        ));
+                                    });
+                                },
                             );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(RichText::new(summary).small().color(theme::MUTED));
-                            });
-                        });
-                        self.navigation(ui, true);
-                    }
-                }
+                            ui.add_space(Spacing::XS);
+                            self.navigation(ui);
+                        }
+                    },
+                );
             });
     }
 
-    fn navigation(&mut self, ui: &mut egui::Ui, equal_width: bool) {
+    fn navigation(&mut self, ui: &mut egui::Ui) {
         let labels = [
             self.text("附近设备", "Nearby"),
             self.text("屏幕共享", "Screen Share"),
+            self.text("观看", "Watch"),
             self.text("设置", "Settings"),
         ];
-        let pages = [Page::Nearby, Page::ScreenShare, Page::Settings];
-        let width = if equal_width {
-            (ui.available_width() - 6.0) / 3.0
-        } else {
-            0.0
-        };
+        let pages = [Page::Nearby, Page::ScreenShare, Page::Watch, Page::Settings];
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 3.0;
-            for (page, label) in pages.into_iter().zip(labels) {
-                let button = egui::Button::new(label)
-                    .selected(self.page == page)
-                    .corner_radius(CornerRadius::same(6));
-                let response = if equal_width {
-                    ui.add_sized([width, 32.0], button)
-                } else {
-                    ui.add_sized([0.0, 32.0], button)
-                };
-                if response.clicked() {
+            ui.spacing_mut().item_spacing.x = Spacing::XS;
+            for (index, (page, label)) in pages.into_iter().zip(labels).enumerate() {
+                if nav_item(
+                    ui,
+                    NavItemSpec::new(egui::Id::new(("mac-nav", index)), label)
+                        .selected(self.page == page),
+                )
+                .clicked()
+                {
                     self.page = page;
                 }
             }
         });
     }
 
-    fn page_header(&self, ui: &mut egui::Ui, title: &'static str, subtitle: &'static str) {
-        ui.heading(title);
-        ui.add_space(2.0);
-        ui.label(RichText::new(subtitle).small().color(theme::MUTED));
-        ui.add_space(18.0);
-    }
-
     fn nearby(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
         self.selected_peer = selected_peer(self.selected_peer.as_deref(), &snapshot.peers);
-        self.page_header(
+        page_header(
             ui,
             self.text("附近设备", "Nearby Devices"),
-            self.text(
-                "自动发现同一局域网中的 MoQCast 设备，并分别显示附近状态与安全连接。",
-                "Discover MoQCast devices on this LAN and keep presence separate from the secure session.",
-            ),
+            Some(self.text(
+                "查找同一局域网中的 MoQCast 设备，选择可用屏幕开始观看。",
+                "Find MoQCast devices on this local network and choose an available screen to watch.",
+            )),
         );
         self.local_summary(ui, snapshot);
-        ui.add_space(12.0);
+        ui.add_space(Spacing::LG);
 
         if let Some(issue) = snapshot.nearby_issue {
             issue_notice(ui, issue, self.locale);
@@ -372,15 +394,18 @@ impl MoqCastApp {
                     NearbyIssue::DiscoveryStopped | NearbyIssue::ListenerStopped
                 )
             {
-                ui.add_space(8.0);
-                if ui
-                    .button(self.text("重新启动附近设备服务", "Restart Nearby services"))
-                    .clicked()
+                ui.add_space(Spacing::SM);
+                if secondary_button(
+                    ui,
+                    self.text("重新启动附近设备服务", "Restart Nearby services"),
+                    true,
+                )
+                .clicked()
                 {
                     self.runtime.restart_network();
                 }
             }
-            ui.add_space(12.0);
+            ui.add_space(Spacing::LG);
         }
 
         match snapshot.discovery.phase() {
@@ -455,84 +480,66 @@ impl MoqCastApp {
             None => self.text("这台 Mac", "This Mac").to_owned(),
         };
         let status = local_status(snapshot, self.locale);
-        let counts = local_count_summary(snapshot, self.locale);
+        let counts = count_summary(snapshot, self.locale);
 
-        Frame::NONE
-            .fill(Color32::from_white_alpha(150))
-            .inner_margin(Margin::symmetric(12, 8))
-            .show(ui, |ui| {
-                ui.set_min_height(36.0);
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(title).strong());
-                        ui.label(RichText::new(status).small().color(theme::MUTED));
-                        if ui.ctx().content_rect().width() < 760.0 && snapshot.inbound_sessions > 0
-                        {
-                            ui.label(RichText::new(&counts).small().color(theme::MUTED));
-                        }
-                    });
-                    if ui.ctx().content_rect().width() >= 760.0 {
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(RichText::new(counts).small().color(theme::MUTED));
-                        });
-                    }
-                });
-            });
+        setting_row(ui, SettingRowSpec::new(&title).description(status), |ui| {
+            ui.label(typography(
+                counts,
+                TypographyRole::Meta,
+                COLORS.muted.into(),
+            ));
+        });
     }
 
     fn placeholder(&self, ui: &mut egui::Ui, busy: bool, title: &str, body: &str) {
-        Frame::NONE
-            .inner_margin(Margin::symmetric(24, 24))
-            .show(ui, |ui| {
-                ui.set_min_height(172.0);
-                ui.vertical_centered(|ui| {
-                    ui.add_space(28.0);
-                    if busy {
-                        ui.spinner();
-                    }
-                    ui.label(RichText::new(title).size(16.0).strong());
-                    ui.label(RichText::new(body).small().color(theme::MUTED));
-                });
-            });
+        state_panel(
+            ui,
+            StatePanelSpec::new(
+                if busy {
+                    StatePanelKind::Pending
+                } else {
+                    StatePanelKind::Empty
+                },
+                title,
+                body,
+            ),
+            |ui| {
+                if busy {
+                    ui.spinner();
+                }
+            },
+        );
     }
 
     fn recovery_placeholder(&mut self, ui: &mut egui::Ui, title: &str, body: &str) {
-        Frame::NONE
-            .inner_margin(Margin::symmetric(24, 24))
-            .show(ui, |ui| {
-                ui.set_min_height(172.0);
-                ui.vertical_centered(|ui| {
-                    ui.add_space(28.0);
-                    ui.label(RichText::new(title).size(16.0).strong());
-                    ui.label(RichText::new(body).small().color(theme::MUTED));
-                    ui.add_space(12.0);
-                    if ui
-                        .add_sized(
-                            [132.0, 36.0],
-                            egui::Button::new(self.text("重试", "Try Again")),
-                        )
-                        .clicked()
-                    {
-                        self.runtime.restart_network();
-                    }
-                });
-            });
+        let mut retry = false;
+        state_panel(
+            ui,
+            StatePanelSpec::new(StatePanelKind::Failed, title, body),
+            |ui| {
+                retry = primary_button(ui, self.text("重试", "Try Again"), true).clicked();
+            },
+        );
+        if retry {
+            self.runtime.restart_network();
+        }
     }
 
     fn device_workspace(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
         let selected = self.selected_peer.clone();
         match ContentLayout::for_width(ui.ctx().content_rect().width()) {
             ContentLayout::ListDetail => {
-                let list_width = (ui.available_width() - DETAIL_WIDTH - 16.0).max(320.0);
+                let list_width = (ui.available_width() - Size::NEARBY_LIST - Spacing::LG)
+                    .max(Size::WORKSPACE_MIN);
                 ui.horizontal_top(|ui| {
                     ui.allocate_ui_with_layout(
                         egui::vec2(list_width, 0.0),
                         Layout::top_down(Align::Min),
                         |ui| self.device_list(ui, snapshot, selected.as_deref()),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(Spacing::SM);
                     ui.allocate_ui_with_layout(
-                        egui::vec2(DETAIL_WIDTH, 0.0),
+                        egui::vec2(Size::NEARBY_LIST, 0.0),
                         Layout::top_down(Align::Min),
                         |ui| self.device_detail(ui, snapshot, selected.as_deref()),
                     );
@@ -540,33 +547,37 @@ impl MoqCastApp {
             }
             ContentLayout::SingleColumn => {
                 self.device_list(ui, snapshot, selected.as_deref());
-                ui.add_space(16.0);
+                ui.add_space(Spacing::LG);
                 self.device_detail(ui, snapshot, selected.as_deref());
             }
         }
     }
 
     fn device_list(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot, selected: Option<&str>) {
-        Frame::NONE
-            .fill(theme::SURFACE)
-            .stroke(Stroke::new(1.0, theme::BORDER))
-            .corner_radius(CornerRadius::same(8))
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                for (index, (id, peer)) in snapshot.peers.iter().enumerate() {
-                    if index > 0 {
-                        ui.separator();
-                    }
-                    let response = device_row(ui, peer, selected == Some(id), self.locale);
-                    let keyboard_activated = response.has_focus()
-                        && ui.input(|input| {
-                            input.key_pressed(Key::Enter) || input.key_pressed(Key::Space)
-                        });
-                    if response.clicked() || keyboard_activated {
-                        self.selected_peer = Some(id.clone());
-                    }
-                }
-            });
+        ui.spacing_mut().item_spacing.y = Spacing::XS;
+        for (id, peer) in &snapshot.peers {
+            let presentation = PeerPresentation::from(peer);
+            let title = device_name(peer, self.locale);
+            let detail = peer_line(presentation, self.locale);
+            let (response, ()) = device_row(
+                ui,
+                DeviceRowSpec::new(egui::Id::new(("nearby-peer", id)), &title)
+                    .detail(detail)
+                    .selected(selected == Some(id)),
+                |ui| {
+                    status_badge(
+                        ui,
+                        connection_badge(presentation.connection, self.locale),
+                        connection_tone(presentation.connection),
+                    );
+                },
+            );
+            let keyboard_activated = response.has_focus()
+                && ui.input(|input| input.key_pressed(Key::Enter) || input.key_pressed(Key::Space));
+            if response.clicked() || keyboard_activated {
+                self.selected_peer = Some(id.clone());
+            }
+        }
     }
 
     fn device_detail(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot, selected: Option<&str>) {
@@ -578,86 +589,65 @@ impl MoqCastApp {
         let presentation = PeerPresentation::from(peer);
         let screen_path = crate::contract::screen_path(peer_id);
         let screen = screen_availability(peer_id, &snapshot.remote_screens);
-        Frame::NONE
-            .fill(theme::SURFACE)
-            .stroke(Stroke::new(1.0, theme::BORDER))
-            .corner_radius(CornerRadius::same(8))
-            .inner_margin(Margin::same(18))
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new(device_name(peer, self.locale))
-                        .size(16.0)
-                        .strong(),
-                );
-                ui.label(
-                    RichText::new(peer_line(presentation, self.locale))
-                        .small()
-                        .color(theme::MUTED),
-                );
-                ui.add_space(10.0);
-                ui.separator();
-                detail_row(
-                    ui,
-                    self.text("附近状态", "Nearby status"),
-                    presence_label(presentation.presence, self.locale),
-                    None,
-                );
-                detail_row(
-                    ui,
-                    self.text("安全连接", "Secure session"),
-                    connection_label(presentation.connection, self.locale),
-                    Some(connection_tone(presentation.connection)),
-                );
-                detail_row(
-                    ui,
-                    self.text("共享屏幕", "Shared screen"),
-                    screen_label(screen, self.locale),
-                    Some(screen_tone(screen)),
-                );
-                detail_row(
-                    ui,
-                    self.text("最近发现", "Last seen"),
-                    if peer.discovered {
-                        self.text("刚刚", "Just now")
-                    } else {
-                        self.text("已离开附近范围", "No longer nearby")
-                    },
-                    None,
-                );
-                if snapshot.can_watch(peer_id, &screen_path) {
-                    ui.add_space(14.0);
-                    let watch = ui.add_sized(
-                        [ui.available_width(), 36.0],
-                        egui::Button::new(
-                            RichText::new(self.text("观看", "Watch"))
-                                .strong()
-                                .color(Color32::WHITE),
-                        )
-                        .fill(theme::BRAND)
-                        .corner_radius(CornerRadius::same(6)),
-                    );
-                    if watch.clicked()
-                        && self
-                            .runtime
-                            .watch_screen(peer_id.to_owned(), screen_path.clone())
-                    {
-                        self.page = Page::Nearby;
-                    }
-                }
-            });
+        let peer_name = device_name(peer, self.locale);
+        section_header(ui, &peer_name, Some(peer_line(presentation, self.locale)));
+        detail_row(
+            ui,
+            self.text("附近状态", "Nearby status"),
+            presence_label(presentation.presence, self.locale),
+            None,
+        );
+        detail_row(
+            ui,
+            self.text("连接", "Connection"),
+            connection_label(presentation.connection, self.locale),
+            Some(connection_tone(presentation.connection)),
+        );
+        detail_row(
+            ui,
+            self.text("共享屏幕", "Shared screen"),
+            screen_label(screen, self.locale),
+            Some(screen_tone(screen)),
+        );
+        detail_row(
+            ui,
+            self.text("最近发现", "Last seen"),
+            if peer.discovered {
+                self.text("刚刚", "Just now")
+            } else {
+                self.text("已离开附近范围", "No longer nearby")
+            },
+            None,
+        );
+        if snapshot.can_watch(peer_id, &screen_path) {
+            ui.add_space(Spacing::LG);
+            if primary_button(ui, self.text("观看", "Watch"), true).clicked()
+                && self
+                    .runtime
+                    .watch_screen(peer_id.to_owned(), screen_path.clone())
+            {
+                self.page = Page::Watch;
+            }
+        }
     }
 
     fn screen_share(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
-        self.page_header(
+        page_header(
             ui,
             self.text("屏幕共享", "Screen Share"),
-            self.text(
+            Some(self.text(
                 "选择一个屏幕或窗口，并将画面发布给附近设备。",
                 "Choose a display or window to share with nearby devices.",
-            ),
+            )),
         );
-        ui.separator();
-        ui.add_space(12.0);
+        section_header(
+            ui,
+            self.text("共享设置", "Share settings"),
+            Some(self.text(
+                "系统选择器只显示实际可共享的屏幕和窗口。",
+                "The system picker shows only screens and windows that can be shared.",
+            )),
+        );
 
         let permission = match self.capture_permission {
             CapturePermission::NotRequested => self.text("尚未请求", "Not requested"),
@@ -666,7 +656,6 @@ impl MoqCastApp {
         };
         action_row(
             ui,
-            62.0,
             self.text("屏幕录制权限", "Screen recording permission"),
             permission,
             |_| {},
@@ -688,16 +677,12 @@ impl MoqCastApp {
         let mut choose_clicked = false;
         action_row(
             ui,
-            62.0,
             self.text("共享来源", "Share source"),
             &source,
             |ui| {
-                choose_clicked = ui
-                    .add_enabled(
-                        can_choose && !self.picker_pending,
-                        egui::Button::new(choose_label).min_size(egui::vec2(132.0, 32.0)),
-                    )
-                    .clicked();
+                choose_clicked =
+                    secondary_button(ui, choose_label, can_choose && !self.picker_pending)
+                        .clicked();
             },
         );
         if choose_clicked {
@@ -743,30 +728,30 @@ impl MoqCastApp {
         let mut audio_changed = false;
         action_row(
             ui,
-            62.0,
             self.text("系统音频", "System audio"),
             audio_status,
             |ui| {
-                audio_changed = ui
-                    .add_enabled(
-                        system_audio_action_available(snapshot),
-                        egui::Checkbox::without_text(&mut audio_enabled),
-                    )
-                    .changed();
+                audio_changed = switch(
+                    ui,
+                    &mut audio_enabled,
+                    SwitchSpec::new(self.text("系统音频", "System audio"))
+                        .enabled(system_audio_action_available(snapshot)),
+                )
+                .changed();
             },
         );
         if audio_changed {
             self.runtime.set_share_system_audio(audio_enabled);
         }
-        ui.label(
-            RichText::new(self.text(
+        ui.label(typography(
+            self.text(
                 "共享画面包含光标。系统音频不包含麦克风，当前仅支持主显示器。",
                 "The pointer is included. System audio excludes the microphone and currently supports only the main display.",
-            ))
-            .small()
-            .color(theme::MUTED),
-        );
-        ui.add_space(14.0);
+            ),
+            TypographyRole::Help,
+            COLORS.muted.into(),
+        ));
+        major_section_break(ui);
 
         let share_owned = snapshot.media_owner == Some(MediaOwner::Share);
         let watch_owned = snapshot.media_owner == Some(MediaOwner::Watch);
@@ -784,8 +769,8 @@ impl MoqCastApp {
             (
                 self.text("屏幕共享不可用", "Screen sharing unavailable"),
                 self.text(
-                    "安全直连服务尚未就绪。",
-                    "The secure direct-session service is not ready.",
+                    "附近设备连接尚未就绪。",
+                    "Nearby device connections are not ready.",
                 ),
                 Tone::Error,
             )
@@ -811,8 +796,8 @@ impl MoqCastApp {
             (
                 self.text("正在准备屏幕共享", "Preparing screen sharing"),
                 self.text(
-                    "正在验证来源并准备 H.264 视频。安全连接保持不变。",
-                    "Validating the source and preparing H.264 video. Secure sessions stay active.",
+                    "正在验证来源并准备画面。附近连接保持不变。",
+                    "Validating the source and preparing video. Nearby connections stay active.",
                 ),
                 Tone::Warning,
             )
@@ -821,8 +806,8 @@ impl MoqCastApp {
                 (
                     self.text("视频共享已就绪", "Video sharing is ready"),
                     self.text(
-                        "系统音频不可用，视频仍会按观看需求发布。停止共享不会断开健康连接。",
-                        "System audio is unavailable, but video continues on demand. Stopping keeps healthy sessions active.",
+                        "系统音频不可用，视频仍会按观看需求发布。停止共享不会断开附近连接。",
+                        "System audio is unavailable, but video continues on demand. Stopping keeps Nearby connections active.",
                     ),
                     Tone::Warning,
                 )
@@ -830,8 +815,8 @@ impl MoqCastApp {
                 (
                     self.text("屏幕共享已就绪", "Screen sharing is ready"),
                     self.text(
-                    "附近设备开始观看时，将按需启动捕获与 H.264 编码。停止共享不会断开健康连接。",
-                    "Capture and H.264 encoding start on demand when a nearby device watches. Stopping keeps healthy sessions active.",
+                    "附近设备开始观看时，将按需启动画面共享。停止共享不会断开附近连接。",
+                    "Screen sharing starts on demand when a nearby device watches. Stopping keeps Nearby connections active.",
                     ),
                     Tone::Success,
                 )
@@ -860,8 +845,8 @@ impl MoqCastApp {
             (
                 self.text("可以开始共享", "Ready to share"),
                 self.text(
-                    "开始后，附近设备可通过现有直连会话观看。",
-                    "Nearby devices can watch through existing direct sessions after you start.",
+                    "开始后，附近设备即可观看。",
+                    "Nearby devices can watch after you start.",
                 ),
                 Tone::Success,
             )
@@ -884,39 +869,15 @@ impl MoqCastApp {
                     MediaPhase::PreparingShare | MediaPhase::Sharing
                 )
             {
-                if ui
-                    .add_sized(
-                        [132.0, 36.0],
-                        egui::Button::new(self.text("停止共享", "Stop Sharing")),
-                    )
-                    .clicked()
-                {
+                if danger_button(ui, self.text("停止共享", "Stop Sharing"), true).clicked() {
                     action = Some(false);
                 }
             } else if share_owned && snapshot.media.phase() == MediaPhase::Failed {
-                if ui
-                    .add_sized(
-                        [132.0, 36.0],
-                        egui::Button::new(self.text("返回", "Return")),
-                    )
-                    .clicked()
-                {
+                if secondary_button(ui, self.text("返回", "Return"), true).clicked() {
                     action = Some(false);
                 }
             } else if !watch_owned
-                && ui
-                    .add_enabled(
-                        can_start,
-                        egui::Button::new(
-                            RichText::new(self.text("开始共享", "Start Sharing"))
-                                .strong()
-                                .color(Color32::WHITE),
-                        )
-                        .fill(theme::BRAND)
-                        .corner_radius(CornerRadius::same(6))
-                        .min_size(egui::vec2(132.0, 36.0)),
-                    )
-                    .clicked()
+                && primary_button(ui, self.text("开始共享", "Start Sharing"), can_start).clicked()
             {
                 action = Some(true);
             }
@@ -930,14 +891,76 @@ impl MoqCastApp {
             }
             None => {}
         }
-        ui.separator();
+    }
+
+    fn watch(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
+        page_header(
+            ui,
+            self.text("观看附近屏幕", "Watch a Nearby Screen"),
+            Some(self.text(
+                "画面保持原始宽高比，播放状态不会改变舞台尺寸。",
+                "Video keeps its original aspect ratio, and playback state does not resize the stage.",
+            )),
+        );
+        let projection = watch_projection(snapshot.media_owner, snapshot.media.phase());
+        if projection == WatchProjection::Player {
+            self.watch_player(ui, snapshot);
+            return;
+        }
+
+        let failed = projection == WatchProjection::Failed;
+        let mut open_nearby = false;
+        state_panel(
+            ui,
+            StatePanelSpec::new(
+                if failed {
+                    StatePanelKind::Failed
+                } else {
+                    StatePanelKind::Empty
+                },
+                if failed {
+                    self.text("无法播放", "Playback unavailable")
+                } else {
+                    self.text("选择一个可观看屏幕", "Choose a screen to watch")
+                },
+                if failed {
+                    self.text(
+                        "播放未能继续。停止观看后，附近连接仍会保留。",
+                        "Playback could not continue. Stopping keeps the Nearby session connected.",
+                    )
+                } else {
+                    self.text(
+                        "打开附近设备，选择正在共享屏幕的设备。",
+                        "Open Nearby and select a device that is sharing a screen.",
+                    )
+                },
+            ),
+            |ui| {
+                open_nearby = primary_button(
+                    ui,
+                    if failed {
+                        self.text("停止并返回", "Stop and Return")
+                    } else {
+                        self.text("打开附近设备", "Open Nearby")
+                    },
+                    true,
+                )
+                .clicked();
+            },
+        );
+        if open_nearby {
+            if failed {
+                self.runtime.stop_watching();
+            }
+            self.page = Page::Nearby;
+        }
     }
 
     fn settings(&mut self, ui: &mut egui::Ui) {
-        self.page_header(
+        page_header(
             ui,
             self.text("设置", "Settings"),
-            if self.developer_mode {
+            Some(if self.developer_mode {
                 self.text(
                     "开发者诊断已启用，本地日志工具仅保留在这台 Mac 上。",
                     "Developer diagnostics are enabled; local log tools stay on this Mac.",
@@ -947,64 +970,63 @@ impl MoqCastApp {
                     "仅显示用户偏好与公开产品信息。",
                     "Only user preferences and public product information are shown.",
                 )
-            },
+            }),
         );
-        ui.separator();
-        ui.add_space(12.0);
-        ui.label(
-            RichText::new(self.text("通用", "General"))
-                .small()
-                .strong()
-                .color(theme::MUTED),
-        );
-        ui.add_space(8.0);
+        section_header(ui, self.text("通用", "General"), None);
         let language = self.text("语言", "Language");
         let language_hint = self.text(
             "立即应用并保存在这台 Mac 上",
             "Applies immediately and is saved on this Mac",
         );
-        action_row(ui, 58.0, language, language_hint, |ui| {
-            egui::ComboBox::from_id_salt("settings-locale")
-                .width(180.0)
-                .selected_text(match self.locale {
-                    Locale::Chinese => "简体中文",
-                    Locale::English => "English",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.locale, Locale::Chinese, "简体中文");
-                    ui.selectable_value(&mut self.locale, Locale::English, "English");
-                });
+        action_row(ui, language, language_hint, |ui| {
+            const OPTIONS: [&str; 2] = ["简体中文", "English"];
+            let mut selected = usize::from(self.locale == Locale::English);
+            if select(
+                ui,
+                &mut selected,
+                SelectSpec::new(egui::Id::new("settings-locale"), language, &OPTIONS)
+                    .expect("the locale list is not empty"),
+            )
+            .expect("the selected locale index is valid")
+            .changed()
+            {
+                self.locale = if selected == 0 {
+                    Locale::Chinese
+                } else {
+                    Locale::English
+                };
+            }
         });
         ui.separator();
         action_row(
             ui,
-            58.0,
             self.text("版本", "Version"),
             self.text("公开产品版本", "Public product version"),
             |ui| {
-                ui.label(RichText::new(format!("MoQCast {}", env!("CARGO_PKG_VERSION"))).strong());
+                ui.label(typography(
+                    format!("MoQCast {}", env!("CARGO_PKG_VERSION")),
+                    TypographyRole::Meta,
+                    COLORS.muted.into(),
+                ));
             },
         );
-        ui.separator();
-        ui.add_space(16.0);
-        ui.label(
-            RichText::new(self.text("高级", "Advanced"))
-                .small()
-                .strong()
-                .color(theme::MUTED),
-        );
-        ui.add_space(8.0);
+        major_section_break(ui);
+        section_header(ui, self.text("高级", "Advanced"), None);
         let was_developer_mode = self.developer_mode;
+        let developer_mode_label = self.text("开发者模式", "Developer mode");
         action_row(
             ui,
-            58.0,
-            self.text("开发者模式", "Developer mode"),
+            developer_mode_label,
             self.text(
                 "开启后显示本地日志与导出工具。",
                 "Shows local logs and export tools when enabled.",
             ),
             |ui| {
-                ui.checkbox(&mut self.developer_mode, "");
+                switch(
+                    ui,
+                    &mut self.developer_mode,
+                    SwitchSpec::new(developer_mode_label),
+                );
             },
         );
         if was_developer_mode != self.developer_mode {
@@ -1014,11 +1036,9 @@ impl MoqCastApp {
             }
         }
         if self.developer_mode {
-            ui.separator();
-            ui.add_space(16.0);
+            major_section_break(ui);
             self.diagnostics.show_settings(ui, self.locale);
         }
-        ui.separator();
     }
 }
 
@@ -1027,8 +1047,8 @@ impl eframe::App for MoqCastApp {
         self.poll_capture_picker(ui.ctx());
         let snapshot = self.runtime.snapshot();
         self.update_playback_texture(ui.ctx(), &snapshot);
-        let media_active = Self::media_active(&snapshot);
-        let fullscreen = self.player.reconcile_fullscreen(ui.ctx(), media_active);
+        let player_active = Self::player_active(&snapshot);
+        let fullscreen = self.player.reconcile_fullscreen(ui.ctx(), player_active);
         if fullscreen {
             egui::CentralPanel::default()
                 .frame(Frame::NONE.fill(Color32::BLACK))
@@ -1038,66 +1058,20 @@ impl eframe::App for MoqCastApp {
         self.handle_shortcuts(ui.ctx());
         self.top_bar(ui, &snapshot);
         egui::CentralPanel::default()
-            .frame(Frame::NONE.fill(theme::CANVAS))
+            .frame(Frame::new().fill(COLORS.surface.into()))
             .show(ui, |ui| {
-                if self.page == Page::Nearby && media_active {
-                    let content_width = ui.available_width().min(MAX_CONTENT_WIDTH);
-                    let side_margin = ((ui.available_width() - content_width) / 2.0).max(0.0);
-                    let page_padding = if ui.available_width() < 760.0 {
-                        20.0
-                    } else {
-                        28.0
-                    };
-                    ui.horizontal(|ui| {
-                        ui.add_space(side_margin + page_padding);
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(
-                                (content_width - page_padding * 2.0).max(1.0),
-                                (ui.available_height() - page_padding * 2.0).max(1.0),
-                            ),
-                            Layout::top_down(Align::Min),
-                            |ui| {
-                                ui.add_space(page_padding);
-                                self.watch_player(ui, &snapshot);
-                            },
-                        );
-                    });
-                    return;
-                }
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let content_width = ui.available_width().min(MAX_CONTENT_WIDTH);
-                    let side_margin = ((ui.available_width() - content_width) / 2.0).max(0.0);
-                    let page_padding = if ui.available_width() < 760.0 {
-                        20.0
-                    } else {
-                        28.0
-                    };
-                    ui.horizontal(|ui| {
-                        ui.add_space(side_margin);
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(content_width, 0.0),
-                            Layout::top_down(Align::Min),
-                            |ui| {
-                                ui.add_space(page_padding);
-                                ui.horizontal(|ui| {
-                                    ui.add_space(page_padding);
-                                    ui.allocate_ui_with_layout(
-                                        egui::vec2(
-                                            (content_width - page_padding * 2.0).max(1.0),
-                                            0.0,
-                                        ),
-                                        Layout::top_down(Align::Min),
-                                        |ui| match self.page {
-                                            Page::Nearby => self.nearby(ui, &snapshot),
-                                            Page::ScreenShare => self.screen_share(ui, &snapshot),
-                                            Page::Settings => self.settings(ui),
-                                        },
-                                    );
-                                });
-                                ui.add_space(page_padding);
-                            },
-                        );
-                    });
+                page_shell(ui, self.page.content_width(), |ui| match self.page {
+                    Page::Watch => self.watch(ui, &snapshot),
+                    Page::Nearby | Page::ScreenShare | Page::Settings => {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| match self.page {
+                                Page::Nearby => self.nearby(ui, &snapshot),
+                                Page::ScreenShare => self.screen_share(ui, &snapshot),
+                                Page::Settings => self.settings(ui),
+                                Page::Watch => unreachable!("Watch does not use the page scroller"),
+                            });
+                    }
                 });
             });
         self.diagnostics.show_window(ui.ctx(), self.locale);
@@ -1125,6 +1099,21 @@ fn developer_mode_from_storage(value: Option<String>) -> bool {
     value.as_deref() == Some("true")
 }
 
+fn watch_projection(owner: Option<MediaOwner>, phase: MediaPhase) -> WatchProjection {
+    if owner != Some(MediaOwner::Watch) {
+        return WatchProjection::Empty;
+    }
+    match phase {
+        MediaPhase::PreparingWatch | MediaPhase::Watching | MediaPhase::Stopping => {
+            WatchProjection::Player
+        }
+        MediaPhase::Failed => WatchProjection::Failed,
+        MediaPhase::Idle | MediaPhase::PreparingShare | MediaPhase::Sharing => {
+            WatchProjection::Empty
+        }
+    }
+}
+
 fn global_summary(snapshot: &AppSnapshot, locale: Locale) -> String {
     if snapshot.runtime.phase() == RuntimePhase::Suspended {
         return text(locale, "已暂停", "Suspended").to_owned();
@@ -1149,20 +1138,10 @@ fn count_summary(snapshot: &AppSnapshot, locale: Locale) -> String {
         + snapshot.inbound_sessions;
     match locale {
         Locale::Chinese => format!("{} 台设备 · {} 个连接", snapshot.peers.len(), connected),
-        Locale::English => format!("{} devices · {} sessions", snapshot.peers.len(), connected),
-    }
-}
-
-fn local_count_summary(snapshot: &AppSnapshot, locale: Locale) -> String {
-    let summary = count_summary(snapshot, locale);
-    if snapshot.inbound_sessions == 0 {
-        return summary;
-    }
-    match locale {
-        Locale::Chinese => format!("{summary} · {} 个未归属传入连接", snapshot.inbound_sessions),
         Locale::English => format!(
-            "{summary} · {} unattributed incoming sessions",
-            snapshot.inbound_sessions
+            "{} devices · {} connections",
+            snapshot.peers.len(),
+            connected
         ),
     }
 }
@@ -1183,7 +1162,7 @@ fn local_status(snapshot: &AppSnapshot, locale: Locale) -> &'static str {
         }
         (_, SessionPhase::Listening) => text(locale, "可被发现", "Available on the local network"),
         (_, SessionPhase::Starting) => {
-            text(locale, "正在启动安全连接", "Starting secure connections")
+            text(locale, "正在准备设备连接", "Preparing device connections")
         }
         (_, SessionPhase::Failed | SessionPhase::Stopped) => {
             text(locale, "安全连接不可用", "Secure connections unavailable")
@@ -1200,23 +1179,23 @@ fn issue_notice(ui: &mut egui::Ui, issue: NearbyIssue, locale: Locale) {
         ),
         NearbyIssue::DirectConnectionsUnavailable => text(
             locale,
-            "无法接受安全直连。",
-            "Secure direct connections are unavailable.",
+            "无法连接附近设备。",
+            "Nearby device connections are unavailable.",
         ),
         NearbyIssue::DiscoveryStopped => text(
             locale,
-            "附近设备扫描已停止；现有连接状态保持独立。",
-            "Nearby scanning stopped; existing session state remains independent.",
+            "附近设备扫描已停止；现有连接仍可继续。",
+            "Nearby scanning stopped; existing connections can continue.",
         ),
         NearbyIssue::ListenerStopped => text(
             locale,
-            "无法接受新的安全连接；现有设备结果仍会保留。",
-            "New secure sessions cannot be accepted; existing device results remain visible.",
+            "无法接受新的设备连接；现有设备结果仍会保留。",
+            "New device connections cannot be accepted; existing results remain visible.",
         ),
         NearbyIssue::ServicesStopped => text(
             locale,
-            "附近设备服务已结束。可以重试恢复扫描与安全连接。",
-            "Nearby services ended. Try again to restore scanning and secure connections.",
+            "附近设备服务已结束。可以重试恢复扫描与连接。",
+            "Nearby services ended. Try again to restore scanning and connections.",
         ),
         NearbyIssue::DeviceRejected => text(
             locale,
@@ -1224,145 +1203,31 @@ fn issue_notice(ui: &mut egui::Ui, issue: NearbyIssue, locale: Locale) {
             "An incoming connection could not be verified.",
         ),
     };
-    Frame::NONE
-        .fill(theme::ERROR_SOFT)
-        .stroke(Stroke::new(1.0, Color32::from_rgb(0xec, 0xc6, 0xc4)))
-        .corner_radius(CornerRadius::same(6))
-        .inner_margin(Margin::symmetric(12, 9))
-        .show(ui, |ui| {
-            ui.label(RichText::new(message).small().color(theme::ERROR));
-        });
-}
-
-fn device_row(
-    ui: &mut egui::Ui,
-    peer: &PeerSnapshot,
-    selected: bool,
-    locale: Locale,
-) -> egui::Response {
-    let presentation = PeerPresentation::from(peer);
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), DEVICE_ROW_HEIGHT),
-        Sense::click(),
-    );
-    let painter = ui.painter_at(rect);
-    let fill = if selected {
-        theme::BRAND_SOFT
-    } else if response.hovered() {
-        Color32::from_rgb(0xf7, 0xf9, 0xf8)
-    } else {
-        theme::SURFACE
-    };
-    painter.rect_filled(rect, CornerRadius::same(7), fill);
-    if selected {
-        painter.rect_filled(
-            egui::Rect::from_min_max(rect.min, egui::pos2(rect.left() + 3.0, rect.bottom())),
-            CornerRadius::ZERO,
-            theme::BRAND,
-        );
-    }
-    if response.has_focus() {
-        painter.rect_stroke(
-            rect.shrink(2.0),
-            CornerRadius::same(6),
-            Stroke::new(2.0, theme::FOCUS),
-            egui::StrokeKind::Inside,
-        );
-    }
-
-    let name = device_name(peer, locale);
-    let line = peer_line(presentation, locale);
-    let badge_text = connection_badge(presentation.connection, locale);
-    let badge_font = FontId::new(11.0, FontFamily::Proportional);
-    let badge_galley = painter.layout_no_wrap(badge_text.to_owned(), badge_font, theme::TEXT);
-    let badge_size = egui::vec2(badge_galley.size().x + 16.0, 22.0);
-    let badge_rect = egui::Rect::from_center_size(
-        egui::pos2(rect.right() - 12.0 - badge_size.x / 2.0, rect.center().y),
-        badge_size,
-    );
-    let (badge_fill, badge_stroke, badge_color) =
-        tone_colors(connection_tone(presentation.connection));
-    painter.rect_filled(badge_rect, CornerRadius::same(8), badge_fill);
-    painter.rect_stroke(
-        badge_rect,
-        CornerRadius::same(8),
-        Stroke::new(1.0, badge_stroke),
-        egui::StrokeKind::Inside,
-    );
-    painter.galley(
-        egui::pos2(
-            badge_rect.center().x - badge_galley.size().x / 2.0,
-            badge_rect.center().y - badge_galley.size().y / 2.0,
+    state_panel(
+        ui,
+        StatePanelSpec::new(
+            StatePanelKind::Failed,
+            text(locale, "附近服务需要处理", "Nearby needs attention"),
+            message,
         ),
-        badge_galley,
-        badge_color,
+        |_| {},
     );
-
-    let text_left = rect.left() + 12.0;
-    let clip = egui::Rect::from_min_max(
-        rect.min,
-        egui::pos2((badge_rect.left() - 12.0).max(text_left), rect.bottom()),
-    );
-    let text_painter = painter.with_clip_rect(clip);
-    text_painter.text(
-        egui::pos2(text_left, rect.center().y - 9.0),
-        Align2::LEFT_CENTER,
-        name,
-        FontId::new(13.0, FontFamily::Proportional),
-        theme::TEXT,
-    );
-    text_painter.text(
-        egui::pos2(text_left, rect.center().y + 10.0),
-        Align2::LEFT_CENTER,
-        line,
-        FontId::new(12.0, FontFamily::Proportional),
-        theme::MUTED,
-    );
-    response
 }
 
-fn detail_row(ui: &mut egui::Ui, label: &str, value: &str, tone: Option<Tone>) {
-    ui.add_space(3.0);
-    ui.horizontal(|ui| {
-        ui.set_min_height(32.0);
-        ui.label(RichText::new(label).small().color(theme::MUTED));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| match tone {
-            Some(tone) => badge(ui, value, tone),
-            None => {
-                ui.label(RichText::new(value).small());
-            }
-        });
+fn detail_row(ui: &mut egui::Ui, label: &str, value: &str, tone: Option<BadgeTone>) {
+    setting_row(ui, SettingRowSpec::new(label), |ui| match tone {
+        Some(tone) => {
+            status_badge(ui, value, tone);
+        }
+        None => {
+            ui.label(typography(value, TypographyRole::Meta, COLORS.muted.into()));
+        }
     });
     ui.separator();
 }
 
-fn badge(ui: &mut egui::Ui, label: &str, tone: Tone) {
-    let (fill, stroke, color) = tone_colors(tone);
-    Frame::NONE
-        .fill(fill)
-        .stroke(Stroke::new(1.0, stroke))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::symmetric(8, 3))
-        .show(ui, |ui| {
-            ui.label(RichText::new(label).size(11.0).strong().color(color));
-        });
-}
-
-fn action_row(
-    ui: &mut egui::Ui,
-    min_height: f32,
-    label: &str,
-    hint: &str,
-    action: impl FnOnce(&mut egui::Ui),
-) {
-    ui.horizontal(|ui| {
-        ui.set_min_height(min_height);
-        ui.vertical(|ui| {
-            ui.label(RichText::new(label).strong());
-            ui.label(RichText::new(hint).small().color(theme::MUTED));
-        });
-        ui.with_layout(Layout::right_to_left(Align::Center), action);
-    });
+fn action_row(ui: &mut egui::Ui, label: &str, hint: &str, action: impl FnOnce(&mut egui::Ui)) {
+    setting_row(ui, SettingRowSpec::new(label).description(hint), action);
 }
 
 fn status_panel(
@@ -1372,21 +1237,12 @@ fn status_panel(
     tone: Tone,
     action: impl FnOnce(&mut egui::Ui),
 ) {
-    let (fill, stroke, color) = tone_colors(tone);
-    Frame::NONE
-        .fill(fill)
-        .stroke(Stroke::new(1.0, stroke))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::symmetric(14, 12))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(title).strong().color(color));
-                    ui.label(RichText::new(body).small().color(theme::MUTED));
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), action);
-            });
-        });
+    let kind = match tone {
+        Tone::Neutral | Tone::Success => StatePanelKind::Empty,
+        Tone::Warning => StatePanelKind::Pending,
+        Tone::Error => StatePanelKind::Failed,
+    };
+    state_panel(ui, StatePanelSpec::new(kind, title, body), action);
 }
 
 fn share_action_available(permission: CapturePermission, snapshot: &AppSnapshot) -> bool {
@@ -1486,59 +1342,29 @@ enum Tone {
     Error,
 }
 
-fn connection_tone(connection: ConnectionView) -> Tone {
+fn connection_tone(connection: ConnectionView) -> BadgeTone {
     match connection {
-        ConnectionView::Connected => Tone::Success,
-        ConnectionView::ConnectingSecurely => Tone::Warning,
-        ConnectionView::Rejected | ConnectionView::Failed => Tone::Error,
-        ConnectionView::Waiting | ConnectionView::Disconnected => Tone::Neutral,
+        ConnectionView::Connected => BadgeTone::Info,
+        ConnectionView::ConnectingSecurely => BadgeTone::Warning,
+        ConnectionView::Rejected | ConnectionView::Failed => BadgeTone::Danger,
+        ConnectionView::Waiting | ConnectionView::Disconnected => BadgeTone::Neutral,
     }
 }
 
-fn screen_tone(screen: ScreenAvailability) -> Tone {
+fn screen_tone(screen: ScreenAvailability) -> BadgeTone {
     match screen {
-        ScreenAvailability::Available => Tone::Success,
-        ScreenAvailability::Withdrawn => Tone::Warning,
-        ScreenAvailability::Unavailable => Tone::Neutral,
+        ScreenAvailability::Available => BadgeTone::Info,
+        ScreenAvailability::Withdrawn => BadgeTone::Warning,
+        ScreenAvailability::Unavailable => BadgeTone::Neutral,
     }
 }
 
-fn tone_colors(tone: Tone) -> (Color32, Color32, Color32) {
-    match tone {
-        Tone::Neutral => (
-            Color32::from_rgb(0xf5, 0xf6, 0xf6),
-            Color32::from_rgb(0xd0, 0xd6, 0xd3),
-            Color32::from_rgb(0x53, 0x60, 0x5b),
-        ),
-        Tone::Success => (
-            Color32::from_rgb(0xea, 0xf6, 0xf2),
-            Color32::from_rgb(0xa9, 0xd1, 0xc6),
-            theme::BRAND_PRESSED,
-        ),
-        Tone::Warning => (
-            theme::WARNING_SOFT,
-            Color32::from_rgb(0xe1, 0xc9, 0x90),
-            Color32::from_rgb(0x7a, 0x4c, 0x00),
-        ),
-        Tone::Error => (
-            theme::ERROR_SOFT,
-            Color32::from_rgb(0xe0, 0xb0, 0xad),
-            theme::ERROR,
-        ),
+fn navigation_height(width: f32) -> f32 {
+    if width < Size::SPLIT_BREAKPOINT {
+        Size::APP_BAR_COMPACT
+    } else {
+        Size::APP_BAR
     }
-}
-
-fn configure_fonts(context: &egui::Context) {
-    use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
-
-    context.add_font(FontInsert::new(
-        "Noto Sans SC",
-        egui::FontData::from_static(include_bytes!("../assets/fonts/NotoSansSC-Regular.otf")),
-        vec![InsertFontFamily {
-            family: egui::FontFamily::Proportional,
-            priority: FontPriority::Lowest,
-        }],
-    ));
 }
 
 #[cfg(test)]
