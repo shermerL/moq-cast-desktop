@@ -13,6 +13,7 @@ app = [
     "dep:block2",
     "dep:eframe",
     "dep:moqcast-diagnostics",
+    "dep:moqcast-ui",
     "dep:objc2-app-kit",
     "dep:rfd",
     "publish",
@@ -43,6 +44,7 @@ foundation = [
 anyhow = "1"
 eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wgpu"], optional = true }
 moqcast-diagnostics = { path = "../shared/diagnostics", optional = true }
+moqcast-ui = { path = "../shared/ui", optional = true }
 rfd = { version = "0.17.2", optional = true }
 thiserror = "2"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time"] }

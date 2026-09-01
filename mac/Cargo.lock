@@ -3331,6 +3331,7 @@ dependencies = [
  "moq-tokio",
  "moq-video",
  "moqcast-diagnostics",
+ "moqcast-ui",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-core-graphics",
@@ -3342,6 +3343,13 @@ dependencies = [
  "toml_edit",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "moqcast-ui"
+version = "0.1.0"
+dependencies = [
+ "egui",
 ]
 
 [[package]]

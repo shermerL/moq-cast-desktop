@@ -3319,6 +3319,7 @@ dependencies = [
  "moq-tokio",
  "moq-video",
  "moqcast-diagnostics",
+ "moqcast-ui",
  "pipewire",
  "rfd",
  "thiserror 2.0.20",
@@ -3530,6 +3531,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zip",
+]
+
+[[package]]
+name = "moqcast-ui"
+version = "0.1.0"
+dependencies = [
+ "egui",
 ]
 
 [[package]]
