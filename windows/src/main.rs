@@ -26,6 +26,9 @@ use moqcast_diagnostics::{BuildInfo, Config, Paths};
 use runtime::{RuntimeConfig, RuntimeOwner};
 use url::Url;
 
+const APP_ICON_SIZE: u32 = 64;
+const APP_ICON_RGBA: &[u8; 64 * 64 * 4] = include_bytes!("../assets/icons/moqcast-window-64.rgba");
+
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Args {
@@ -76,6 +79,7 @@ fn main() -> Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: eframe::egui::ViewportBuilder::default()
+            .with_icon(app_icon())
             .with_inner_size([1120.0, 760.0])
             .with_min_inner_size([680.0, 480.0]),
         ..Default::default()
@@ -104,4 +108,12 @@ fn main() -> Result<()> {
     };
     drop(diagnostics);
     result
+}
+
+fn app_icon() -> eframe::egui::IconData {
+    eframe::egui::IconData {
+        rgba: APP_ICON_RGBA.to_vec(),
+        width: APP_ICON_SIZE,
+        height: APP_ICON_SIZE,
+    }
 }

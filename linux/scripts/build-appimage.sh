@@ -74,11 +74,13 @@ cargo build --locked --release
 install -Dm755 target/release/moq-cast-desktop "$APPDIR/usr/bin/moq-cast-desktop"
 install -Dm755 packaging/appimage/AppRun "$APPDIR/AppRun"
 install -Dm644 packaging/appimage/dev.moq.moqcast.desktop.desktop "$APPDIR/dev.moq.moqcast.desktop.desktop"
-install -Dm644 packaging/appimage/moqcast.svg "$APPDIR/moqcast.svg"
+install -Dm644 assets/icons/hicolor/512x512/apps/moqcast.png "$APPDIR/moqcast.png"
 install -Dm644 packaging/appimage/dev.moq.moqcast.desktop.desktop \
     "$APPDIR/usr/share/applications/dev.moq.moqcast.desktop.desktop"
-install -Dm644 packaging/appimage/moqcast.svg \
-    "$APPDIR/usr/share/icons/hicolor/scalable/apps/moqcast.svg"
+for size in 16 24 32 48 64 128 256 512; do
+    install -Dm644 "assets/icons/hicolor/${size}x${size}/apps/moqcast.png" \
+        "$APPDIR/usr/share/icons/hicolor/${size}x${size}/apps/moqcast.png"
+done
 install -Dm644 assets/fonts/LICENSE-NOTO \
     "$APPDIR/usr/share/licenses/moqcast/Noto-Sans-CJK-OFL.txt"
 install -Dm644 vendor/moq-video/LICENSE-APACHE \
@@ -113,7 +115,7 @@ ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 LDAI_OUTPUT="$APPIMAGE" "$LINUXDEPLOY" \
     --appdir "$APPDIR" \
     --executable "$APPDIR/usr/bin/moq-cast-desktop" \
     --desktop-file "$APPDIR/dev.moq.moqcast.desktop.desktop" \
-    --icon-file "$APPDIR/moqcast.svg" \
+    --icon-file "$APPDIR/moqcast.png" \
     --output appimage
 
 chmod +x "$APPIMAGE"

@@ -45,6 +45,7 @@ sed \
     -e "s/__MARKETING_VERSION__/$marketing_version/g" \
     -e "s/__BUILD_VERSION__/$build_version/g" \
     "$mac_directory/packaging/Info.plist.in" > "$app_directory/Contents/Info.plist"
+cp "$mac_directory/assets/icons/MoQCast.icns" "$app_directory/Contents/Resources/MoQCast.icns"
 cp "$mac_directory/packaging/entitlements.plist" "$app_directory/Contents/Resources/entitlements.plist"
 
 cat > "$app_directory/Contents/Resources/build-info.txt" <<EOF

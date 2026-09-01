@@ -83,12 +83,18 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$plist")" = "MoQCast"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")" = "moqcast-macos"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "dev.moq.moqcast.macos"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$plist")" = "MoQCast.icns"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$plist")" = "APPL"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "$marketing_version"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")" = "${{ github.run_number }}"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist")" = "14.2"
           test "$(/usr/libexec/PlistBuddy -c 'Print :NSBonjourServices:0' "$plist")" = "_moq._udp"
           test -n "$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$plist")"
+          test -f "$app/Contents/Resources/MoQCast.icns"
+          iconutil -c iconset -o "$RUNNER_TEMP/moqcast-package/MoQCast.iconset" \
+            "$app/Contents/Resources/MoQCast.icns"
+          test -f "$RUNNER_TEMP/moqcast-package/MoQCast.iconset/icon_16x16.png"
+          test -f "$RUNNER_TEMP/moqcast-package/MoQCast.iconset/icon_512x512@2x.png"
           lipo "$binary" -verify_arch arm64 x86_64
           lipo -info "$binary"
           xcrun vtool -show-build -arch arm64 "$binary" | grep -Eq "minos +14\.2"
