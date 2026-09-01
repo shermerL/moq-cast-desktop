@@ -1324,7 +1324,7 @@ fn nearby_uses_stacked_layout(width: f32) -> bool {
 }
 
 fn nearby_list_width(available_width: f32) -> f32 {
-    available_width.min(NEARBY_LIST_MAX_WIDTH).max(1.0)
+    available_width.clamp(1.0, NEARBY_LIST_MAX_WIDTH)
 }
 
 fn navigation_height(width: f32) -> f32 {
