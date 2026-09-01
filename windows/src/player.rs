@@ -3,8 +3,11 @@
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Align, Color32, Event, Frame, Layout, Margin, Rect, RichText, Sense, Stroke,
-    TextureHandle, ViewportCommand,
+    self, Align, Color32, Event, Layout, Rect, Sense, TextureHandle, ViewportCommand,
+};
+use moqcast_ui::{
+    ButtonSpec, COLORS, ControlRole, IconButtonSpec, Size, TypographyRole, control_button,
+    player_icon_button, player_stage, player_toolbar, typography,
 };
 
 use crate::{
@@ -15,11 +18,10 @@ use crate::{
 const FALLBACK_SOURCE: egui::Vec2 = egui::vec2(16.0, 9.0);
 const CONTROLS_HIDE_AFTER: f64 = 2.8;
 /// Height reserved for the normal-window player toolbar.
-pub(crate) const TOOLBAR_HEIGHT: f32 = 52.0;
-const CONTROL_BUTTON_HEIGHT: f32 = 40.0;
+pub(crate) const TOOLBAR_HEIGHT: f32 = Size::PLAYER_TOOLBAR;
 const CONTROL_BUTTON_WIDTH: f32 = 108.0;
 const COMPACT_CONTROL_BUTTON_WIDTH: f32 = 92.0;
-const CONTROL_GAP: f32 = 8.0;
+const CONTROL_GAP: f32 = Size::PLAYER_TOOLBAR_ITEM_SPACING;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PlayerLayout {
@@ -49,7 +51,15 @@ fn player_layout(
     let surface = if fullscreen {
         available
     } else {
-        egui::vec2(available.x, (available.y - TOOLBAR_HEIGHT).max(1.0))
+        let available_stage_height = (available.y - TOOLBAR_HEIGHT).max(1.0);
+        let width = available
+            .x
+            .min(Size::WATCH_MAX)
+            .min(available_stage_height * Size::PLAYER_ASPECT[0] / Size::PLAYER_ASPECT[1]);
+        egui::vec2(
+            width,
+            width * Size::PLAYER_ASPECT[1] / Size::PLAYER_ASPECT[0],
+        )
     };
     let scale = (surface.x / source.x).min(surface.y / source.y);
     let image = source * scale;
@@ -228,156 +238,155 @@ impl LivePlayer {
 
         let mut action = None;
         ui.vertical_centered(|ui| {
-            let (surface, _) = ui.allocate_exact_size(layout.surface, Sense::hover());
-            ui.painter().rect_filled(surface, 0.0, Color32::BLACK);
-            if let Some(texture) = texture {
-                let image = Rect::from_center_size(surface.center(), layout.image);
-                ui.painter().image(
-                    texture.id(),
-                    image,
-                    Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+            let surface = if fullscreen {
+                let (surface, _) = ui.allocate_exact_size(layout.surface, Sense::hover());
+                ui.painter().rect_filled(surface, 0.0, COLORS.player);
+                surface
             } else {
+                player_stage(ui, |ui| ui.max_rect())
+            };
+            paint_surface(ui, surface, layout.image, texture);
+
+            if texture.is_none() {
                 ui.scope_builder(egui::UiBuilder::new().max_rect(surface), |ui| {
-                    ui.centered_and_justified(|ui| {
-                        ui.spinner();
-                    });
+                    ui.centered_and_justified(|ui| ui.spinner());
                 });
             }
 
             if controls_visible {
-                let controls = if fullscreen {
-                    Rect::from_min_max(
+                if fullscreen {
+                    let controls = Rect::from_min_max(
                         egui::pos2(
                             surface.left(),
                             (surface.bottom() - TOOLBAR_HEIGHT).max(surface.top()),
                         ),
                         surface.right_bottom(),
-                    )
+                    );
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
+                        player_toolbar(ui, |ui| {
+                            show_controls(ui, locale, view, texture.is_some(), true, &mut action);
+                        });
+                    });
                 } else {
-                    ui.allocate_exact_size(
-                        egui::vec2(surface.width(), TOOLBAR_HEIGHT),
-                        Sense::hover(),
-                    )
-                    .0
-                };
-                show_controls(
-                    ui,
-                    controls,
-                    locale,
-                    view,
-                    texture.is_some(),
-                    fullscreen,
-                    &mut action,
-                );
+                    player_toolbar(ui, |ui| {
+                        show_controls(ui, locale, view, texture.is_some(), false, &mut action);
+                    });
+                }
             }
         });
         action
     }
 }
 
+fn paint_surface(
+    ui: &mut egui::Ui,
+    surface: Rect,
+    image_size: egui::Vec2,
+    texture: Option<&TextureHandle>,
+) {
+    let Some(texture) = texture else {
+        return;
+    };
+    let image = Rect::from_center_size(surface.center(), image_size);
+    ui.painter().image(
+        texture.id(),
+        image,
+        Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+}
+
 fn show_controls(
     ui: &mut egui::Ui,
-    controls: Rect,
     locale: Locale,
     view: &ViewSnapshot,
     texture_ready: bool,
     fullscreen: bool,
     action: &mut Option<PlayerAction>,
 ) {
-    ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
-        Frame::new()
-            .fill(Color32::from_rgb(24, 28, 32))
-            .inner_margin(Margin::symmetric(10, 6))
-            .show(ui, |ui| {
-                ui.set_min_width((controls.width() - 20.0).max(1.0));
-                let presentation = presentation(view.phase, texture_ready);
-                let action_count = 1 + usize::from(presentation == PlayerPresentation::Live);
-                let row_layout = control_layout(ui.available_width(), action_count);
-                let (row, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), CONTROL_BUTTON_HEIGHT),
-                    Sense::hover(),
-                );
-                let info =
-                    Rect::from_min_size(row.min, egui::vec2(row_layout.info_width, row.height()));
-                let actions = Rect::from_min_size(
-                    egui::pos2(row.right() - row_layout.actions_width, row.top()),
-                    egui::vec2(row_layout.actions_width, row.height()),
-                );
+    let presentation = presentation(view.phase, texture_ready);
+    let action_count = 1 + usize::from(presentation == PlayerPresentation::Live);
+    let row_layout = control_layout(ui.available_width(), action_count);
+    let (row, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), Size::CONTROL),
+        Sense::hover(),
+    );
+    let info = Rect::from_min_size(row.min, egui::vec2(row_layout.info_width, row.height()));
+    let actions = Rect::from_min_size(
+        egui::pos2(row.right() - row_layout.actions_width, row.top()),
+        egui::vec2(row_layout.actions_width, row.height()),
+    );
 
-                ui.scope_builder(egui::UiBuilder::new().max_rect(info), |ui| {
-                    ui.horizontal(|ui| {
-                        if presentation == PlayerPresentation::Live {
-                            live_badge(ui);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(info), |ui| {
+        ui.horizontal(|ui| {
+            if presentation == PlayerPresentation::Live {
+                live_badge(ui);
+            } else {
+                ui.spinner();
+                ui.label(typography(
+                    presentation_label(locale, presentation),
+                    TypographyRole::Meta,
+                    COLORS.player_text.into(),
+                ));
+            }
+            let resolution = view
+                .width
+                .zip(view.height)
+                .map(|(width, height)| format!("{width} × {height}"))
+                .unwrap_or_else(|| waiting_for_first_frame(locale).to_owned());
+            let details = format!(
+                "{}  ·  {resolution}  ·  {}",
+                remote_screen(locale),
+                audio_status(locale, view.audio.phase)
+            );
+            let color = if view.audio.phase == ViewAudioPhase::Failed {
+                COLORS.danger
+            } else {
+                COLORS.player_muted
+            };
+            ui.add_sized(
+                ui.available_size(),
+                egui::Label::new(typography(details, TypographyRole::Meta, color.into()))
+                    .truncate(),
+            );
+        });
+    });
+    ui.scope_builder(egui::UiBuilder::new().max_rect(actions), |ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let enabled = view.phase != ViewPhase::Stopping;
+            if presentation == PlayerPresentation::Live
+                && player_icon_button(
+                    ui,
+                    IconButtonSpec::player(
+                        "⛶",
+                        if fullscreen {
+                            exit_fullscreen(locale)
                         } else {
-                            ui.spinner();
-                            ui.label(
-                                RichText::new(presentation_label(locale, presentation))
-                                    .size(12.0)
-                                    .color(Color32::WHITE),
-                            );
-                        }
-                        let resolution = view
-                            .width
-                            .zip(view.height)
-                            .map(|(width, height)| format!("{width} × {height}"))
-                            .unwrap_or_else(|| waiting_for_first_frame(locale).to_owned());
-                        let details = format!(
-                            "{}  ·  {resolution}  ·  {}",
-                            remote_screen(locale),
-                            audio_status(locale, view.audio.phase)
-                        );
-                        let color = if view.audio.phase == ViewAudioPhase::Failed {
-                            Color32::from_rgb(255, 174, 174)
-                        } else {
-                            Color32::from_gray(205)
-                        };
-                        ui.add_sized(
-                            ui.available_size(),
-                            egui::Label::new(RichText::new(details).size(11.0).color(color))
-                                .truncate(),
-                        );
-                    });
-                });
-                ui.scope_builder(egui::UiBuilder::new().max_rect(actions), |ui| {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let enabled = view.phase != ViewPhase::Stopping;
-                        if presentation == PlayerPresentation::Live
-                            && player_button(
-                                ui,
-                                if fullscreen {
-                                    exit_fullscreen(locale)
-                                } else {
-                                    enter_fullscreen(locale)
-                                },
-                                enabled,
-                                false,
-                                row_layout.button_width,
-                            )
-                            .clicked()
-                        {
-                            ui.ctx()
-                                .send_viewport_cmd(ViewportCommand::Fullscreen(!fullscreen));
-                        }
-                        if player_button(
-                            ui,
-                            stop_watching(locale),
-                            enabled,
-                            true,
-                            row_layout.button_width,
-                        )
-                        .clicked()
-                        {
-                            if fullscreen {
-                                ui.ctx()
-                                    .send_viewport_cmd(ViewportCommand::Fullscreen(false));
-                            }
-                            *action = Some(PlayerAction::Stop);
-                        }
-                    });
-                });
-            });
+                            enter_fullscreen(locale)
+                        },
+                    )
+                    .enabled(enabled),
+                )
+                .clicked()
+            {
+                ui.ctx()
+                    .send_viewport_cmd(ViewportCommand::Fullscreen(!fullscreen));
+            }
+            if control_button(
+                ui,
+                ButtonSpec::new(stop_watching(locale), ControlRole::PlayerIcon)
+                    .enabled(enabled)
+                    .min_width(row_layout.button_width),
+            )
+            .clicked()
+            {
+                if fullscreen {
+                    ui.ctx()
+                        .send_viewport_cmd(ViewportCommand::Fullscreen(false));
+                }
+                *action = Some(PlayerAction::Stop);
+            }
+        });
     });
 }
 
@@ -489,34 +498,11 @@ fn exit_fullscreen(locale: Locale) -> &'static str {
 }
 
 fn live_badge(ui: &mut egui::Ui) {
-    ui.label(
-        RichText::new("LIVE")
-            .size(11.0)
-            .strong()
-            .color(Color32::from_rgb(116, 225, 228)),
-    );
-}
-
-fn player_button(
-    ui: &mut egui::Ui,
-    label: &str,
-    enabled: bool,
-    danger: bool,
-    width: f32,
-) -> egui::Response {
-    let color = if danger {
-        Color32::from_rgb(255, 174, 174)
-    } else {
-        Color32::WHITE
-    };
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(RichText::new(label).size(12.0).strong().color(color))
-            .fill(Color32::from_black_alpha(120))
-            .stroke(Stroke::new(1.0, Color32::from_gray(105)))
-            .corner_radius(8.0)
-            .min_size(egui::vec2(width, CONTROL_BUTTON_HEIGHT)),
-    )
+    ui.label(typography(
+        "LIVE",
+        TypographyRole::Meta,
+        COLORS.brand.into(),
+    ));
 }
 
 #[cfg(test)]
@@ -535,16 +521,16 @@ mod tests {
             egui::vec2(1000.0, 752.0),
             false,
         );
-        assert_size(landscape.surface, egui::vec2(1000.0, 700.0));
-        assert_size(landscape.image, egui::vec2(1000.0, 562.5));
+        assert_size(landscape.surface, egui::vec2(960.0, 540.0));
+        assert_size(landscape.image, egui::vec2(960.0, 540.0));
 
         let portrait = player_layout(
             Some(egui::vec2(1080.0, 1920.0)),
             egui::vec2(1000.0, 752.0),
             false,
         );
-        assert_size(portrait.surface, egui::vec2(1000.0, 700.0));
-        assert_size(portrait.image, egui::vec2(393.75, 700.0));
+        assert_size(portrait.surface, egui::vec2(960.0, 540.0));
+        assert_size(portrait.image, egui::vec2(303.75, 540.0));
     }
 
     #[test]
@@ -603,8 +589,9 @@ mod tests {
             egui::vec2(1000.0, 752.0),
             false,
         );
-        assert_size(layout.surface, egui::vec2(1000.0, 700.0));
-        assert_size(layout.image, egui::vec2(1000.0, 562.5));
+        assert_size(layout.surface, egui::vec2(960.0, 540.0));
+        assert_size(layout.image, egui::vec2(960.0, 540.0));
+        assert!((layout.surface.x / layout.surface.y - 16.0 / 9.0).abs() < 0.001);
     }
 
     #[test]

@@ -23,6 +23,7 @@ use std::{net::SocketAddr, path::PathBuf};
 use anyhow::Result;
 use clap::Parser;
 use moqcast_diagnostics::{BuildInfo, Config, Paths};
+use moqcast_ui::Size;
 use runtime::{RuntimeConfig, RuntimeOwner};
 use url::Url;
 
@@ -81,7 +82,7 @@ fn main() -> Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_icon(app_icon())
             .with_inner_size([1120.0, 760.0])
-            .with_min_inner_size([680.0, 480.0]),
+            .with_min_inner_size(Size::MIN_VIEWPORT),
         ..Default::default()
     };
 
