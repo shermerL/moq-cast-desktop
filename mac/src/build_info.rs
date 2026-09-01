@@ -125,6 +125,14 @@ mod tests {
         assert!(PACKAGE_SCRIPT.contains(&format!("minimum_macos={MINIMUM_MACOS}")));
     }
 
+    #[test]
+    fn bundle_icon_is_wired_into_packaging_inputs() {
+        assert!(INFO_PLIST.contains("<key>CFBundleIconFile</key>"));
+        assert!(INFO_PLIST.contains("<string>MoQCast.icns</string>"));
+        assert!(PACKAGE_SCRIPT.contains("assets/icons/MoQCast.icns"));
+        assert!(PACKAGE_SCRIPT.contains("Contents/Resources/MoQCast.icns"));
+    }
+
     fn moq_dependencies(table: &Table) -> Vec<(&str, &str)> {
         let mut dependencies = table
             .iter()

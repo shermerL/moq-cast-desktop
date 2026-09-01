@@ -2,6 +2,9 @@ use eframe::egui;
 use moq_cast_desktop::app::MoqCastApp;
 use moqcast_diagnostics::{BuildInfo, Config, Paths};
 
+const APP_ICON_SIZE: u32 = 64;
+const APP_ICON_RGBA: &[u8; 64 * 64 * 4] = include_bytes!("../assets/icons/moqcast-window-64.rgba");
+
 fn main() -> anyhow::Result<()> {
     if std::env::args()
         .skip(1)
@@ -32,6 +35,7 @@ fn main() -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("dev.moq.moqcast.desktop")
+            .with_icon(app_icon())
             .with_inner_size([1180.0, 760.0])
             .with_min_inner_size([680.0, 520.0]),
         persist_window: true,
@@ -49,4 +53,12 @@ fn main() -> anyhow::Result<()> {
         }),
     )
     .map_err(anyhow::Error::from)
+}
+
+fn app_icon() -> egui::IconData {
+    egui::IconData {
+        rgba: APP_ICON_RGBA.to_vec(),
+        width: APP_ICON_SIZE,
+        height: APP_ICON_SIZE,
+    }
 }
