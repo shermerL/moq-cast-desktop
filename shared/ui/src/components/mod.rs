@@ -20,6 +20,8 @@ pub use layout::{
     PageWidth, app_bar_content_rect, page_content_rect, page_horizontal_inset, page_shell,
 };
 pub use navigation::{NavItemSpec, nav_item};
-pub use player::{player_stage, player_toolbar};
+pub use player::{
+    PlayerRects, player_rects, player_stage, player_stage_at, player_toolbar, player_toolbar_at,
+};
 pub use row::{DeviceRowSpec, SettingRowSpec, device_row, setting_row};
 pub use state_panel::{BadgeTone, StatePanelKind, StatePanelSpec, state_panel, status_badge};
