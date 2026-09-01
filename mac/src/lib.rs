@@ -19,16 +19,29 @@ mod runtime;
 /// Start the native MoQCast macOS application.
 #[cfg(feature = "app")]
 pub fn run() -> anyhow::Result<()> {
-    use eframe::egui;
+    use std::time::Duration;
 
-    let _ = tracing_subscriber::fmt()
-        .with_target(true)
-        .with_thread_names(true)
-        .try_init();
+    use eframe::egui;
+    use moqcast_diagnostics::{BuildInfo, Config, Paths};
+
+    let build = BuildInfo::new(env!("CARGO_PKG_VERSION"));
+    let diagnostics_config = match Paths::discover() {
+        Ok(paths) => Config::new(paths, build),
+        Err(error) => {
+            eprintln!("MoQCast diagnostics path unavailable: {error}");
+            Config::without_file(build, error.to_string())
+        }
+    }
+    .with_file_retention(Duration::from_secs(7 * 24 * 60 * 60))
+    .with_owner_only_file_permissions()
+    .with_minimal_export_metadata()
+    .with_private_location_redaction();
+    let diagnostics = moqcast_diagnostics::init(diagnostics_config);
+    let diagnostics_handle = diagnostics.handle();
     tracing::info!(
         stage = "startup",
         version = env!("CARGO_PKG_VERSION"),
-        "MoQCast macOS starting"
+        "local diagnostics initialized"
     );
 
     let options = eframe::NativeOptions {
@@ -39,10 +52,20 @@ pub fn run() -> anyhow::Result<()> {
         persist_window: true,
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "MoQCast",
         options,
-        Box::new(|context| Ok(Box::new(app::MoqCastApp::new(context)?))),
+        Box::new(move |context| {
+            Ok(Box::new(app::MoqCastApp::new(
+                context,
+                diagnostics_handle.clone(),
+            )?))
+        }),
     )
-    .map_err(anyhow::Error::from)
+    .map_err(anyhow::Error::from);
+    if let Err(error) = &result {
+        tracing::error!(stage = "application", %error, "native application exited with an error");
+    }
+    drop(diagnostics);
+    result
 }

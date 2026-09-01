@@ -5,6 +5,7 @@ use tracing::Level;
 
 const DETAILED_TARGETS: &[&str] = &[
     "moq_cast_desktop",
+    "moqcast_macos",
     "moqcast_windows",
     "moqcast_diagnostics",
     "moq_audio",
@@ -17,12 +18,14 @@ const WARN_CAPPED_TARGETS: &[&str] = &["moq_tokio", "mdns_sd"];
 #[derive(Clone)]
 pub(crate) struct FilterPolicy {
     detailed: Arc<AtomicBool>,
+    private_targets_only: bool,
 }
 
 impl FilterPolicy {
-    pub(crate) fn new(detailed: bool) -> Self {
+    pub(crate) fn new(detailed: bool, private_targets_only: bool) -> Self {
         Self {
             detailed: Arc::new(AtomicBool::new(detailed)),
+            private_targets_only,
         }
     }
 
@@ -37,6 +40,12 @@ impl FilterPolicy {
     }
 
     pub(crate) fn allows(&self, level: &Level, target: &str) -> bool {
+        if self.private_targets_only
+            && !matches_target(target, DETAILED_TARGETS)
+            && !matches_target(target, WARN_CAPPED_TARGETS)
+        {
+            return false;
+        }
         if matches_target(target, WARN_CAPPED_TARGETS) {
             return severity(level) <= severity(&Level::WARN);
         }
@@ -81,7 +90,7 @@ mod tests {
 
     #[test]
     fn detailed_toggle_only_raises_allowed_targets() {
-        let policy = FilterPolicy::new(false);
+        let policy = FilterPolicy::new(false, false);
         assert!(policy.allows(&Level::INFO, "moq_cast_desktop::runtime"));
         assert!(!policy.allows(&Level::DEBUG, "moq_cast_desktop::runtime"));
         assert!(!policy.allows(&Level::DEBUG, "unrelated_dependency"));
@@ -93,7 +102,7 @@ mod tests {
 
     #[test]
     fn windows_application_debug_requires_detailed_mode() {
-        let policy = FilterPolicy::new(false);
+        let policy = FilterPolicy::new(false, false);
         assert!(!policy.allows(&Level::DEBUG, "moqcast_windows::playback"));
 
         policy.set_detailed(true);
@@ -101,12 +110,30 @@ mod tests {
     }
 
     #[test]
+    fn macos_application_debug_requires_detailed_mode() {
+        let policy = FilterPolicy::new(false, false);
+        assert!(!policy.allows(&Level::DEBUG, "moqcast_macos::playback"));
+
+        policy.set_detailed(true);
+        assert!(policy.allows(&Level::DEBUG, "moqcast_macos::playback"));
+    }
+
+    #[test]
     fn sensitive_targets_remain_warn_capped() {
-        let policy = FilterPolicy::new(true);
+        let policy = FilterPolicy::new(true, false);
         for target in ["moq_tokio", "moq_tokio::connect", "mdns_sd::service"] {
             assert!(policy.allows(&Level::WARN, target));
             assert!(!policy.allows(&Level::INFO, target));
             assert!(!policy.allows(&Level::DEBUG, target));
         }
+    }
+
+    #[test]
+    fn private_target_policy_excludes_unknown_dependencies() {
+        let policy = FilterPolicy::new(true, true);
+        assert!(policy.allows(&Level::INFO, "moqcast_macos::runtime"));
+        assert!(policy.allows(&Level::DEBUG, "moq_video::decode"));
+        assert!(policy.allows(&Level::WARN, "moq_tokio::connect"));
+        assert!(!policy.allows(&Level::ERROR, "unknown_dependency"));
     }
 }

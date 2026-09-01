@@ -1,6 +1,7 @@
 //! Native macOS application shell for Nearby and direct-only sessions.
 
 mod capture_picker;
+mod diagnostics;
 mod player;
 mod system_lifecycle;
 mod theme;
@@ -24,6 +25,7 @@ use crate::runtime::{
 };
 
 const STORAGE_LOCALE: &str = "moqcast.macos.locale";
+const STORAGE_DEVELOPER_MODE: &str = "moqcast.macos.developer-mode";
 const MAX_CONTENT_WIDTH: f32 = 1040.0;
 const DETAIL_WIDTH: f32 = 360.0;
 const DEVICE_ROW_HEIGHT: f32 = 60.0;
@@ -69,6 +71,8 @@ impl Locale {
 pub(crate) struct MoqCastApp {
     page: Page,
     locale: Locale,
+    developer_mode: bool,
+    diagnostics: diagnostics::DiagnosticsUi,
     selected_peer: Option<String>,
     runtime: RuntimeOwner,
     system_lifecycle: Option<system_lifecycle::Observer>,
@@ -83,13 +87,21 @@ pub(crate) struct MoqCastApp {
 }
 
 impl MoqCastApp {
-    pub(crate) fn new(context: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
+    pub(crate) fn new(
+        context: &eframe::CreationContext<'_>,
+        diagnostics: moqcast_diagnostics::Handle,
+    ) -> anyhow::Result<Self> {
         configure_fonts(&context.egui_ctx);
         theme::apply(&context.egui_ctx);
         let locale = Locale::from_storage(
             context
                 .storage
                 .and_then(|storage| storage.get_string(STORAGE_LOCALE)),
+        );
+        let developer_mode = developer_mode_from_storage(
+            context
+                .storage
+                .and_then(|storage| storage.get_string(STORAGE_DEVELOPER_MODE)),
         );
         let repaint = context.egui_ctx.clone();
         let runtime = RuntimeOwner::start(move || repaint.request_repaint())?;
@@ -102,6 +114,8 @@ impl MoqCastApp {
         Ok(Self {
             page: Page::Nearby,
             locale,
+            developer_mode,
+            diagnostics: diagnostics::DiagnosticsUi::new(diagnostics, developer_mode),
             selected_peer: None,
             runtime,
             system_lifecycle,
@@ -299,7 +313,7 @@ impl MoqCastApp {
         let labels = [
             self.text("附近设备", "Nearby"),
             self.text("屏幕共享", "Screen Share"),
-            self.text("设置与诊断", "Settings & Diagnostics"),
+            self.text("设置", "Settings"),
         ];
         let pages = [Page::Nearby, Page::ScreenShare, Page::Settings];
         let width = if equal_width {
@@ -922,11 +936,18 @@ impl MoqCastApp {
     fn settings(&mut self, ui: &mut egui::Ui) {
         self.page_header(
             ui,
-            self.text("设置与诊断", "Settings & Diagnostics"),
-            self.text(
-                "仅显示用户偏好与公开产品信息。",
-                "Only user preferences and public product information are shown.",
-            ),
+            self.text("设置", "Settings"),
+            if self.developer_mode {
+                self.text(
+                    "开发者诊断已启用，本地日志工具仅保留在这台 Mac 上。",
+                    "Developer diagnostics are enabled; local log tools stay on this Mac.",
+                )
+            } else {
+                self.text(
+                    "仅显示用户偏好与公开产品信息。",
+                    "Only user preferences and public product information are shown.",
+                )
+            },
         );
         ui.separator();
         ui.add_space(12.0);
@@ -964,6 +985,40 @@ impl MoqCastApp {
                 ui.label(RichText::new(format!("MoQCast {}", env!("CARGO_PKG_VERSION"))).strong());
             },
         );
+        ui.separator();
+        ui.add_space(16.0);
+        ui.label(
+            RichText::new(self.text("高级", "Advanced"))
+                .small()
+                .strong()
+                .color(theme::MUTED),
+        );
+        ui.add_space(8.0);
+        let was_developer_mode = self.developer_mode;
+        action_row(
+            ui,
+            58.0,
+            self.text("开发者模式", "Developer mode"),
+            self.text(
+                "开启后显示本地日志与导出工具。",
+                "Shows local logs and export tools when enabled.",
+            ),
+            |ui| {
+                ui.checkbox(&mut self.developer_mode, "");
+            },
+        );
+        if was_developer_mode != self.developer_mode {
+            self.diagnostics.set_detailed(self.developer_mode);
+            if !self.developer_mode {
+                self.diagnostics.hide_window();
+            }
+        }
+        if self.developer_mode {
+            ui.separator();
+            ui.add_space(16.0);
+            self.diagnostics.show_settings(ui, self.locale);
+        }
+        ui.separator();
     }
 }
 
@@ -1045,10 +1100,12 @@ impl eframe::App for MoqCastApp {
                     });
                 });
             });
+        self.diagnostics.show_window(ui.ctx(), self.locale);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(STORAGE_LOCALE, self.locale.stored().to_owned());
+        storage.set_string(STORAGE_DEVELOPER_MODE, self.developer_mode.to_string());
     }
 
     fn on_exit(&mut self) {
@@ -1062,6 +1119,10 @@ fn text(locale: Locale, chinese: &'static str, english: &'static str) -> &'stati
         Locale::Chinese => chinese,
         Locale::English => english,
     }
+}
+
+fn developer_mode_from_storage(value: Option<String>) -> bool {
+    value.as_deref() == Some("true")
 }
 
 fn global_summary(snapshot: &AppSnapshot, locale: Locale) -> String {

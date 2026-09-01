@@ -16,6 +16,14 @@ fn stored_locale_defaults_to_chinese_and_accepts_english() {
 }
 
 #[test]
+fn developer_mode_defaults_off_and_requires_an_explicit_true_value() {
+    assert!(!developer_mode_from_storage(None));
+    assert!(!developer_mode_from_storage(Some("false".to_owned())));
+    assert!(!developer_mode_from_storage(Some("invalid".to_owned())));
+    assert!(developer_mode_from_storage(Some("true".to_owned())));
+}
+
+#[test]
 fn layout_breakpoints_match_the_frozen_preview() {
     assert_eq!(ContentLayout::for_width(919.0), ContentLayout::SingleColumn);
     assert_eq!(ContentLayout::for_width(920.0), ContentLayout::ListDetail);

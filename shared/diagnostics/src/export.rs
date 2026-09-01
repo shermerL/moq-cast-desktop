@@ -1,4 +1,4 @@
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -80,6 +80,8 @@ pub(crate) fn recommended_name(now: OffsetDateTime) -> String {
 pub(crate) fn export(
     log_dir: &Path,
     build: &BuildInfo,
+    minimal_export_metadata: bool,
+    owner_only_file_permissions: bool,
     active_filter: &str,
     dropped: u64,
     request: ExportRequest,
@@ -90,7 +92,7 @@ pub(crate) fn export(
     if destination_overlaps_logs(log_dir, &destination, &logs) {
         return Err(ExportError::DestinationOverlapsLog);
     }
-    let file = File::create(&destination)?;
+    let file = create_archive(&destination, owner_only_file_permissions)?;
     let mut archive = ZipWriter::new(file);
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Stored)
@@ -105,13 +107,32 @@ pub(crate) fn export(
         io::copy(&mut source, &mut archive)?;
     }
     archive.start_file("environment.txt", options)?;
-    archive.write_all(environment(build, active_filter, dropped, now).as_bytes())?;
+    archive.write_all(
+        environment(build, minimal_export_metadata, active_filter, dropped, now).as_bytes(),
+    )?;
     archive.finish()?;
 
     Ok(ExportResult {
         path: destination,
         log_files: logs.len(),
     })
+}
+
+fn create_archive(path: &Path, owner_only: bool) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    if owner_only {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    if owner_only {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
 }
 
 fn destination_overlaps_logs(log_dir: &Path, destination: &Path, logs: &[PathBuf]) -> bool {
@@ -164,6 +185,7 @@ fn collect_logs(log_dir: &Path) -> io::Result<Vec<PathBuf>> {
 
 fn environment(
     build: &BuildInfo,
+    minimal_export_metadata: bool,
     active_filter: &str,
     dropped: u64,
     now: OffsetDateTime,
@@ -177,17 +199,23 @@ fn environment(
         now.minute(),
         now.second()
     );
-    format!(
-        "app_version={}\nbuild_identity={}\nsource_identity={}\ndependency_identity={}\nos={}\nutc_time={}\nactive_filter={}\ndropped_diagnostics={}\n",
+    let mut environment = format!(
+        "app_version={}\nos={}\nutc_time={}\nactive_filter={}\ndropped_diagnostics={}\n",
         one_line(&build.app_version),
-        one_line(&build.build_identity),
-        one_line(&build.source_identity),
-        one_line(&build.dependency_identity),
         one_line(&build.os),
         timestamp,
         one_line(active_filter),
         dropped
-    )
+    );
+    if !minimal_export_metadata {
+        environment.push_str(&format!(
+            "build_identity={}\nsource_identity={}\ndependency_identity={}\n",
+            one_line(&build.build_identity),
+            one_line(&build.source_identity),
+            one_line(&build.dependency_identity),
+        ));
+    }
+    environment
 }
 
 fn one_line(value: &str) -> String {
@@ -204,7 +232,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn export_contains_logs_and_minimal_environment() {
+    fn default_export_preserves_existing_build_provenance() {
         let directory = tempdir().unwrap();
         fs::write(directory.path().join(ACTIVE_LOG_NAME), "中文日志\n").unwrap();
         fs::write(directory.path().join("moqcast.log.1"), "older\n").unwrap();
@@ -218,6 +246,8 @@ mod tests {
         let result = export(
             directory.path(),
             &build,
+            false,
+            false,
             "base=info; detailed=off",
             3,
             ExportRequest::new(&destination),
@@ -248,6 +278,58 @@ mod tests {
     }
 
     #[test]
+    fn minimal_export_omits_private_build_provenance_and_build_info_files() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join(ACTIVE_LOG_NAME), "safe log\n").unwrap();
+        fs::write(
+            directory.path().join("build-info.txt"),
+            "private build data\n",
+        )
+        .unwrap();
+        let destination = directory.path().join("minimal.zip");
+        let build = BuildInfo::new("0.4.1-dev.2")
+            .with_build_identity("macos-universal2")
+            .with_source_identity("abcdef123456")
+            .with_dependency_identity("moq-dev/moq@private-revision")
+            .with_os("macos-aarch64");
+
+        export(
+            directory.path(),
+            &build,
+            true,
+            true,
+            "base=info; detailed=on",
+            2,
+            ExportRequest::new(&destination),
+        )
+        .unwrap();
+
+        let mut archive = ZipArchive::new(File::open(destination).unwrap()).unwrap();
+        assert!(archive.by_name(ACTIVE_LOG_NAME).is_ok());
+        assert!(archive.by_name("build-info.txt").is_err());
+        let mut environment = String::new();
+        archive
+            .by_name("environment.txt")
+            .unwrap()
+            .read_to_string(&mut environment)
+            .unwrap();
+        assert!(environment.contains("app_version=0.4.1-dev.2"));
+        assert!(environment.contains("os=macos-aarch64"));
+        assert!(environment.contains("utc_time="));
+        assert!(environment.contains("active_filter=base=info; detailed=on"));
+        assert!(environment.contains("dropped_diagnostics=2"));
+        for forbidden in [
+            "build_identity",
+            "source_identity",
+            "dependency_identity",
+            "abcdef123456",
+            "private-revision",
+        ] {
+            assert!(!environment.contains(forbidden));
+        }
+    }
+
+    #[test]
     fn export_name_uses_utc_timestamp_shape() {
         let now = OffsetDateTime::from_unix_timestamp(1_787_616_000).unwrap();
         let name = recommended_name(now);
@@ -269,6 +351,8 @@ mod tests {
             let error = export(
                 directory.path(),
                 &build,
+                false,
+                false,
                 "base=info; detailed=off",
                 0,
                 ExportRequest::new(destination),
@@ -279,5 +363,33 @@ mod tests {
 
         assert_eq!(fs::read_to_string(active).unwrap(), "current\n");
         assert_eq!(fs::read_to_string(rotated).unwrap(), "older\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_only_export_sets_outer_archive_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join(ACTIVE_LOG_NAME), "private log\n").unwrap();
+        let destination = directory.path().join("private.zip");
+        fs::write(&destination, "existing").unwrap();
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o644)).unwrap();
+
+        export(
+            directory.path(),
+            &BuildInfo::new("test"),
+            true,
+            true,
+            "base=info; detailed=off",
+            0,
+            ExportRequest::new(&destination),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::metadata(destination).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

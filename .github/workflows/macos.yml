@@ -5,10 +5,12 @@ on:
     branches: [main, dev]
     paths:
       - "mac/**"
+      - "shared/diagnostics/**"
       - ".github/workflows/macos.yml"
   pull_request:
     paths:
       - "mac/**"
+      - "shared/diagnostics/**"
       - ".github/workflows/macos.yml"
   workflow_dispatch:
 
@@ -40,9 +42,15 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: macos-cargo-${{ runner.arch }}-rust1.95.0-${{ hashFiles('mac/Cargo.lock') }}
+          key: macos-cargo-${{ runner.arch }}-rust1.95.0-${{ hashFiles('mac/Cargo.lock', 'shared/diagnostics/Cargo.lock') }}
           restore-keys: |
             macos-cargo-${{ runner.arch }}-rust1.95.0-
+      - name: Verify shared diagnostics
+        working-directory: shared/diagnostics
+        run: |
+          cargo fmt --all --check
+          cargo test --locked --all-targets
+          cargo clippy --locked --all-targets -- -D warnings
       - name: Check formatting
         run: cargo fmt --all --check
       # Real mDNS and LAN smoke tests require a local network and remain a Mac/device acceptance gate.
