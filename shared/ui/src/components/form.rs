@@ -5,7 +5,9 @@ use egui::{
 
 use crate::{COLORS, ControlRole, Interaction, Radius, Size, resolve_control_visual};
 
-use super::common::{color, interaction, paint_focus, resolve, sense, text_galley};
+use super::common::{
+    color, effective_enabled, interaction, paint_focus, pointing_hand, sense, text_galley,
+};
 
 /// Display-only configuration for a switch.
 #[derive(Clone, Copy, Debug)]
@@ -129,39 +131,25 @@ impl<'a> SelectSpec<'a> {
 
 /// Renders a compact switch with a forty-point hit target.
 pub fn switch(ui: &mut Ui, value: &mut bool, spec: SwitchSpec<'_>) -> Response {
-    let (rect, mut response) =
-        ui.allocate_exact_size(vec2(Size::SWITCH[0], Size::CONTROL), sense(spec.enabled));
-    let state = interaction(&response, spec.enabled, *value, spec.preview);
-    if response.clicked() && spec.enabled {
+    let enabled = effective_enabled(spec.enabled, spec.preview);
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(Size::SWITCH[0], Size::CONTROL), sense(enabled));
+    let mut response = pointing_hand(response, enabled);
+    let state = interaction(&response, enabled, *value, spec.preview);
+    if response.clicked() && enabled {
         *value = !*value;
         response.mark_changed();
     }
-    let visual_state = if *value && matches!(state, Interaction::Rest) {
-        Interaction::Selected
-    } else {
-        state
-    };
-    let visual = resolve_control_visual(ControlRole::Secondary, visual_state);
+    let opacity = if enabled { 1.0 } else { Size::DISABLED_ALPHA };
     let track_rect =
         egui::Rect::from_center_size(rect.center(), vec2(Size::SWITCH[0], Size::SWITCH[1]));
-    let fill = if *value {
-        match state {
-            Interaction::Hovered => COLORS.brand_hover,
-            Interaction::Pressed => COLORS.brand_pressed,
-            _ => COLORS.brand,
-        }
-    } else {
-        visual.fill
-    };
-    ui.painter().rect_filled(
-        track_rect,
-        CornerRadius::same(13),
-        color(fill, visual.opacity),
-    );
+    let (fill, border) = switch_track_visual(*value, state);
+    ui.painter()
+        .rect_filled(track_rect, CornerRadius::same(13), color(fill, opacity));
     ui.painter().rect_stroke(
         track_rect,
         CornerRadius::same(13),
-        Stroke::new(Size::BORDER, color(visual.border, visual.opacity)),
+        Stroke::new(Size::BORDER, color(border, opacity)),
         StrokeKind::Inside,
     );
     let thumb_x = if *value {
@@ -172,45 +160,46 @@ pub fn switch(ui: &mut Ui, value: &mut bool, spec: SwitchSpec<'_>) -> Response {
     ui.painter().circle_filled(
         pos2(thumb_x, track_rect.center().y),
         8.0,
-        color(COLORS.surface, visual.opacity),
+        color(COLORS.surface, opacity),
+    );
+    ui.painter().circle_stroke(
+        pos2(thumb_x, track_rect.center().y),
+        8.0,
+        Stroke::new(Size::BORDER, color(COLORS.border_strong, opacity)),
     );
     paint_focus(ui, track_rect, &response, state, 13.0);
-    response.widget_info(|| {
-        WidgetInfo::selected(WidgetType::Checkbox, spec.enabled, *value, spec.label)
-    });
+    response
+        .widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, enabled, *value, spec.label));
     response
 }
 
 /// Renders a compact checkbox with a forty-point hit target.
 pub fn checkbox(ui: &mut Ui, value: &mut bool, spec: CheckboxSpec<'_>) -> Response {
-    let (rect, mut response) =
-        ui.allocate_exact_size(vec2(Size::CONTROL, Size::CONTROL), sense(spec.enabled));
-    let (state, visual) = resolve(
-        &response,
-        ControlRole::Secondary,
-        spec.enabled,
-        *value,
-        spec.preview,
-    );
-    if response.clicked() && spec.enabled {
+    let enabled = effective_enabled(spec.enabled, spec.preview);
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(Size::CONTROL, Size::CONTROL), sense(enabled));
+    let mut response = pointing_hand(response, enabled);
+    let state = interaction(&response, enabled, *value, spec.preview);
+    if response.clicked() && enabled {
         *value = !*value;
         response.mark_changed();
     }
+    let opacity = if enabled { 1.0 } else { Size::DISABLED_ALPHA };
     let box_rect = egui::Rect::from_center_size(rect.center(), vec2(20.0, 20.0));
-    let fill = if *value { COLORS.brand } else { visual.fill };
+    let (fill, border) = checkbox_visual(*value, state);
     ui.painter().rect_filled(
         box_rect,
         CornerRadius::same(Radius::SM as u8),
-        color(fill, visual.opacity),
+        color(fill, opacity),
     );
     ui.painter().rect_stroke(
         box_rect,
         CornerRadius::same(Radius::SM as u8),
-        Stroke::new(Size::BORDER, color(visual.border, visual.opacity)),
+        Stroke::new(Size::BORDER, color(border, opacity)),
         StrokeKind::Inside,
     );
     if *value {
-        let glyph_color = color(COLORS.surface, visual.opacity);
+        let glyph_color = color(COLORS.surface, opacity);
         let glyph = text_galley(ui, "✓", crate::TypographyRole::Button, glyph_color);
         ui.painter().galley(
             pos2(
@@ -222,9 +211,8 @@ pub fn checkbox(ui: &mut Ui, value: &mut bool, spec: CheckboxSpec<'_>) -> Respon
         );
     }
     paint_focus(ui, box_rect, &response, state, Radius::SM);
-    response.widget_info(|| {
-        WidgetInfo::selected(WidgetType::Checkbox, spec.enabled, *value, spec.label)
-    });
+    response
+        .widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, enabled, *value, spec.label));
     response
 }
 
@@ -237,21 +225,27 @@ pub fn select(
     let Some(current) = spec.options.get(*selected).copied() else {
         return Err(SelectError::InvalidSelection);
     };
+    let enabled = effective_enabled(spec.enabled, spec.preview);
     let forced = spec.preview.unwrap_or(Interaction::Rest);
     let visual = resolve_control_visual(ControlRole::Secondary, forced);
     let response = ui
         .scope(|ui| {
-            ui.visuals_mut().widgets.inactive.bg_fill = visual.fill.into();
-            ui.visuals_mut().widgets.inactive.fg_stroke.color = visual.text.into();
-            ui.visuals_mut().widgets.hovered.bg_fill =
-                resolve_control_visual(ControlRole::Secondary, Interaction::Hovered)
-                    .fill
-                    .into();
-            ui.visuals_mut().widgets.active.bg_fill =
-                resolve_control_visual(ControlRole::Secondary, Interaction::Pressed)
-                    .fill
-                    .into();
-            ui.add_enabled_ui(spec.enabled, |ui| {
+            let hovered = resolve_control_visual(ControlRole::Secondary, Interaction::Hovered);
+            let pressed = resolve_control_visual(ControlRole::Secondary, Interaction::Pressed);
+            let open = resolve_control_visual(ControlRole::Secondary, Interaction::Selected);
+            ui.visuals_mut().widgets.inactive.bg_fill = color(visual.fill, visual.opacity);
+            ui.visuals_mut().widgets.inactive.bg_stroke =
+                Stroke::new(visual.border_width, color(visual.border, visual.opacity));
+            ui.visuals_mut().widgets.inactive.fg_stroke.color = color(visual.text, visual.opacity);
+            ui.visuals_mut().widgets.hovered.bg_fill = hovered.fill.into();
+            ui.visuals_mut().widgets.hovered.bg_stroke =
+                Stroke::new(hovered.border_width, hovered.border);
+            ui.visuals_mut().widgets.active.bg_fill = pressed.fill.into();
+            ui.visuals_mut().widgets.active.bg_stroke =
+                Stroke::new(pressed.border_width, pressed.border);
+            ui.visuals_mut().widgets.open.bg_fill = open.fill.into();
+            ui.visuals_mut().widgets.open.bg_stroke = Stroke::new(open.border_width, open.border);
+            ui.add_enabled_ui(enabled, |ui| {
                 ComboBox::from_id_salt(spec.id)
                     .selected_text(current)
                     .show_ui(ui, |ui| {
@@ -264,13 +258,54 @@ pub fn select(
             .inner
         })
         .inner;
+    let response = pointing_hand(response, enabled);
+    let state = interaction(&response, enabled, false, spec.preview);
+    paint_focus(ui, response.rect, &response, state, Radius::MD);
     response.widget_info(|| WidgetInfo {
-        enabled: spec.enabled,
+        enabled,
         label: Some(spec.label.to_owned()),
         current_text_value: Some(current.to_owned()),
         ..WidgetInfo::new(WidgetType::ComboBox)
     });
     Ok(response)
+}
+
+fn switch_track_visual(value: bool, state: Interaction) -> (crate::Color, crate::Color) {
+    if state == Interaction::Disabled {
+        return if value {
+            (COLORS.brand, COLORS.brand)
+        } else {
+            (COLORS.surface_muted, COLORS.border)
+        };
+    }
+    if value {
+        return match state {
+            Interaction::Hovered => (COLORS.brand_hover, COLORS.brand_pressed),
+            Interaction::Pressed => (COLORS.brand_pressed, COLORS.text),
+            _ => (COLORS.brand, COLORS.brand_pressed),
+        };
+    }
+    match state {
+        Interaction::Hovered => (COLORS.border, COLORS.brand),
+        Interaction::Pressed => (COLORS.border_strong, COLORS.brand_pressed),
+        _ => (COLORS.secondary_pressed, COLORS.border_strong),
+    }
+}
+
+fn checkbox_visual(value: bool, state: Interaction) -> (crate::Color, crate::Color) {
+    if value {
+        return match state {
+            Interaction::Hovered => (COLORS.brand_hover, COLORS.brand_pressed),
+            Interaction::Pressed => (COLORS.brand_pressed, COLORS.text),
+            _ => (COLORS.brand, COLORS.brand_pressed),
+        };
+    }
+    match state {
+        Interaction::Hovered => (COLORS.brand_soft, COLORS.brand),
+        Interaction::Pressed => (COLORS.secondary_pressed, COLORS.brand_pressed),
+        Interaction::Disabled => (COLORS.surface_muted, COLORS.border),
+        _ => (COLORS.surface, COLORS.border_strong),
+    }
 }
 
 #[cfg(test)]
@@ -291,5 +326,23 @@ mod tests {
                 SelectError::InvalidSelection
             );
         });
+    }
+
+    #[test]
+    fn enabled_off_controls_remain_distinct_from_hovered_and_disabled() {
+        let off = switch_track_visual(false, Interaction::Rest);
+        let hovered = switch_track_visual(false, Interaction::Hovered);
+        let pressed = switch_track_visual(false, Interaction::Pressed);
+        let disabled = switch_track_visual(false, Interaction::Disabled);
+        assert_ne!(off, hovered);
+        assert_ne!(hovered, pressed);
+        assert_ne!(off, disabled);
+        assert_eq!(off.1, COLORS.border_strong);
+
+        let checked = checkbox_visual(true, Interaction::Rest);
+        let checked_hovered = checkbox_visual(true, Interaction::Hovered);
+        let unchecked = checkbox_visual(false, Interaction::Rest);
+        assert_ne!(checked, checked_hovered);
+        assert_ne!(checked, unchecked);
     }
 }

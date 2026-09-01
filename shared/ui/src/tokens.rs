@@ -71,6 +71,8 @@ pub struct Colors {
     pub info: Color,
     /// Informational background.
     pub info_soft: Color,
+    /// Active live-media status.
+    pub live: Color,
     /// Keyboard focus ring.
     pub focus: Color,
     /// Video-stage background.
@@ -106,6 +108,7 @@ pub const COLORS: Colors = Colors {
     warning_soft: Color::rgb(0xFF, 0xF4, 0xD6),
     info: Color::rgb(0x17, 0x4F, 0x7A),
     info_soft: Color::rgb(0xED, 0xF5, 0xFC),
+    live: Color::rgb(0xD9, 0x2D, 0x20),
     focus: Color::rgb(0x00, 0x67, 0xC0),
     player: Color::rgb(0x05, 0x06, 0x07),
     player_bar: Color::rgb(0x17, 0x19, 0x1C),
@@ -175,8 +178,12 @@ impl Size {
     pub const SETTING_ROW: f32 = 68.0;
     /// Device row minimum height.
     pub const DEVICE_ROW: f32 = 72.0;
-    /// General page maximum width.
-    pub const PAGE_MAX: f32 = 1180.0;
+    /// Wide page maximum width for workspaces and dense lists.
+    pub const PAGE_WIDE_MAX: f32 = 1120.0;
+    /// Medium page maximum width for focused tasks and media.
+    pub const PAGE_MEDIUM_MAX: f32 = 880.0;
+    /// Narrow page maximum width for settings and forms.
+    pub const PAGE_NARROW_MAX: f32 = 720.0;
     /// Wide-window horizontal page padding.
     pub const PAGE_HORIZONTAL_WIDE: f32 = 40.0;
     /// Narrow-window horizontal page padding.
@@ -188,17 +195,21 @@ impl Size {
     /// Bottom page padding.
     pub const PAGE_BOTTOM: f32 = 48.0;
     /// Page-header minimum height.
-    pub const PAGE_HEADER_MIN: f32 = 74.0;
+    pub const PAGE_HEADER_MIN: f32 = 64.0;
+    /// Gap between a page title and its supporting copy.
+    pub const PAGE_TITLE_SPACING: f32 = 8.0;
     /// Gap below the page header.
-    pub const PAGE_HEADER_SPACING: f32 = 32.0;
-    /// Settings page maximum width.
-    pub const SETTINGS_MAX: f32 = 860.0;
-    /// Gap between settings groups.
-    pub const SETTINGS_GROUP_SPACING: f32 = 32.0;
+    pub const PAGE_HEADER_SPACING: f32 = 40.0;
+    /// Gap between major page sections.
+    pub const MAJOR_SECTION_SPACING: f32 = 40.0;
+    /// Gap between a section heading and its content.
+    pub const SECTION_CONTENT_SPACING: f32 = 16.0;
+    /// Horizontal inset for row content.
+    pub const ROW_HORIZONTAL_INSET: f32 = 16.0;
+    /// Maximum width reserved for a settings row's trailing control.
+    pub const SETTING_CONTROL_MAX: f32 = 300.0;
     /// Width below which a settings row stacks its trailing control.
-    pub const SETTINGS_BREAKPOINT: f32 = 720.0;
-    /// Watch page maximum width.
-    pub const WATCH_MAX: f32 = 960.0;
+    pub const SETTINGS_BREAKPOINT: f32 = 640.0;
     /// Gap between the player stage and toolbar.
     pub const PLAYER_SPACING: f32 = 0.0;
     /// Horizontal player-toolbar item and action gap.
@@ -206,7 +217,7 @@ impl Size {
     /// Player stage width and height ratio.
     pub const PLAYER_ASPECT: [f32; 2] = [16.0, 9.0];
     /// State-panel minimum height.
-    pub const STATE_PANEL_MIN: f32 = 240.0;
+    pub const STATE_PANEL_MIN: f32 = 160.0;
     /// Dialog maximum width.
     pub const DIALOG_MAX: f32 = 440.0;
     /// Dialog inner padding.
@@ -237,6 +248,10 @@ impl Size {
     pub const FOCUS_OUTSET: f32 = 2.0;
     /// Selected navigation underline height.
     pub const NAV_UNDERLINE: f32 = 3.0;
+    /// Navigation item horizontal content padding.
+    pub const NAV_HORIZONTAL_PADDING: f32 = 16.0;
+    /// Navigation item corner radius.
+    pub const NAV_RADIUS: f32 = 6.0;
     /// Disabled content alpha.
     pub const DISABLED_ALPHA: f32 = 0.55;
 }

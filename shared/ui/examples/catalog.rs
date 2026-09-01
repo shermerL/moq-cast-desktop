@@ -217,7 +217,7 @@ fn fixture_toolbar(catalog: &mut Catalog, ui: &mut Ui) {
 
 fn catalog_content(catalog: &mut Catalog, ui: &mut Ui) {
     let platform = PlatformFixture::ALL[catalog.platform];
-    let width = ui.available_width().min(Size::PAGE_MAX);
+    let width = ui.available_width().min(Size::PAGE_WIDE_MAX);
     ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
         page_header(
             ui,
@@ -229,7 +229,7 @@ fn catalog_content(catalog: &mut Catalog, ui: &mut Ui) {
         controls_catalog(catalog, ui);
         ui.add_space(Spacing::XXL);
         rows_catalog(catalog, ui);
-        ui.add_space(Size::SETTINGS_GROUP_SPACING);
+        ui.add_space(Size::MAJOR_SECTION_SPACING);
         player_catalog(catalog, ui);
         ui.add_space(Spacing::XXL);
         state_catalog(catalog, ui);

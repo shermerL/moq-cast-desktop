@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
 use moqcast_ui::{
-    COLORS, CheckboxSpec, ControlRole, IconButtonSpec, Interaction, Radius, Size, Spacing,
-    SwitchSpec, TypographyRole, install_ui_font, resolve_control_visual, typography,
-    typography_spec,
+    COLORS, CheckboxSpec, ControlRole, IconButtonSpec, Interaction, PageWidth, Radius, Size,
+    Spacing, SwitchSpec, TypographyRole, install_ui_font, page_content_rect,
+    resolve_control_visual, typography, typography_spec,
 };
 use sha2::{Digest, Sha256};
 
@@ -33,6 +33,7 @@ fn tokens_match_the_frozen_contract() {
         (COLORS.warning_soft, "#FFF4D6"),
         (COLORS.info, "#174F7A"),
         (COLORS.info_soft, "#EDF5FC"),
+        (COLORS.live, "#D92D20"),
         (COLORS.focus, "#0067C0"),
         (COLORS.player, "#050607"),
         (COLORS.player_bar, "#17191C"),
@@ -59,10 +60,19 @@ fn tokens_match_the_frozen_contract() {
     assert_eq!(Size::PAGE_TOP_WIDE, 32.0);
     assert_eq!(Size::PAGE_TOP_NARROW, 24.0);
     assert_eq!(Size::PAGE_BOTTOM, 48.0);
-    assert_eq!(Size::PAGE_HEADER_MIN, 74.0);
-    assert_eq!(Size::PAGE_HEADER_SPACING, 32.0);
-    assert_eq!(Size::SETTINGS_GROUP_SPACING, 32.0);
-    assert_eq!(Size::SETTINGS_BREAKPOINT, 720.0);
+    assert_eq!(Size::PAGE_HEADER_MIN, 64.0);
+    assert_eq!(Size::PAGE_TITLE_SPACING, 8.0);
+    assert_eq!(Size::PAGE_HEADER_SPACING, 40.0);
+    assert_eq!(Size::MAJOR_SECTION_SPACING, 40.0);
+    assert_eq!(Size::SECTION_CONTENT_SPACING, 16.0);
+    assert_eq!(Size::ROW_HORIZONTAL_INSET, 16.0);
+    assert_eq!(Size::SETTING_ROW, 68.0);
+    assert_eq!(Size::DEVICE_ROW, 72.0);
+    assert_eq!(Size::SETTING_CONTROL_MAX, 300.0);
+    assert_eq!(Size::SETTINGS_BREAKPOINT, 640.0);
+    assert_eq!(Size::PAGE_WIDE_MAX, 1120.0);
+    assert_eq!(Size::PAGE_MEDIUM_MAX, 880.0);
+    assert_eq!(Size::PAGE_NARROW_MAX, 720.0);
     assert_eq!(Size::PLAYER_SPACING, 0.0);
     assert_eq!(Size::PLAYER_TOOLBAR_ITEM_SPACING, 8.0);
     assert_eq!(Size::PLAYER_ASPECT, [16.0, 9.0]);
@@ -78,6 +88,31 @@ fn tokens_match_the_frozen_contract() {
     assert_eq!(Size::FOCUS, 2.0);
     assert_eq!(Size::FOCUS_OUTSET, 2.0);
     assert_eq!(Size::NAV_UNDERLINE, 3.0);
+    assert_eq!(Size::NAV_HORIZONTAL_PADDING, 16.0);
+    assert_eq!(Size::NAV_RADIUS, 6.0);
+}
+
+#[test]
+fn centered_page_roles_keep_stable_widths_without_minimum_viewport_overflow() {
+    let review = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1120.0, 792.0));
+    let expected = [
+        (PageWidth::Wide, 1040.0),
+        (PageWidth::Medium, 880.0),
+        (PageWidth::Narrow, 720.0),
+    ];
+    for (role, width) in expected {
+        let rect = page_content_rect(review, role);
+        assert_eq!(rect.width(), width);
+        assert_eq!(rect.center().x, review.center().x);
+    }
+
+    let minimum = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(680.0, 640.0));
+    for role in [PageWidth::Wide, PageWidth::Medium, PageWidth::Narrow] {
+        let rect = page_content_rect(minimum, role);
+        assert_eq!(rect.width(), 632.0);
+        assert_eq!(rect.left(), 24.0);
+        assert_eq!(minimum.right() - rect.right(), 24.0);
+    }
 }
 
 #[test]
@@ -114,6 +149,46 @@ fn interaction_resolution_keeps_selected_distinct_from_primary() {
     assert_eq!(disabled.opacity, 0.55);
     assert_eq!(focused.focus.unwrap().width, 2.0);
     assert_eq!(focused.focus_outset, 2.0);
+}
+
+#[test]
+fn navigation_has_rest_hover_pressed_focus_and_selected_contracts() {
+    let rest = resolve_control_visual(ControlRole::Nav, Interaction::Rest);
+    let hovered = resolve_control_visual(ControlRole::Nav, Interaction::Hovered);
+    let pressed = resolve_control_visual(ControlRole::Nav, Interaction::Pressed);
+    let focused = resolve_control_visual(ControlRole::Nav, Interaction::Focused);
+    let selected = resolve_control_visual(ControlRole::Nav, Interaction::Selected);
+
+    assert_eq!(rest.fill, COLORS.chrome);
+    assert_eq!(hovered.fill, COLORS.brand_soft);
+    assert_eq!(hovered.border, COLORS.brand);
+    assert_eq!(pressed.fill, COLORS.secondary_pressed);
+    assert_eq!(pressed.border, COLORS.brand_pressed);
+    assert!(focused.focus.is_some());
+    assert_eq!(selected.fill, COLORS.brand_soft);
+    assert_eq!(selected.text, COLORS.brand);
+    assert_eq!(selected.underline, Size::NAV_UNDERLINE);
+}
+
+#[test]
+fn enabled_button_roles_change_both_fill_and_border_across_pointer_states() {
+    for role in [
+        ControlRole::Primary,
+        ControlRole::Secondary,
+        ControlRole::Icon,
+    ] {
+        let rest = resolve_control_visual(role, Interaction::Rest);
+        let hovered = resolve_control_visual(role, Interaction::Hovered);
+        let pressed = resolve_control_visual(role, Interaction::Pressed);
+        assert_ne!(hovered.fill, rest.fill);
+        assert_ne!(hovered.border, rest.border);
+        assert_ne!(pressed.fill, hovered.fill);
+    }
+    let danger_rest = resolve_control_visual(ControlRole::Danger, Interaction::Rest);
+    let danger_hovered = resolve_control_visual(ControlRole::Danger, Interaction::Hovered);
+    let danger_pressed = resolve_control_visual(ControlRole::Danger, Interaction::Pressed);
+    assert_ne!(danger_hovered.fill, danger_rest.fill);
+    assert_ne!(danger_pressed.fill, danger_hovered.fill);
 }
 
 #[test]

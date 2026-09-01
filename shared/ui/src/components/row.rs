@@ -83,16 +83,57 @@ pub fn setting_row<R>(
     trailing: impl FnOnce(&mut Ui) -> R,
 ) -> R {
     let stacked = ui.available_width() < Size::SETTINGS_BREAKPOINT;
-    let layout = if stacked {
-        Layout::top_down(Align::Min)
+    let height = if stacked {
+        Size::SETTING_ROW + Spacing::SM + Size::CONTROL
     } else {
-        Layout::left_to_right(Align::Center)
+        Size::SETTING_ROW
     };
-    ui.allocate_ui_with_layout(
-        vec2(ui.available_width(), Size::SETTING_ROW),
-        layout,
+    let rect = ui.allocate_space(vec2(ui.available_width(), height)).1;
+    let inner = rect.shrink2(vec2(Size::ROW_HORIZONTAL_INSET, 0.0));
+    let label_height = Size::SETTING_ROW;
+
+    if stacked {
+        let label_rect = egui::Rect::from_min_size(inner.min, vec2(inner.width(), label_height));
+        paint_setting_label(ui, label_rect, spec);
+        let trailing_rect = egui::Rect::from_min_size(
+            egui::pos2(inner.left(), label_rect.bottom() + Spacing::SM),
+            vec2(inner.width(), Size::CONTROL),
+        );
+        ui.scope_builder(
+            UiBuilder::new()
+                .max_rect(trailing_rect)
+                .layout(Layout::left_to_right(Align::Center)),
+            trailing,
+        )
+        .inner
+    } else {
+        let trailing_width = Size::SETTING_CONTROL_MAX.min(inner.width() / 2.0);
+        let label_width = (inner.width() - trailing_width - Spacing::LG).max(1.0);
+        let label_rect = egui::Rect::from_min_size(inner.min, vec2(label_width, label_height));
+        let trailing_rect = egui::Rect::from_min_size(
+            egui::pos2(inner.right() - trailing_width, inner.top()),
+            vec2(trailing_width, label_height),
+        );
+        paint_setting_label(ui, label_rect, spec);
+        ui.scope_builder(
+            UiBuilder::new()
+                .max_rect(trailing_rect)
+                .layout(Layout::right_to_left(Align::Center)),
+            trailing,
+        )
+        .inner
+    }
+}
+
+fn paint_setting_label(ui: &mut Ui, rect: egui::Rect, spec: SettingRowSpec<'_>) {
+    ui.scope_builder(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
         |ui| {
             ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = Spacing::XS;
+                ui.set_max_width(rect.width());
                 ui.label(typography(
                     spec.title,
                     TypographyRole::Row,
@@ -106,22 +147,8 @@ pub fn setting_row<R>(
                     ));
                 }
             });
-            if stacked {
-                ui.add_space(Spacing::SM);
-                trailing(ui)
-            } else {
-                let rect = ui.available_rect_before_wrap();
-                ui.scope_builder(
-                    UiBuilder::new()
-                        .max_rect(rect)
-                        .layout(Layout::right_to_left(Align::Center)),
-                    trailing,
-                )
-                .inner
-            }
         },
-    )
-    .inner
+    );
 }
 
 /// Renders a selectable device row with a caller-owned trailing control.
@@ -145,7 +172,7 @@ pub fn device_row<R>(
     let inner = ui
         .scope_builder(
             UiBuilder::new()
-                .max_rect(rect.shrink(Spacing::MD))
+                .max_rect(rect.shrink2(vec2(Size::ROW_HORIZONTAL_INSET, Spacing::MD)))
                 .layout(Layout::left_to_right(Align::Center)),
             |ui| {
                 ui.vertical(|ui| {
@@ -183,4 +210,28 @@ pub fn device_row<R>(
         )
     });
     (response, inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_controls_stay_inside_wide_and_stacked_rows() {
+        for width in [720.0, 620.0] {
+            egui::__run_test_ui(|ui| {
+                ui.set_width(width);
+                let row_bounds = ui.available_rect_before_wrap();
+                let response = setting_row(ui, SettingRowSpec::new("Language"), |ui| {
+                    ui.allocate_exact_size(
+                        vec2(Size::SETTING_CONTROL_MAX, Size::CONTROL),
+                        egui::Sense::hover(),
+                    )
+                    .1
+                });
+                assert!(response.rect.left() >= row_bounds.left());
+                assert!(response.rect.right() <= row_bounds.left() + width);
+            });
+        }
+    }
 }

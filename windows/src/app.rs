@@ -3,11 +3,11 @@
 use eframe::egui::{self, Align, Color32, Frame, Layout};
 use moqcast_ui::{
     BadgeTone, ButtonSpec, COLORS, ControlRole, DeviceRowSpec, DialogClosePolicy, DialogSpec,
-    NavItemSpec, SelectSpec, SettingRowSpec, Size, Spacing, StatePanelKind, StatePanelSpec,
-    SwitchSpec, Theme, TypographyRole, control_button, danger_button, device_row, dialog,
-    install_ui_font, nav_item, page_header, player_stage, player_toolbar, primary_button,
-    secondary_button, section_header, select, setting_row, state_panel, status_badge, switch,
-    typography,
+    NavItemSpec, PageWidth, SelectSpec, SettingRowSpec, Size, Spacing, StatePanelKind,
+    StatePanelSpec, SwitchSpec, Theme, TypographyRole, app_bar_content_rect, control_button,
+    danger_button, device_row, dialog, install_ui_font, major_section_break, nav_item, page_header,
+    page_shell, primary_button, secondary_button, section_header, select, setting_row, state_panel,
+    status_badge, switch, typography,
 };
 
 use crate::{
@@ -42,25 +42,6 @@ fn parse_stored_locale(value: Option<String>) -> Locale {
     }
 }
 
-fn content_rect(available: egui::Rect) -> egui::Rect {
-    let narrow = available.width() < Size::SPLIT_BREAKPOINT;
-    let horizontal = if narrow {
-        Size::PAGE_HORIZONTAL_NARROW
-    } else {
-        Size::PAGE_HORIZONTAL_WIDE
-    };
-    let top = if narrow {
-        Size::PAGE_TOP_NARROW
-    } else {
-        Size::PAGE_TOP_WIDE
-    };
-    let width = (available.width() - horizontal * 2.0).clamp(1.0, Size::PAGE_MAX);
-    egui::Rect::from_min_size(
-        egui::pos2(available.center().x - width / 2.0, available.top() + top),
-        egui::vec2(width, (available.height() - top).max(1.0)),
-    )
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Page {
     #[default]
@@ -70,11 +51,28 @@ pub(crate) enum Page {
     Settings,
 }
 
+impl Page {
+    fn content_width(self) -> PageWidth {
+        match self {
+            Self::Nearby => PageWidth::Wide,
+            Self::ScreenShare | Self::Watch => PageWidth::Medium,
+            Self::Settings => PageWidth::Narrow,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum SettingsPane {
     #[default]
     Preferences,
     Diagnostics,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WatchProjection {
+    Empty,
+    Failed,
+    Player,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -199,43 +197,58 @@ impl MoqCastApp {
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
-        if navigation_height(ui.available_width()) == COMPACT_NAVIGATION_HEIGHT {
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label(typography(
-                        "MoQCast Desktop",
-                        TypographyRole::Row,
-                        COLORS.text.into(),
-                    ));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        status_badge(
-                            ui,
-                            &discovery_summary(self.locale, &self.snapshot),
-                            discovery_badge_tone(self.snapshot.discovery),
-                        );
-                    });
-                });
-                ui.add_space(Spacing::XS);
-                self.navigation_buttons(ui);
-            });
-        } else {
-            ui.horizontal(|ui| {
-                ui.label(typography(
-                    "MoQCast Desktop",
-                    TypographyRole::Row,
-                    COLORS.text.into(),
-                ));
-                ui.add_space(Spacing::XL);
-                self.navigation_buttons(ui);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    status_badge(
-                        ui,
-                        &discovery_summary(self.locale, &self.snapshot),
-                        discovery_badge_tone(self.snapshot.discovery),
+        let compact =
+            navigation_height(ui.ctx().content_rect().width()) == COMPACT_NAVIGATION_HEIGHT;
+        let content = app_bar_content_rect(ui.max_rect()).shrink2(egui::vec2(0.0, Spacing::SM));
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(content)
+                .layout(Layout::top_down(Align::Min)),
+            |ui| {
+                if compact {
+                    let top_height = (content.height() - Spacing::XS - Size::NAV).max(1.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(content.width(), top_height),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            self.app_bar_brand(ui);
+                            self.app_bar_status(ui);
+                        },
                     );
-                });
-            });
-        }
+                    ui.add_space(Spacing::XS);
+                    self.navigation_buttons(ui);
+                } else {
+                    ui.allocate_ui_with_layout(
+                        content.size(),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            self.app_bar_brand(ui);
+                            ui.add_space(Spacing::XL);
+                            self.navigation_buttons(ui);
+                            self.app_bar_status(ui);
+                        },
+                    );
+                }
+            },
+        );
+    }
+
+    fn app_bar_brand(&self, ui: &mut egui::Ui) {
+        ui.label(typography(
+            "MoQCast Desktop",
+            TypographyRole::Row,
+            COLORS.text.into(),
+        ));
+    }
+
+    fn app_bar_status(&self, ui: &mut egui::Ui) {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(typography(
+                discovery_summary(self.locale, &self.snapshot),
+                TypographyRole::Meta,
+                COLORS.muted.into(),
+            ));
+        });
     }
 
     fn navigation_buttons(&mut self, ui: &mut egui::Ui) {
@@ -609,7 +622,6 @@ impl MoqCastApp {
             },
             None,
         );
-        ui.separator();
         setting_value_row(
             ui,
             match self.locale {
@@ -640,8 +652,7 @@ impl MoqCastApp {
             },
             share_audio_status(self.locale, self.snapshot.media.audio.phase),
         );
-        ui.separator();
-        ui.add_space(Spacing::XL);
+        major_section_break(ui);
 
         let status = match (self.locale, self.snapshot.media.phase) {
             (Locale::Chinese, MediaPhase::Idle) => "准备共享",
@@ -778,90 +789,67 @@ impl MoqCastApp {
                 }
             }),
         );
-        let active = matches!(
-            self.snapshot.view.phase,
-            ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping
-        );
-        let stage = watch_player_size(ui.available_size());
-        if active {
-            ui.allocate_ui_with_layout(stage, Layout::top_down(Align::Center), |ui| {
-                if matches!(
-                    self.player.show(
-                        ui,
-                        self.locale,
-                        &self.snapshot.view,
-                        self.playback_texture.as_ref(),
-                    ),
-                    Some(PlayerAction::Stop)
-                ) {
-                    self.send(RuntimeCommand::StopWatching);
-                }
-            });
-            return;
-        }
-
-        ui.allocate_ui_with_layout(stage, Layout::top_down(Align::Center), |ui| {
-            player_stage(ui, |ui| {
-                ui.centered_and_justified(|ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.label(typography(
-                            match (self.locale, self.snapshot.view.phase) {
-                                (Locale::Chinese, ViewPhase::Failed) => "无法播放",
-                                (Locale::English, ViewPhase::Failed) => "Playback unavailable",
-                                (Locale::Chinese, _) => "选择一个可观看屏幕",
-                                (Locale::English, _) => "Choose a screen to watch",
-                            },
-                            TypographyRole::Section,
-                            COLORS.player_text.into(),
-                        ));
-                        ui.add_space(Spacing::SM);
-                        ui.label(typography(
-                            match (self.locale, self.snapshot.view.phase) {
-                                (Locale::Chinese, ViewPhase::Failed) => {
-                                    "媒体已停止，附近设备仍保持连接。"
-                                }
-                                (Locale::English, ViewPhase::Failed) => {
-                                    "Media stopped, but the nearby device stays connected."
-                                }
-                                (Locale::Chinese, _) => "前往附近设备，选择正在共享屏幕的设备。",
-                                (Locale::English, _) => {
-                                    "Open Nearby and select a device that is sharing a screen."
-                                }
-                            },
-                            TypographyRole::Help,
-                            COLORS.player_muted.into(),
-                        ));
-                        ui.add_space(Spacing::LG);
-                        if control_button(
+        match watch_projection(self.snapshot.view.phase) {
+            WatchProjection::Player => {
+                let stage = watch_player_size(ui.available_size());
+                ui.allocate_ui_with_layout(stage, Layout::top_down(Align::Center), |ui| {
+                    if matches!(
+                        self.player.show(
                             ui,
-                            ButtonSpec::new(
-                                match self.locale {
-                                    Locale::Chinese => "打开附近设备",
-                                    Locale::English => "Open Nearby",
-                                },
-                                ControlRole::Primary,
-                            ),
+                            self.locale,
+                            &self.snapshot.view,
+                            self.playback_texture.as_ref(),
+                        ),
+                        Some(PlayerAction::Stop)
+                    ) {
+                        self.send(RuntimeCommand::StopWatching);
+                    }
+                });
+            }
+            projection => {
+                let failed = projection == WatchProjection::Failed;
+                state_panel(
+                    ui,
+                    StatePanelSpec::new(
+                        if failed {
+                            StatePanelKind::Failed
+                        } else {
+                            StatePanelKind::Empty
+                        },
+                        match (self.locale, failed) {
+                            (Locale::Chinese, true) => "无法播放",
+                            (Locale::English, true) => "Playback unavailable",
+                            (Locale::Chinese, false) => "选择一个可观看屏幕",
+                            (Locale::English, false) => "Choose a screen to watch",
+                        },
+                        match (self.locale, failed) {
+                            (Locale::Chinese, true) => "媒体已停止，附近设备仍保持连接。",
+                            (Locale::English, true) => {
+                                "Media stopped, but the nearby device stays connected."
+                            }
+                            (Locale::Chinese, false) => "前往附近设备，选择正在共享屏幕的设备。",
+                            (Locale::English, false) => {
+                                "Open Nearby and select a device that is sharing a screen."
+                            }
+                        },
+                    ),
+                    |ui| {
+                        if primary_button(
+                            ui,
+                            match self.locale {
+                                Locale::Chinese => "打开附近设备",
+                                Locale::English => "Open Nearby",
+                            },
+                            true,
                         )
                         .clicked()
                         {
                             self.page = Page::Nearby;
                         }
-                    });
-                });
-            });
-            player_toolbar(ui, |ui| {
-                ui.label(typography(
-                    match (self.locale, self.snapshot.view.phase) {
-                        (Locale::Chinese, ViewPhase::Failed) => "播放不可用",
-                        (Locale::English, ViewPhase::Failed) => "Playback unavailable",
-                        (Locale::Chinese, _) => "等待选择屏幕",
-                        (Locale::English, _) => "Waiting for a screen",
                     },
-                    TypographyRole::Meta,
-                    COLORS.player_muted.into(),
-                ));
-            });
-        });
+                );
+            }
+        }
     }
 
     fn update_playback_texture(&mut self, context: &egui::Context) {
@@ -958,7 +946,6 @@ impl MoqCastApp {
     }
 
     fn settings(&mut self, ui: &mut egui::Ui) {
-        ui.set_max_width(Size::SETTINGS_MAX.min(ui.available_width()));
         page_header(
             ui,
             self.locale.settings(),
@@ -1003,7 +990,7 @@ impl MoqCastApp {
                 }
             });
             ui.separator();
-            ui.add_space(Spacing::LG);
+            ui.add_space(Size::SECTION_CONTENT_SPACING);
         } else {
             self.settings_pane = SettingsPane::Preferences;
         }
@@ -1063,8 +1050,7 @@ impl MoqCastApp {
             "",
             self.snapshot.version,
         );
-        ui.separator();
-        ui.add_space(Spacing::XL);
+        major_section_break(ui);
 
         section_header(
             ui,
@@ -1152,8 +1138,7 @@ impl MoqCastApp {
                 COLORS.warning.into(),
             ));
         }
-        ui.separator();
-        ui.add_space(Spacing::XL);
+        major_section_break(ui);
 
         section_header(
             ui,
@@ -1225,30 +1210,9 @@ impl MoqCastApp {
             self.settings_pane = SettingsPane::Preferences;
             self.diagnostics.hide_window();
         }
-        ui.separator();
     }
 
     fn diagnostics_settings(&mut self, ui: &mut egui::Ui) {
-        section_header(
-            ui,
-            match self.locale {
-                Locale::Chinese => "构建信息",
-                Locale::English => "Build information",
-            },
-            None,
-        );
-        egui::Grid::new("connection-info")
-            .num_columns(2)
-            .spacing([18.0, 8.0])
-            .show(ui, |ui| {
-                for (label, value) in developer_build_information(&self.snapshot) {
-                    ui.label(label);
-                    ui.monospace(value);
-                    ui.end_row();
-                }
-            });
-        ui.separator();
-        ui.add_space(Spacing::XL);
         self.diagnostics.show_settings(ui, self.locale);
     }
 }
@@ -1312,15 +1276,12 @@ impl eframe::App for MoqCastApp {
             .frame(Frame::new().fill(COLORS.chrome.into()))
             .exact_size(navigation_height(context.content_rect().width()))
             .show(ui, |ui| {
-                ui.add_space(Spacing::SM);
                 self.top_bar(ui);
             });
         egui::CentralPanel::default()
             .frame(Frame::new().fill(COLORS.surface.into()))
             .show(ui, |ui| {
-                let content = content_rect(ui.available_rect_before_wrap());
-                ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
-                    ui.set_width(content.width());
+                page_shell(ui, self.page.content_width(), |ui| {
                     if let Some(error) = &self.command_error {
                         ui.label(typography(
                             error,
@@ -1334,7 +1295,9 @@ impl eframe::App for MoqCastApp {
                         Page::ScreenShare => self.screen_share(ui),
                         Page::Watch => self.watch(ui),
                         Page::Settings => {
-                            egui::ScrollArea::vertical().show(ui, |ui| self.settings(ui));
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| self.settings(ui));
                         }
                     }
                 });
@@ -1474,13 +1437,6 @@ fn peer_status(locale: Locale, peer: &PeerView) -> &'static str {
     }
 }
 
-fn developer_build_information(snapshot: &RuntimeSnapshot) -> [(&'static str, &'static str); 2] {
-    [
-        ("Version", snapshot.version),
-        ("MoQ baseline", crate::build_info::moq_baseline()),
-    ]
-}
-
 fn discovery_summary(locale: Locale, snapshot: &RuntimeSnapshot) -> String {
     match (locale, snapshot.discovery) {
         (Locale::Chinese, DiscoveryState::Ready) => {
@@ -1499,15 +1455,6 @@ fn discovery_summary(locale: Locale, snapshot: &RuntimeSnapshot) -> String {
         (Locale::English, DiscoveryState::Failed) => "Nearby unavailable".to_owned(),
         (Locale::Chinese, DiscoveryState::Stopped) => "附近设备已关闭".to_owned(),
         (Locale::English, DiscoveryState::Stopped) => "Nearby is off".to_owned(),
-    }
-}
-
-fn discovery_badge_tone(discovery: DiscoveryState) -> BadgeTone {
-    match discovery {
-        DiscoveryState::Starting | DiscoveryState::Ready => BadgeTone::Info,
-        DiscoveryState::Stopping => BadgeTone::Warning,
-        DiscoveryState::Failed => BadgeTone::Danger,
-        DiscoveryState::Empty | DiscoveryState::Stopped => BadgeTone::Neutral,
     }
 }
 
@@ -1532,13 +1479,21 @@ fn share_audio_status(locale: Locale, phase: AudioPhase) -> &'static str {
 
 fn watch_player_size(available: egui::Vec2) -> egui::Vec2 {
     let available = egui::vec2(available.x.max(1.0), available.y.max(1.0));
-    let width = available.x.min(960.0);
+    let width = available.x.min(Size::PAGE_MEDIUM_MAX);
     let stage_height = width * 9.0 / 16.0;
     if stage_height + TOOLBAR_HEIGHT <= available.y {
         egui::vec2(width, stage_height + TOOLBAR_HEIGHT)
     } else {
         let stage_height = (available.y - TOOLBAR_HEIGHT).max(1.0);
         egui::vec2(stage_height * 16.0 / 9.0, stage_height + TOOLBAR_HEIGHT)
+    }
+}
+
+fn watch_projection(phase: ViewPhase) -> WatchProjection {
+    match phase {
+        ViewPhase::Idle => WatchProjection::Empty,
+        ViewPhase::Failed => WatchProjection::Failed,
+        ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping => WatchProjection::Player,
     }
 }
 
@@ -1640,33 +1595,20 @@ mod tests {
     }
 
     #[test]
-    fn content_uses_the_shared_desktop_width_and_keeps_panel_height() {
-        let available =
-            egui::Rect::from_min_size(egui::pos2(20.0, 30.0), egui::vec2(1200.0, 700.0));
-
-        let content = content_rect(available);
-        assert_eq!(content.min, egui::pos2(60.0, 62.0));
-        assert_eq!(content.size(), egui::vec2(1120.0, 668.0));
-
-        let narrow = content_rect(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(680.0, 640.0),
-        ));
-        assert_eq!(narrow.min, egui::pos2(24.0, 24.0));
-        assert_eq!(narrow.size(), egui::vec2(632.0, 616.0));
+    fn pages_choose_role_based_centered_content_widths() {
+        assert_eq!(Page::Nearby.content_width(), PageWidth::Wide);
+        assert_eq!(Page::ScreenShare.content_width(), PageWidth::Medium);
+        assert_eq!(Page::Watch.content_width(), PageWidth::Medium);
+        assert_eq!(Page::Settings.content_width(), PageWidth::Narrow);
     }
 
     #[test]
     fn narrow_windows_use_two_row_navigation_without_horizontal_overflow() {
         assert_eq!(navigation_height(720.0), Size::APP_BAR_COMPACT);
         assert_eq!(navigation_height(1024.0), Size::APP_BAR);
-        assert!(
-            content_rect(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(680.0, 640.0),
-            ))
-            .width()
-                < 680.0
+        assert_eq!(
+            Size::MIN_VIEWPORT[0] - Size::PAGE_HORIZONTAL_NARROW * 2.0,
+            632.0
         );
     }
 
@@ -1677,12 +1619,25 @@ mod tests {
 
         assert_eq!(
             watch_player_size(egui::vec2(1000.0, 700.0)),
-            egui::vec2(960.0, 592.0)
+            egui::vec2(880.0, 547.0)
         );
         assert_size(
             watch_player_size(egui::vec2(800.0, 300.0)),
             egui::vec2(440.888_9, 300.0),
         );
+    }
+
+    #[test]
+    fn inactive_watch_states_do_not_project_a_player_or_live_toolbar() {
+        assert_eq!(watch_projection(ViewPhase::Idle), WatchProjection::Empty);
+        assert_eq!(watch_projection(ViewPhase::Failed), WatchProjection::Failed);
+        for phase in [
+            ViewPhase::Preparing,
+            ViewPhase::Viewing,
+            ViewPhase::Stopping,
+        ] {
+            assert_eq!(watch_projection(phase), WatchProjection::Player);
+        }
     }
 
     #[test]
@@ -1723,19 +1678,6 @@ mod tests {
 
         visible.screen = ScreenAvailability::Available;
         assert_eq!(peer_status(Locale::Chinese, &visible), "屏幕可观看");
-    }
-
-    #[test]
-    fn developer_settings_project_build_identity_without_runtime_state() {
-        let snapshot = RuntimeSnapshot::default();
-        let information = developer_build_information(&snapshot);
-
-        assert_eq!(information[0], ("Version", snapshot.version));
-        assert_eq!(
-            information[1],
-            ("MoQ baseline", crate::build_info::moq_baseline())
-        );
-        assert_eq!(information.len(), 2);
     }
 
     fn assert_size(actual: egui::Vec2, expected: egui::Vec2) {

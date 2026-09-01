@@ -3,6 +3,7 @@ mod common;
 mod dialog;
 mod form;
 mod header;
+mod layout;
 mod navigation;
 mod player;
 mod row;
@@ -14,7 +15,10 @@ pub use button::{
 };
 pub use dialog::{DialogClosePolicy, DialogResponse, DialogSpec, dialog};
 pub use form::{CheckboxSpec, SelectError, SelectSpec, SwitchSpec, checkbox, select, switch};
-pub use header::{page_header, section_header};
+pub use header::{major_section_break, page_header, section_header};
+pub use layout::{
+    PageWidth, app_bar_content_rect, page_content_rect, page_horizontal_inset, page_shell,
+};
 pub use navigation::{NavItemSpec, nav_item};
 pub use player::{player_stage, player_toolbar};
 pub use row::{DeviceRowSpec, SettingRowSpec, device_row, setting_row};

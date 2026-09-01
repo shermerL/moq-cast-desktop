@@ -2,7 +2,7 @@
 
 `moqcast-ui` contains business-neutral egui 0.36.1 presentation primitives shared by the full Windows, Linux, and macOS desktop applications.
 
-It owns design tokens, semantic typography, interaction-state resolution, caller-data-only components, and the visual catalog. Platform crates continue to own windows, page composition, locale, discovery, media, permissions, diagnostics, and product lifecycle.
+It owns design tokens, semantic typography, interaction-state resolution, centered role-based page shells, caller-data-only components, and the visual catalog. Platform crates continue to own windows, page composition, locale, discovery, media, permissions, diagnostics, and product lifecycle.
 
 Run the catalog locally:
 

@@ -3,7 +3,8 @@ use egui::{Id, Response, Ui, WidgetInfo, WidgetType, vec2};
 use crate::{ControlRole, Interaction, Size, Spacing, TypographyRole};
 
 use super::common::{
-    CONTROL_RADIUS, paint_centered_text, paint_focus, paint_surface, resolve, sense, text_width,
+    CONTROL_RADIUS, effective_enabled, paint_centered_text, paint_focus, paint_surface,
+    pointing_hand, resolve, sense, text_width,
 };
 
 /// Display-only configuration for a text control button.
@@ -123,23 +124,19 @@ impl<'a> IconButtonSpec<'a> {
 
 /// Renders a text button from a business-neutral display spec.
 pub fn control_button(ui: &mut Ui, spec: ButtonSpec<'_>) -> Response {
+    let enabled = effective_enabled(spec.enabled, spec.preview);
     let width = spec
         .min_width
         .max(text_width(ui, spec.label, TypographyRole::Button) + Spacing::XL);
     let (rect, response) = if let Some(id) = spec.id {
         let rect = ui.allocate_space(vec2(width, Size::CONTROL)).1;
-        let response = ui.interact(rect, id, sense(spec.enabled));
+        let response = ui.interact(rect, id, sense(enabled));
         (rect, response)
     } else {
-        ui.allocate_exact_size(vec2(width, Size::CONTROL), sense(spec.enabled))
+        ui.allocate_exact_size(vec2(width, Size::CONTROL), sense(enabled))
     };
-    let (state, visual) = resolve(
-        &response,
-        spec.role,
-        spec.enabled,
-        spec.selected,
-        spec.preview,
-    );
+    let response = pointing_hand(response, enabled);
+    let (state, visual) = resolve(&response, spec.role, enabled, spec.selected, spec.preview);
     paint_surface(ui, rect, visual, CONTROL_RADIUS as u8);
     paint_centered_text(
         ui,
@@ -153,7 +150,7 @@ pub fn control_button(ui: &mut Ui, spec: ButtonSpec<'_>) -> Response {
     response.widget_info(|| {
         WidgetInfo::selected(
             WidgetType::Button,
-            spec.enabled,
+            enabled,
             spec.selected,
             spec.accessible_label,
         )

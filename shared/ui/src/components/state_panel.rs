@@ -64,17 +64,19 @@ pub fn state_panel<R>(
     spec: StatePanelSpec<'_>,
     action: impl FnOnce(&mut Ui) -> R,
 ) -> R {
+    let inner_width = (ui.available_width() - Spacing::XL * 2.0).max(1.0);
     let accent = match spec.kind {
         StatePanelKind::Empty => COLORS.muted,
         StatePanelKind::Pending => COLORS.info,
         StatePanelKind::Failed => COLORS.danger,
     };
     Frame::new()
-        .fill(COLORS.surface.into())
+        .fill(COLORS.surface_muted.into())
         .stroke(Stroke::new(Size::BORDER, COLORS.border))
         .corner_radius(CornerRadius::same(Radius::LG as u8))
         .inner_margin(Margin::same(Spacing::XL as i8))
         .show(ui, |ui| {
+            ui.set_min_width(inner_width);
             ui.set_min_height(Size::STATE_PANEL_MIN - Spacing::XL * 2.0);
             ui.vertical_centered(|ui| {
                 ui.label(typography(

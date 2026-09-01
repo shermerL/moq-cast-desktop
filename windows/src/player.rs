@@ -54,7 +54,7 @@ fn player_layout(
         let available_stage_height = (available.y - TOOLBAR_HEIGHT).max(1.0);
         let width = available
             .x
-            .min(Size::WATCH_MAX)
+            .min(Size::PAGE_MEDIUM_MAX)
             .min(available_stage_height * Size::PLAYER_ASPECT[0] / Size::PLAYER_ASPECT[1]);
         egui::vec2(
             width,
@@ -263,19 +263,28 @@ impl LivePlayer {
                         surface.right_bottom(),
                     );
                     ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
-                        player_toolbar(ui, |ui| {
-                            show_controls(ui, locale, view, texture.is_some(), true, &mut action);
-                        });
+                        show_toolbar(ui, locale, view, texture.is_some(), true, &mut action);
                     });
                 } else {
-                    player_toolbar(ui, |ui| {
-                        show_controls(ui, locale, view, texture.is_some(), false, &mut action);
-                    });
+                    show_toolbar(ui, locale, view, texture.is_some(), false, &mut action);
                 }
             }
         });
         action
     }
+}
+
+fn show_toolbar(
+    ui: &mut egui::Ui,
+    locale: Locale,
+    view: &ViewSnapshot,
+    texture_ready: bool,
+    fullscreen: bool,
+    action: &mut Option<PlayerAction>,
+) {
+    player_toolbar(ui, |ui| {
+        show_controls(ui, locale, view, texture_ready, fullscreen, action);
+    });
 }
 
 fn paint_surface(
@@ -329,14 +338,18 @@ fn show_controls(
                     COLORS.player_text.into(),
                 ));
             }
+            ui.label(typography(
+                remote_screen(locale),
+                TypographyRole::Meta,
+                COLORS.player_text.into(),
+            ));
             let resolution = view
                 .width
                 .zip(view.height)
                 .map(|(width, height)| format!("{width} × {height}"))
                 .unwrap_or_else(|| waiting_for_first_frame(locale).to_owned());
             let details = format!(
-                "{}  ·  {resolution}  ·  {}",
-                remote_screen(locale),
+                "{resolution}  ·  {}",
                 audio_status(locale, view.audio.phase)
             );
             let color = if view.audio.phase == ViewAudioPhase::Failed {
@@ -498,11 +511,9 @@ fn exit_fullscreen(locale: Locale) -> &'static str {
 }
 
 fn live_badge(ui: &mut egui::Ui) {
-    ui.label(typography(
-        "LIVE",
-        TypographyRole::Meta,
-        COLORS.brand.into(),
-    ));
+    let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
+    ui.painter().circle_filled(dot.center(), 4.0, COLORS.live);
+    ui.label(typography("LIVE", TypographyRole::Meta, COLORS.live.into()));
 }
 
 #[cfg(test)]
@@ -521,16 +532,16 @@ mod tests {
             egui::vec2(1000.0, 752.0),
             false,
         );
-        assert_size(landscape.surface, egui::vec2(960.0, 540.0));
-        assert_size(landscape.image, egui::vec2(960.0, 540.0));
+        assert_size(landscape.surface, egui::vec2(880.0, 495.0));
+        assert_size(landscape.image, egui::vec2(880.0, 495.0));
 
         let portrait = player_layout(
             Some(egui::vec2(1080.0, 1920.0)),
             egui::vec2(1000.0, 752.0),
             false,
         );
-        assert_size(portrait.surface, egui::vec2(960.0, 540.0));
-        assert_size(portrait.image, egui::vec2(303.75, 540.0));
+        assert_size(portrait.surface, egui::vec2(880.0, 495.0));
+        assert_size(portrait.image, egui::vec2(278.4375, 495.0));
     }
 
     #[test]
@@ -589,8 +600,8 @@ mod tests {
             egui::vec2(1000.0, 752.0),
             false,
         );
-        assert_size(layout.surface, egui::vec2(960.0, 540.0));
-        assert_size(layout.image, egui::vec2(960.0, 540.0));
+        assert_size(layout.surface, egui::vec2(880.0, 495.0));
+        assert_size(layout.image, egui::vec2(880.0, 495.0));
         assert!((layout.surface.x / layout.surface.y - 16.0 / 9.0).abs() < 0.001);
     }
 

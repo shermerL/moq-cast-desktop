@@ -91,12 +91,8 @@ pub fn resolve_control_visual(role: ControlRole, state: Interaction) -> Resolved
 
 fn nav_colors(state: Interaction) -> (Color, Color, Color) {
     match state {
-        Interaction::Hovered => (COLORS.surface_muted, COLORS.text, COLORS.surface_muted),
-        Interaction::Pressed => (
-            COLORS.secondary_pressed,
-            COLORS.text,
-            COLORS.secondary_pressed,
-        ),
+        Interaction::Hovered => (COLORS.brand_soft, COLORS.brand, COLORS.brand),
+        Interaction::Pressed => (COLORS.secondary_pressed, COLORS.text, COLORS.brand_pressed),
         Interaction::Selected => (COLORS.brand_soft, COLORS.brand, COLORS.brand_soft),
         Interaction::Rest | Interaction::Focused | Interaction::Disabled => {
             (COLORS.chrome, COLORS.text, COLORS.chrome)
@@ -106,9 +102,9 @@ fn nav_colors(state: Interaction) -> (Color, Color, Color) {
 
 fn primary_colors(state: Interaction) -> (Color, Color, Color) {
     match state {
-        Interaction::Hovered => (COLORS.brand_hover, COLORS.surface, COLORS.brand_hover),
+        Interaction::Hovered => (COLORS.brand_hover, COLORS.surface, COLORS.brand_pressed),
         Interaction::Pressed | Interaction::Selected => {
-            (COLORS.brand_pressed, COLORS.surface, COLORS.brand_pressed)
+            (COLORS.brand_pressed, COLORS.surface, COLORS.text)
         }
         Interaction::Rest | Interaction::Focused | Interaction::Disabled => {
             (COLORS.brand, COLORS.surface, COLORS.brand)
@@ -118,8 +114,8 @@ fn primary_colors(state: Interaction) -> (Color, Color, Color) {
 
 fn secondary_colors(state: Interaction) -> (Color, Color, Color) {
     match state {
-        Interaction::Hovered => (COLORS.surface_muted, COLORS.text, COLORS.border_strong),
-        Interaction::Pressed => (COLORS.secondary_pressed, COLORS.text, COLORS.border_strong),
+        Interaction::Hovered => (COLORS.brand_soft, COLORS.brand, COLORS.brand),
+        Interaction::Pressed => (COLORS.secondary_pressed, COLORS.text, COLORS.brand_pressed),
         Interaction::Selected => (COLORS.brand_soft, COLORS.brand, COLORS.brand),
         Interaction::Rest | Interaction::Focused | Interaction::Disabled => {
             (COLORS.surface, COLORS.text, COLORS.border)
@@ -141,8 +137,8 @@ fn danger_colors(state: Interaction) -> (Color, Color, Color) {
 
 fn icon_colors(state: Interaction) -> (Color, Color, Color) {
     match state {
-        Interaction::Hovered => (COLORS.surface_muted, COLORS.text, COLORS.border_strong),
-        Interaction::Pressed => (COLORS.secondary_pressed, COLORS.text, COLORS.border_strong),
+        Interaction::Hovered => (COLORS.brand_soft, COLORS.brand, COLORS.brand),
+        Interaction::Pressed => (COLORS.secondary_pressed, COLORS.text, COLORS.brand_pressed),
         Interaction::Selected => (COLORS.brand_soft, COLORS.brand, COLORS.brand),
         Interaction::Rest | Interaction::Focused | Interaction::Disabled => {
             (COLORS.surface, COLORS.text, COLORS.border)

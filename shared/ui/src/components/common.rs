@@ -1,4 +1,6 @@
-use egui::{Color32, CornerRadius, Rect, Response, Stroke, StrokeKind, Ui, WidgetText, pos2};
+use egui::{
+    Color32, CornerRadius, CursorIcon, Rect, Response, Stroke, StrokeKind, Ui, WidgetText, pos2,
+};
 
 use crate::{
     COLORS, Color, ControlRole, Interaction, Radius, ResolvedVisual, Size, TypographyRole,
@@ -26,6 +28,21 @@ pub(crate) fn interaction(
     } else {
         Interaction::Rest
     }
+}
+
+pub(crate) fn effective_enabled(enabled: bool, preview: Option<Interaction>) -> bool {
+    enabled && preview != Some(Interaction::Disabled)
+}
+
+pub(crate) fn pointing_hand(response: Response, enabled: bool) -> Response {
+    match hover_cursor(enabled) {
+        Some(cursor) => response.on_hover_cursor(cursor),
+        None => response,
+    }
+}
+
+fn hover_cursor(enabled: bool) -> Option<CursorIcon> {
+    enabled.then_some(CursorIcon::PointingHand)
 }
 
 pub(crate) fn resolve(
@@ -121,3 +138,16 @@ pub(crate) fn sense(enabled: bool) -> egui::Sense {
 }
 
 pub(crate) const CONTROL_RADIUS: f32 = Radius::MD;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_enabled_controls_request_the_pointing_hand_cursor() {
+        assert_eq!(hover_cursor(true), Some(CursorIcon::PointingHand));
+        assert_eq!(hover_cursor(false), None);
+        assert!(!effective_enabled(true, Some(Interaction::Disabled)));
+        assert!(effective_enabled(true, Some(Interaction::Hovered)));
+    }
+}
