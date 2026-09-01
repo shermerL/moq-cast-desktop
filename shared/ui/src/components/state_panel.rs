@@ -98,11 +98,65 @@ pub fn state_panel<R>(
         .inner
 }
 
+/// Renders a compact left-aligned status section with a caller-owned action area.
+pub fn status_strip<R>(
+    ui: &mut Ui,
+    spec: StatePanelSpec<'_>,
+    action: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    let accent = match spec.kind {
+        StatePanelKind::Empty => COLORS.muted,
+        StatePanelKind::Pending => COLORS.info,
+        StatePanelKind::Failed => COLORS.danger,
+    };
+    Frame::new()
+        .fill(COLORS.surface_muted.into())
+        .stroke(Stroke::new(Size::BORDER, COLORS.border))
+        .corner_radius(CornerRadius::same(Radius::LG as u8))
+        .inner_margin(Margin::same(Spacing::LG as i8))
+        .show(ui, |ui| {
+            ui.label(typography(
+                spec.title,
+                TypographyRole::Section,
+                accent.into(),
+            ));
+            ui.add_space(Spacing::XS);
+            ui.label(typography(
+                spec.description,
+                TypographyRole::Body,
+                COLORS.muted.into(),
+            ));
+            ui.add_space(Spacing::MD);
+            action(ui)
+        })
+        .inner
+}
+
 fn badge_colors(tone: BadgeTone) -> (Color, Color) {
     match tone {
         BadgeTone::Neutral => (COLORS.muted, COLORS.surface_muted),
         BadgeTone::Info => (COLORS.info, COLORS.info_soft),
         BadgeTone::Warning => (COLORS.warning, COLORS.warning_soft),
         BadgeTone::Danger => (COLORS.danger, COLORS.danger_soft),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_strip_stays_compact_for_page_actions() {
+        egui::__run_test_ui(|ui| {
+            ui.set_width(Size::PAGE_NARROW_MAX);
+            let top = ui.cursor().top();
+            status_strip(
+                ui,
+                StatePanelSpec::new(StatePanelKind::Pending, "Preparing", "Starting capture."),
+                |ui| ui.button("Stop"),
+            );
+            let height = ui.cursor().top() - top;
+            assert!(height < Size::STATE_PANEL_MIN);
+        });
     }
 }

@@ -9,13 +9,14 @@ mod tokens;
 mod typography;
 
 pub use components::{
-    BadgeTone, ButtonSpec, CheckboxSpec, DeviceRowSpec, DialogClosePolicy, DialogResponse,
-    DialogSpec, IconButtonSpec, NavItemSpec, PageWidth, SelectError, SelectSpec, SettingRowSpec,
-    StatePanelKind, StatePanelSpec, SwitchSpec, app_bar_content_rect, checkbox, control_button,
-    danger_button, device_row, dialog, icon_button, major_section_break, nav_item,
-    page_content_rect, page_header, page_horizontal_inset, page_shell, player_icon_button,
-    player_stage, player_toolbar, primary_button, secondary_button, section_header, select,
-    setting_row, state_panel, status_badge, switch,
+    BadgeTone, ButtonSpec, CheckboxSpec, DetailRowSpec, DeviceRowSpec, DialogClosePolicy,
+    DialogResponse, DialogSpec, IconButtonSpec, NavItemSpec, PageWidth, PlayerRects, SelectError,
+    SelectSpec, SettingRowSpec, StatePanelKind, StatePanelSpec, SwitchSpec, app_bar_content_rect,
+    checkbox, control_button, danger_button, detail_row, device_row, dialog, icon_button,
+    major_section_break, nav_item, page_content_rect, page_header, page_horizontal_inset,
+    page_shell, player_icon_button, player_rects, player_stage, player_stage_at, player_toolbar,
+    player_toolbar_at, primary_button, secondary_button, section_header, select, setting_row,
+    state_panel, status_badge, status_strip, switch,
 };
 pub use interaction::{ControlRole, Interaction, ResolvedVisual, resolve_control_visual};
 pub use theme::{Theme, install_ui_font};

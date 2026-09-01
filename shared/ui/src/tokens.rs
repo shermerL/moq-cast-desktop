@@ -176,6 +176,8 @@ impl Size {
     pub const BADGE: f32 = 24.0;
     /// Settings row minimum height.
     pub const SETTING_ROW: f32 = 68.0;
+    /// Compact key/value detail row height.
+    pub const DETAIL_ROW: f32 = 48.0;
     /// Device row minimum height.
     pub const DEVICE_ROW: f32 = 72.0;
     /// Wide page maximum width for workspaces and dense lists.

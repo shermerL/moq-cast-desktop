@@ -11,6 +11,19 @@ pub struct SettingRowSpec<'a> {
     description: Option<&'a str>,
 }
 
+/// Display-only configuration for a compact key/value row.
+#[derive(Clone, Copy, Debug)]
+pub struct DetailRowSpec<'a> {
+    label: &'a str,
+}
+
+impl<'a> DetailRowSpec<'a> {
+    /// Creates a compact row with a leading label.
+    pub fn new(label: &'a str) -> Self {
+        Self { label }
+    }
+}
+
 impl<'a> SettingRowSpec<'a> {
     /// Creates a settings row with a primary label.
     pub fn new(title: &'a str) -> Self {
@@ -151,6 +164,42 @@ fn paint_setting_label(ui: &mut Ui, rect: egui::Rect, spec: SettingRowSpec<'_>) 
     );
 }
 
+/// Renders a fixed-height key/value row that never switches to a stacked layout.
+pub fn detail_row<R>(
+    ui: &mut Ui,
+    spec: DetailRowSpec<'_>,
+    trailing: impl FnOnce(&mut Ui) -> R,
+) -> (egui::Rect, R) {
+    let rect = ui
+        .allocate_space(vec2(ui.available_width(), Size::DETAIL_ROW))
+        .1;
+    let inner = rect.shrink2(vec2(Size::ROW_HORIZONTAL_INSET, 0.0));
+    let trailing_width = (inner.width() / 2.0).min(Size::SETTING_CONTROL_MAX);
+    let label_width = (inner.width() - trailing_width - Spacing::SM).max(1.0);
+    let label_rect = egui::Rect::from_min_size(inner.min, vec2(label_width, inner.height()));
+    let trailing_rect = egui::Rect::from_min_size(
+        egui::pos2(inner.right() - trailing_width, inner.top()),
+        vec2(trailing_width, inner.height()),
+    );
+
+    let mut label_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(label_rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    label_ui.label(typography(
+        spec.label,
+        TypographyRole::Meta,
+        COLORS.muted.into(),
+    ));
+    let mut trailing_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(trailing_rect)
+            .layout(Layout::right_to_left(Align::Center)),
+    );
+    (rect, trailing(&mut trailing_ui))
+}
+
 /// Renders a selectable device row with a caller-owned trailing control.
 pub fn device_row<R>(
     ui: &mut Ui,
@@ -215,6 +264,20 @@ pub fn device_row<R>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detail_rows_keep_a_fixed_compact_height_in_narrow_columns() {
+        egui::__run_test_ui(|ui| {
+            ui.set_width(Size::NEARBY_LIST);
+            let (rect, trailing) = detail_row(ui, DetailRowSpec::new("Connection"), |ui| {
+                ui.label("Connected").rect
+            });
+            assert_eq!(rect.height(), Size::DETAIL_ROW);
+            assert_eq!(rect.width(), Size::NEARBY_LIST);
+            assert!(trailing.center().y >= rect.top());
+            assert!(trailing.center().y <= rect.bottom());
+        });
+    }
 
     #[test]
     fn settings_controls_stay_inside_wide_and_stacked_rows() {
