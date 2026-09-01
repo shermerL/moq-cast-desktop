@@ -169,6 +169,7 @@ fn system_audio_action_requires_an_idle_primary_display() {
         }),
         ..AppSnapshot::default()
     };
+    snapshot.session.begin(SessionPhase::Listening);
     assert!(system_audio_action_available(&snapshot));
 
     snapshot.share_selection = Some(crate::publication::Selection::Display {
