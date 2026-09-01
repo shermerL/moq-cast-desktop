@@ -47,6 +47,10 @@ impl DiagnosticsUi {
         self.handle.detailed()
     }
 
+    pub(crate) fn hide_window(&mut self) {
+        self.visible = false;
+    }
+
     pub(crate) fn show_settings(&mut self, ui: &mut egui::Ui, locale: Locale) {
         ui.heading(text(locale, "诊断日志", "Diagnostic logs"));
         ui.small(text(

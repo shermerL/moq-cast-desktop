@@ -1,11 +1,11 @@
 //! Compact native UI for discovery and direct peer sessions.
 
-use eframe::egui::{self, Align, Color32, Frame, Layout, RichText, Stroke};
+use eframe::egui::{self, Align, Color32, Frame, Layout, RichText, Sense, Stroke};
 
 use crate::{
     audio::AudioPhase,
     diagnostics::DiagnosticsUi,
-    media::{COMPATIBLE_MAX_SCREEN_EDGE, MediaPhase, VideoEncodingPolicy},
+    media::{MediaPhase, VideoEncodingPolicy},
     playback::{PlaybackFrameIdentity, ViewAudioPhase, ViewPhase},
     player::{LivePlayer, PlayerAction},
     remote::ScreenAvailability,
@@ -14,20 +14,26 @@ use crate::{
     },
 };
 
-const CONTENT_MAX_WIDTH: f32 = 900.0;
-const CONTENT_TOP_SPACING: f32 = 18.0;
+const CONTENT_MAX_WIDTH: f32 = 1040.0;
+const CONTENT_TOP_SPACING: f32 = 24.0;
+const NEARBY_SPLIT_MIN_WIDTH: f32 = 760.0;
 const STORAGE_DETAILED_DIAGNOSTICS: &str = "moqcast.detailed-diagnostics";
+const STORAGE_DEVELOPER_MODE: &str = "moqcast.developer-mode";
+const STORAGE_LOCALE: &str = "moqcast.locale";
 
 fn parse_stored_bool(value: Option<String>) -> bool {
     value.as_deref() == Some("true")
 }
 
-fn content_rect(available: egui::Rect, page: Page, viewing: bool) -> egui::Rect {
-    let width = if page == Page::ScreenShare && viewing {
-        available.width()
-    } else {
-        available.width().min(CONTENT_MAX_WIDTH)
-    };
+fn parse_stored_locale(value: Option<String>) -> Locale {
+    match value.as_deref() {
+        Some("en") => Locale::English,
+        _ => Locale::Chinese,
+    }
+}
+
+fn content_rect(available: egui::Rect) -> egui::Rect {
+    let width = available.width().min(CONTENT_MAX_WIDTH);
     egui::Rect::from_min_size(
         egui::pos2(
             available.center().x - width / 2.0,
@@ -42,7 +48,15 @@ pub(crate) enum Page {
     #[default]
     Nearby,
     ScreenShare,
+    Watch,
     Settings,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SettingsPane {
+    #[default]
+    Preferences,
+    Diagnostics,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -73,11 +87,21 @@ impl Locale {
             Self::English => "Settings",
         }
     }
+
+    fn watch(self) -> &'static str {
+        match self {
+            Self::Chinese => "观看",
+            Self::English => "Watch",
+        }
+    }
 }
 
 pub(crate) struct MoqCastApp {
     page: Page,
     locale: Locale,
+    developer_mode: bool,
+    settings_pane: SettingsPane,
+    selected_peer: Option<String>,
     diagnostics: DiagnosticsUi,
     runtime: RuntimeOwner,
     snapshot: RuntimeSnapshot,
@@ -103,10 +127,23 @@ impl MoqCastApp {
                 .storage
                 .and_then(|storage| storage.get_string(STORAGE_DETAILED_DIAGNOSTICS)),
         );
+        let developer_mode = parse_stored_bool(
+            context
+                .storage
+                .and_then(|storage| storage.get_string(STORAGE_DEVELOPER_MODE)),
+        );
+        let locale = parse_stored_locale(
+            context
+                .storage
+                .and_then(|storage| storage.get_string(STORAGE_LOCALE)),
+        );
         let snapshot = runtime.snapshot();
         Self {
             page: Page::Nearby,
-            locale: Locale::Chinese,
+            locale,
+            developer_mode,
+            settings_pane: SettingsPane::Preferences,
+            selected_peer: None,
             diagnostics: DiagnosticsUi::new(diagnostics, detailed_diagnostics),
             runtime,
             snapshot,
@@ -133,31 +170,33 @@ impl MoqCastApp {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("MoQCast").size(19.0).strong());
-            ui.add_space(18.0);
+            ui.label(RichText::new("MoQCast Desktop").size(17.0).strong());
+            ui.add_space(24.0);
             ui.selectable_value(&mut self.page, Page::Nearby, self.locale.nearby());
             ui.selectable_value(
                 &mut self.page,
                 Page::ScreenShare,
                 self.locale.screen_share(),
             );
+            ui.selectable_value(&mut self.page, Page::Watch, self.locale.watch());
             ui.selectable_value(&mut self.page, Page::Settings, self.locale.settings());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let text = match self.snapshot.discovery {
-                    DiscoveryState::Ready => {
-                        format!("{} peers", self.snapshot.present_peer_count())
-                    }
-                    DiscoveryState::Empty => "LAN ready".to_owned(),
-                    DiscoveryState::Starting => "Starting".to_owned(),
-                    DiscoveryState::Failed => "Discovery error".to_owned(),
-                    DiscoveryState::Stopped => "Stopped".to_owned(),
-                };
-                ui.small(text);
+                ui.small(discovery_summary(self.locale, &self.snapshot));
             });
         });
     }
 
     fn nearby(&mut self, ui: &mut egui::Ui) {
+        page_header(
+            ui,
+            self.locale.nearby(),
+            match self.locale {
+                Locale::Chinese => "查看局域网中的设备、连接与可观看屏幕。",
+                Locale::English => {
+                    "Review LAN devices, connections, and screens available to watch."
+                }
+            },
+        );
         let scan_active = self.snapshot.discovery.is_active();
         let scan_label = match (self.locale, scan_active) {
             (Locale::Chinese, true) => "停止扫描",
@@ -165,8 +204,27 @@ impl MoqCastApp {
             (Locale::English, true) => "Stop scan",
             (Locale::English, false) => "Start scan",
         };
-        ui.horizontal_wrapped(|ui| {
-            ui.heading(self.locale.nearby());
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(
+                    RichText::new(match self.locale {
+                        Locale::Chinese => "本机设备",
+                        Locale::English => "This device",
+                    })
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+                );
+                ui.label(RichText::new(&self.snapshot.local_device_name).strong());
+                ui.small(match (self.locale, scan_active) {
+                    (Locale::Chinese, true) => "正在扫描附近设备",
+                    (Locale::English, true) => "Scanning for nearby devices",
+                    (Locale::Chinese, false) => "扫描已停止，已连接设备不受影响",
+                    (Locale::English, false) => {
+                        "Scanning stopped; connected devices are not affected"
+                    }
+                });
+            });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button(scan_label).clicked() {
                     self.send(if scan_active {
@@ -175,46 +233,10 @@ impl MoqCastApp {
                         RuntimeCommand::StartScan
                     });
                 }
-                let session = self
-                    .snapshot
-                    .lan_session_id
-                    .as_deref()
-                    .unwrap_or("--------");
-                let session_label = match self.locale {
-                    Locale::Chinese => "LAN 会话",
-                    Locale::English => "LAN session",
-                };
-                ui.small(format!(
-                    "{} · {session_label} {session}",
-                    self.snapshot.local_device_name,
-                ));
             });
         });
-        ui.label(match self.locale {
-            Locale::Chinese => "发现与连接保持分层。只有确定的拨号侧可以发起安全直连。",
-            Locale::English => {
-                "Discovery and transport stay separate. Only the deterministic dial side can connect."
-            }
-        });
-        ui.add_space(12.0);
-
-        if self.snapshot.peers.values().all(|peer| !peer.present) {
-            ui.label(match self.snapshot.discovery {
-                DiscoveryState::Starting => match self.locale {
-                    Locale::Chinese => "正在启动局域网发现…",
-                    Locale::English => "Starting LAN discovery…",
-                },
-                DiscoveryState::Failed => match self.locale {
-                    Locale::Chinese => "局域网发现不可用。请在设置中查看状态。",
-                    Locale::English => "LAN discovery is unavailable. See Settings for status.",
-                },
-                _ => match self.locale {
-                    Locale::Chinese => "暂未发现附近设备。",
-                    Locale::English => "No nearby devices found.",
-                },
-            });
-            return;
-        }
+        ui.separator();
+        ui.add_space(8.0);
 
         let peers: Vec<_> = self
             .snapshot
@@ -223,122 +245,249 @@ impl MoqCastApp {
             .filter(|peer| peer.present)
             .cloned()
             .collect();
-        for peer in peers {
-            self.peer_row(ui, &peer);
-            ui.add_space(6.0);
+        self.selected_peer = selected_peer(&peers, self.selected_peer.as_deref());
+
+        if peers.is_empty() {
+            self.nearby_empty(ui);
+            return;
+        }
+
+        let selected = self
+            .selected_peer
+            .as_deref()
+            .and_then(|id| peers.iter().find(|peer| peer.id == id))
+            .cloned();
+        if nearby_uses_stacked_layout(ui.available_width()) {
+            self.peer_list(ui, &peers);
+            ui.separator();
+            self.peer_detail(ui, selected.as_ref());
+        } else {
+            ui.columns(2, |columns| {
+                self.peer_list(&mut columns[0], &peers);
+                self.peer_detail(&mut columns[1], selected.as_ref());
+            });
         }
     }
 
-    fn peer_row(&mut self, ui: &mut egui::Ui, peer: &PeerView) {
+    fn nearby_empty(&mut self, ui: &mut egui::Ui) {
+        let (title, help) = match (self.locale, self.snapshot.discovery) {
+            (Locale::Chinese, DiscoveryState::Starting) => {
+                ("正在启动附近服务", "正在准备扫描和安全连接。")
+            }
+            (Locale::English, DiscoveryState::Starting) => (
+                "Starting Nearby services",
+                "Preparing scanning and secure connections.",
+            ),
+            (Locale::Chinese, DiscoveryState::Failed) => {
+                ("附近服务不可用", "请检查本地网络和防火墙设置，然后重试。")
+            }
+            (Locale::English, DiscoveryState::Failed) => (
+                "Nearby services unavailable",
+                "Check local network and firewall settings, then try again.",
+            ),
+            (Locale::Chinese, DiscoveryState::Stopped) => {
+                ("扫描已停止", "已连接设备不受影响；需要时可以重新开始扫描。")
+            }
+            (Locale::English, DiscoveryState::Stopped) => (
+                "Scanning stopped",
+                "Connected devices are not affected; start scanning again when needed.",
+            ),
+            (Locale::Chinese, _) => (
+                "暂未发现附近设备",
+                "请确认另一台设备已打开 MoQCast，然后重新扫描。",
+            ),
+            (Locale::English, _) => (
+                "No nearby devices found",
+                "Make sure MoQCast is open on another device, then scan again.",
+            ),
+        };
         Frame::new()
             .stroke(Stroke::new(
                 1.0,
                 ui.visuals().widgets.noninteractive.bg_stroke.color,
             ))
             .corner_radius(6.0)
-            .inner_margin(egui::Margin::symmetric(12, 9))
+            .inner_margin(egui::Margin::symmetric(24, 24))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(&peer.id).strong());
-                        let role = if peer.should_dial {
-                            "outbound"
-                        } else {
-                            "inbound"
-                        };
-                        ui.small(format!(
-                            "{role} · {} · generation {}",
-                            phase(peer.transport.phase),
-                            peer.transport.generation
-                        ));
-                        for candidate in &peer.candidates {
-                            ui.label(
-                                RichText::new(candidate)
-                                    .monospace()
-                                    .small()
-                                    .color(Color32::GRAY),
-                            );
-                        }
-                        let security = if peer.authenticated_discovery && peer.tls_pinned {
-                            "authenticated discovery · TLS pinned"
-                        } else if peer.tls_pinned {
-                            "open discovery · TLS pinned"
-                        } else {
-                            "security metadata incomplete"
-                        };
-                        ui.small(security);
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if peer.screen == ScreenAvailability::Available {
-                            let path = crate::screen_path::for_peer(&peer.id);
-                            let enabled = self.snapshot.has_mesh_session()
-                                && matches!(
-                                    self.snapshot.media.phase,
-                                    MediaPhase::Idle | MediaPhase::Failed
-                                )
-                                && matches!(
-                                    self.snapshot.view.phase,
-                                    ViewPhase::Idle | ViewPhase::Failed
-                                );
-                            if ui
-                                .add_enabled(
-                                    enabled,
-                                    egui::Button::new(match self.locale {
-                                        Locale::Chinese => "观看",
-                                        Locale::English => "Watch",
-                                    }),
-                                )
-                                .clicked()
-                            {
-                                self.page = Page::ScreenShare;
-                                self.send(RuntimeCommand::WatchScreen { path });
-                            }
-                        } else {
-                            ui.small(match self.locale {
-                                Locale::Chinese => "自动连接",
-                                Locale::English => "Automatic",
-                            });
-                        }
-                    });
-                });
+                ui.label(RichText::new(title).size(18.0).strong());
+                ui.add_space(4.0);
+                ui.label(help);
             });
     }
 
-    fn screen_share(&mut self, ui: &mut egui::Ui) {
-        ui.heading(self.locale.screen_share());
-        if matches!(
-            self.snapshot.view.phase,
-            ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping
-        ) {
-            if matches!(
-                self.player.show(
-                    ui,
-                    &self.snapshot.view,
-                    self.playback_texture.as_ref(),
-                    false,
+    fn peer_list(&mut self, ui: &mut egui::Ui, peers: &[PeerView]) {
+        for peer in peers {
+            let selected = self.selected_peer.as_deref() == Some(peer.id.as_str());
+            let response = ui.add_sized(
+                [ui.available_width(), 58.0],
+                egui::Button::selectable(
+                    selected,
+                    format!(
+                        "{}\n{}",
+                        peer_display_name(self.locale, &peer.id),
+                        peer_status(self.locale, peer)
+                    ),
                 ),
-                Some(PlayerAction::Stop)
-            ) {
-                self.send(RuntimeCommand::StopWatching);
+            );
+            if response.clicked() {
+                self.selected_peer = Some(peer.id.clone());
             }
-            return;
         }
-        let status = match (self.locale, self.snapshot.media.phase) {
-            (Locale::Chinese, MediaPhase::Idle) => "尚未共享屏幕。",
-            (Locale::English, MediaPhase::Idle) => "Screen sharing is idle.",
-            (Locale::Chinese, MediaPhase::Preparing) => "正在准备主显示器…",
-            (Locale::English, MediaPhase::Preparing) => "Preparing the primary display…",
-            (Locale::Chinese, MediaPhase::Sharing) => "正在共享主显示器。",
-            (Locale::English, MediaPhase::Sharing) => "The primary display is being shared.",
-            (Locale::Chinese, MediaPhase::Stopping) => "正在停止共享…",
-            (Locale::English, MediaPhase::Stopping) => "Stopping screen sharing…",
-            (Locale::Chinese, MediaPhase::Failed) => "屏幕共享未能启动或已意外结束。",
-            (Locale::English, MediaPhase::Failed) => {
-                "Screen sharing could not start or ended unexpectedly."
-            }
+    }
+
+    fn peer_detail(&mut self, ui: &mut egui::Ui, peer: Option<&PeerView>) {
+        let Some(peer) = peer else {
+            return;
         };
-        ui.label(status);
         ui.add_space(8.0);
+        ui.label(
+            RichText::new(match self.locale {
+                Locale::Chinese => "所选设备",
+                Locale::English => "Selected device",
+            })
+            .small()
+            .color(ui.visuals().weak_text_color()),
+        );
+        ui.label(
+            RichText::new(peer_display_name(self.locale, &peer.id))
+                .size(18.0)
+                .strong(),
+        );
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(16.0);
+
+        if peer.screen == ScreenAvailability::Available {
+            ui.label(match self.locale {
+                Locale::Chinese => "选择“观看”打开此屏幕。",
+                Locale::English => "Choose Watch to open this screen.",
+            });
+            ui.add_space(16.0);
+            let enabled = self.snapshot.has_mesh_session()
+                && matches!(
+                    self.snapshot.media.phase,
+                    MediaPhase::Idle | MediaPhase::Failed
+                )
+                && matches!(
+                    self.snapshot.view.phase,
+                    ViewPhase::Idle | ViewPhase::Failed
+                );
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::new(self.locale.watch()).min_size(egui::vec2(96.0, 38.0)),
+                )
+                .clicked()
+            {
+                self.page = Page::Watch;
+                self.send(RuntimeCommand::WatchScreen {
+                    path: crate::screen_path::for_peer(&peer.id),
+                });
+            }
+        } else {
+            ui.label(match self.locale {
+                Locale::Chinese => "共享屏幕可用后会在这里出现观看动作。",
+                Locale::English => "The Watch action appears here when a screen is shared.",
+            });
+        }
+    }
+
+    fn screen_share(&mut self, ui: &mut egui::Ui) {
+        page_header(
+            ui,
+            self.locale.screen_share(),
+            match self.locale {
+                Locale::Chinese => "共享本机主显示器与可用的系统音频。",
+                Locale::English => "Share the primary display and system audio when available.",
+            },
+        );
+        ui.separator();
+        setting_value_row(
+            ui,
+            match self.locale {
+                Locale::Chinese => "来源",
+                Locale::English => "Source",
+            },
+            match self.locale {
+                Locale::Chinese => "此版本共享主显示器。",
+                Locale::English => "This version shares the primary display.",
+            },
+            match self.locale {
+                Locale::Chinese => "主显示器",
+                Locale::English => "Primary display",
+            },
+        );
+        ui.separator();
+        setting_value_row(
+            ui,
+            match self.locale {
+                Locale::Chinese => "系统音频",
+                Locale::English => "System audio",
+            },
+            match self.locale {
+                Locale::Chinese => "可用时随屏幕共享捕获；没有单独开关。",
+                Locale::English => {
+                    "Captured with screen sharing when available; there is no separate switch."
+                }
+            },
+            share_audio_status(self.locale, self.snapshot.media.audio.phase),
+        );
+        ui.separator();
+        ui.add_space(20.0);
+
+        let status = match (self.locale, self.snapshot.media.phase) {
+            (Locale::Chinese, MediaPhase::Idle) => "准备共享",
+            (Locale::English, MediaPhase::Idle) => "Ready to share",
+            (Locale::Chinese, MediaPhase::Preparing) => "正在准备共享",
+            (Locale::English, MediaPhase::Preparing) => "Preparing screen share",
+            (Locale::Chinese, MediaPhase::Sharing) => "正在共享屏幕",
+            (Locale::English, MediaPhase::Sharing) => "Sharing screen",
+            (Locale::Chinese, MediaPhase::Stopping) => "正在停止共享",
+            (Locale::English, MediaPhase::Stopping) => "Stopping screen share",
+            (Locale::Chinese, MediaPhase::Failed) => "无法开始共享",
+            (Locale::English, MediaPhase::Failed) => "Screen share could not start",
+        };
+        ui.label(RichText::new(status).size(17.0).strong());
+        ui.add_space(6.0);
+        ui.label(match (self.locale, self.snapshot.media.phase) {
+            (Locale::Chinese, MediaPhase::Preparing) => "正在请求系统捕获并准备共享。",
+            (Locale::English, MediaPhase::Preparing) => {
+                "Requesting system capture and preparing to share."
+            }
+            (Locale::Chinese, MediaPhase::Sharing) => "屏幕正在共享给已连接的附近设备。",
+            (Locale::English, MediaPhase::Sharing) => {
+                "Your screen is being shared with connected nearby devices."
+            }
+            (Locale::Chinese, MediaPhase::Stopping) => "停止共享不会断开附近设备。",
+            (Locale::English, MediaPhase::Stopping) => {
+                "Stopping screen share does not disconnect nearby devices."
+            }
+            (Locale::Chinese, MediaPhase::Failed) => "检查屏幕捕获状态后重试；附近连接不受影响。",
+            (Locale::English, MediaPhase::Failed) => {
+                "Check screen capture and try again; Nearby connections are not affected."
+            }
+            (Locale::Chinese, MediaPhase::Idle) => {
+                if matches!(
+                    self.snapshot.view.phase,
+                    ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping
+                ) {
+                    "正在观看远端屏幕。停止观看后才能开始共享。"
+                } else {
+                    "开始后会共享主显示器，并尝试捕获系统音频。"
+                }
+            }
+            (Locale::English, MediaPhase::Idle) => {
+                if matches!(
+                    self.snapshot.view.phase,
+                    ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping
+                ) {
+                    "A remote screen is active. Stop watching before sharing."
+                } else {
+                    "Starting shares the primary display and attempts system audio capture."
+                }
+            }
+        });
+        ui.add_space(16.0);
         match self.snapshot.media.phase {
             MediaPhase::Idle | MediaPhase::Failed => {
                 let enabled = self.snapshot.local_id.is_some()
@@ -350,9 +499,10 @@ impl MoqCastApp {
                     .add_enabled(
                         enabled,
                         egui::Button::new(match self.locale {
-                            Locale::Chinese => "共享屏幕",
-                            Locale::English => "Share screen",
-                        }),
+                            Locale::Chinese => "开始共享",
+                            Locale::English => "Start sharing",
+                        })
+                        .min_size(egui::vec2(112.0, 40.0)),
                     )
                     .clicked()
                 {
@@ -361,10 +511,13 @@ impl MoqCastApp {
             }
             MediaPhase::Sharing => {
                 if ui
-                    .button(match self.locale {
-                        Locale::Chinese => "停止共享",
-                        Locale::English => "Stop sharing",
-                    })
+                    .add(
+                        egui::Button::new(match self.locale {
+                            Locale::Chinese => "停止共享",
+                            Locale::English => "Stop sharing",
+                        })
+                        .min_size(egui::vec2(112.0, 40.0)),
+                    )
                     .clicked()
                 {
                     self.send(RuntimeCommand::StopSharing);
@@ -374,76 +527,6 @@ impl MoqCastApp {
                 ui.add_enabled(false, egui::Button::new(status));
             }
         }
-        ui.add_space(12.0);
-        egui::Grid::new("screen-share-stats")
-            .num_columns(2)
-            .spacing([18.0, 6.0])
-            .show(ui, |ui| {
-                ui.label("Broadcast");
-                ui.monospace(
-                    self.snapshot
-                        .media
-                        .path
-                        .as_deref()
-                        .unwrap_or("not announced"),
-                );
-                ui.end_row();
-                ui.label("Codec");
-                ui.monospace("H.264");
-                ui.end_row();
-                ui.label(match self.locale {
-                    Locale::Chinese => "编码模式",
-                    Locale::English => "Encoding mode",
-                });
-                ui.monospace(video_encoding_label(
-                    self.locale,
-                    self.snapshot.media.video_encoding,
-                ));
-                ui.end_row();
-                ui.label("Encoder");
-                ui.monospace(match self.snapshot.media.video_encoding {
-                    VideoEncodingPolicy::Compatible => {
-                        "Auto: Media Foundation preferred, OpenH264 fallback"
-                    }
-                    VideoEncodingPolicy::NativeQhdHardware => {
-                        "Media Foundation hardware required; checked at start"
-                    }
-                });
-                ui.end_row();
-                ui.label(match self.locale {
-                    Locale::Chinese => "系统音频",
-                    Locale::English => "System audio",
-                });
-                ui.monospace(match self.snapshot.media.audio.phase {
-                    AudioPhase::Idle => "idle",
-                    AudioPhase::Preparing => "preparing",
-                    AudioPhase::Publishing => "Opus",
-                    AudioPhase::Silent => "silent",
-                    AudioPhase::Recovering => "recovering",
-                    AudioPhase::Stopping => "stopping",
-                    AudioPhase::Failed => "unavailable (video continues)",
-                });
-                ui.end_row();
-                ui.label("Output");
-                let output = self
-                    .snapshot
-                    .media
-                    .width
-                    .zip(self.snapshot.media.height)
-                    .map_or_else(
-                        || match self.snapshot.media.video_encoding {
-                            VideoEncodingPolicy::Compatible => {
-                                format!("native, max edge {COMPATIBLE_MAX_SCREEN_EDGE}px")
-                            }
-                            VideoEncodingPolicy::NativeQhdHardware => {
-                                "native landscape 2560x1440".to_owned()
-                            }
-                        },
-                        |(width, height)| format!("{width}x{height} @ 30 fps"),
-                    );
-                ui.monospace(output);
-                ui.end_row();
-            });
         if let Some(error) = self.snapshot.media.last_error {
             ui.add_space(8.0);
             ui.colored_label(Color32::LIGHT_RED, error);
@@ -452,10 +535,82 @@ impl MoqCastApp {
             ui.add_space(8.0);
             ui.colored_label(Color32::ORANGE, error);
         }
-        if let Some(error) = &self.snapshot.view.last_error {
-            ui.add_space(8.0);
-            ui.colored_label(Color32::LIGHT_RED, error);
+    }
+
+    fn watch(&mut self, ui: &mut egui::Ui) {
+        page_header(
+            ui,
+            match self.locale {
+                Locale::Chinese => "观看附近屏幕",
+                Locale::English => "Watch a nearby screen",
+            },
+            match self.locale {
+                Locale::Chinese => "画面保持原始宽高比，播放状态不会改变舞台尺寸。",
+                Locale::English => {
+                    "Video keeps its original aspect ratio, and playback state does not resize the stage."
+                }
+            },
+        );
+        let active = matches!(
+            self.snapshot.view.phase,
+            ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping
+        );
+        let stage = watch_stage_size(ui.available_size());
+        if active {
+            ui.allocate_ui_with_layout(stage, Layout::top_down(Align::Center), |ui| {
+                if matches!(
+                    self.player.show(
+                        ui,
+                        &self.snapshot.view,
+                        self.playback_texture.as_ref(),
+                        false,
+                    ),
+                    Some(PlayerAction::Stop)
+                ) {
+                    self.send(RuntimeCommand::StopWatching);
+                }
+            });
+            return;
         }
+
+        let (rect, _) = ui.allocate_exact_size(stage, Sense::hover());
+        ui.painter().rect_filled(rect, 6.0, Color32::BLACK);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+            ui.centered_and_justified(|ui| {
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new(match (self.locale, self.snapshot.view.phase) {
+                            (Locale::Chinese, ViewPhase::Failed) => "无法播放",
+                            (Locale::English, ViewPhase::Failed) => "Playback unavailable",
+                            (Locale::Chinese, _) => "选择一个可观看屏幕",
+                            (Locale::English, _) => "Choose a screen to watch",
+                        })
+                        .size(18.0)
+                        .color(Color32::WHITE),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(match self.locale {
+                            Locale::Chinese => "前往附近设备，选择正在共享屏幕的设备。",
+                            Locale::English => {
+                                "Open Nearby and select a device that is sharing a screen."
+                            }
+                        })
+                        .color(Color32::from_gray(185)),
+                    );
+                    ui.add_space(14.0);
+                    if ui
+                        .button(match self.locale {
+                            Locale::Chinese => "打开附近设备",
+                            Locale::English => "Open Nearby",
+                        })
+                        .clicked()
+                    {
+                        self.page = Page::Nearby;
+                    }
+                });
+            });
+        });
     }
 
     fn update_playback_texture(&mut self, context: &egui::Context) {
@@ -552,23 +707,97 @@ impl MoqCastApp {
     }
 
     fn settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading(self.locale.settings());
-        ui.horizontal(|ui| {
-            ui.label(match self.locale {
+        page_header(
+            ui,
+            self.locale.settings(),
+            match self.locale {
+                Locale::Chinese => "调整日常偏好；需要时可开启开发者模式查看本地日志。",
+                Locale::English => {
+                    "Adjust everyday preferences; enable Developer mode when local logs are needed."
+                }
+            },
+        );
+        if self.developer_mode {
+            ui.horizontal(|ui| {
+                ui.selectable_value(
+                    &mut self.settings_pane,
+                    SettingsPane::Preferences,
+                    match self.locale {
+                        Locale::Chinese => "偏好设置",
+                        Locale::English => "Preferences",
+                    },
+                );
+                ui.selectable_value(
+                    &mut self.settings_pane,
+                    SettingsPane::Diagnostics,
+                    match self.locale {
+                        Locale::Chinese => "诊断",
+                        Locale::English => "Diagnostics",
+                    },
+                );
+            });
+            ui.separator();
+            ui.add_space(16.0);
+        } else {
+            self.settings_pane = SettingsPane::Preferences;
+        }
+
+        match self.settings_pane {
+            SettingsPane::Preferences => self.preferences(ui),
+            SettingsPane::Diagnostics => self.diagnostics_settings(ui),
+        }
+    }
+
+    fn preferences(&mut self, ui: &mut egui::Ui) {
+        section_heading(
+            ui,
+            match self.locale {
+                Locale::Chinese => "通用",
+                Locale::English => "General",
+            },
+        );
+        setting_control_row(
+            ui,
+            match self.locale {
                 Locale::Chinese => "语言",
                 Locale::English => "Language",
-            });
-            egui::ComboBox::from_id_salt("locale")
-                .selected_text(match self.locale {
-                    Locale::Chinese => "简体中文",
-                    Locale::English => "English",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.locale, Locale::Chinese, "简体中文");
-                    ui.selectable_value(&mut self.locale, Locale::English, "English");
-                });
-        });
-        ui.add_space(8.0);
+            },
+            match self.locale {
+                Locale::Chinese => "语言设置会保留。",
+                Locale::English => "Language preference is retained.",
+            },
+            |ui| {
+                egui::ComboBox::from_id_salt("locale")
+                    .selected_text(match self.locale {
+                        Locale::Chinese => "简体中文",
+                        Locale::English => "English",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.locale, Locale::Chinese, "简体中文");
+                        ui.selectable_value(&mut self.locale, Locale::English, "English");
+                    });
+            },
+        );
+        ui.separator();
+        setting_value_row(
+            ui,
+            match self.locale {
+                Locale::Chinese => "产品版本",
+                Locale::English => "Product version",
+            },
+            "",
+            self.snapshot.version,
+        );
+        ui.separator();
+        ui.add_space(24.0);
+
+        section_heading(
+            ui,
+            match self.locale {
+                Locale::Chinese => "屏幕共享",
+                Locale::English => "Screen sharing",
+            },
+        );
         let current_video_encoding = self.snapshot.media.video_encoding;
         let mut selected_video_encoding = current_video_encoding;
         let can_change_video_encoding = matches!(
@@ -576,29 +805,38 @@ impl MoqCastApp {
             MediaPhase::Idle | MediaPhase::Failed
         );
         ui.add_enabled_ui(can_change_video_encoding, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(match self.locale {
+            setting_control_row(
+                ui,
+                match self.locale {
                     Locale::Chinese => "视频编码",
                     Locale::English => "Video encoding",
-                });
-                egui::ComboBox::from_id_salt("video-encoding-policy")
-                    .selected_text(video_encoding_label(self.locale, selected_video_encoding))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut selected_video_encoding,
-                            VideoEncodingPolicy::Compatible,
-                            video_encoding_label(self.locale, VideoEncodingPolicy::Compatible),
-                        );
-                        ui.selectable_value(
-                            &mut selected_video_encoding,
-                            VideoEncodingPolicy::NativeQhdHardware,
-                            video_encoding_label(
-                                self.locale,
+                },
+                match self.locale {
+                    Locale::Chinese => "QHD 要求硬件 H.264，不提供软件降级。",
+                    Locale::English => {
+                        "QHD requires hardware H.264 and does not fall back to software."
+                    }
+                },
+                |ui| {
+                    egui::ComboBox::from_id_salt("video-encoding-policy")
+                        .selected_text(video_encoding_label(self.locale, selected_video_encoding))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut selected_video_encoding,
+                                VideoEncodingPolicy::Compatible,
+                                video_encoding_label(self.locale, VideoEncodingPolicy::Compatible),
+                            );
+                            ui.selectable_value(
+                                &mut selected_video_encoding,
                                 VideoEncodingPolicy::NativeQhdHardware,
-                            ),
-                        );
-                    });
-            });
+                                video_encoding_label(
+                                    self.locale,
+                                    VideoEncodingPolicy::NativeQhdHardware,
+                                ),
+                            );
+                        });
+                },
+            );
         });
         if selected_video_encoding != current_video_encoding {
             self.send(RuntimeCommand::SetVideoEncodingPolicy(
@@ -626,6 +864,72 @@ impl MoqCastApp {
             });
         }
         ui.separator();
+        ui.add_space(24.0);
+
+        section_heading(
+            ui,
+            match self.locale {
+                Locale::Chinese => "高级",
+                Locale::English => "Advanced",
+            },
+        );
+        let mut auto_watch = false;
+        setting_control_row(
+            ui,
+            match self.locale {
+                Locale::Chinese => "自动观看唯一可用屏幕",
+                Locale::English => "Auto-watch the only available screen",
+            },
+            match self.locale {
+                Locale::Chinese => "仅在没有活跃媒体且恰好一个可观看屏幕时开始。",
+                Locale::English => {
+                    "Starts only when no media is active and exactly one screen is available."
+                }
+            },
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_enabled(false, egui::Checkbox::new(&mut auto_watch, ""));
+                    ui.label(
+                        RichText::new(match self.locale {
+                            Locale::Chinese => "暂不可开启",
+                            Locale::English => "Not available yet",
+                        })
+                        .weak(),
+                    );
+                });
+            },
+        );
+        ui.separator();
+        let was_developer_mode = self.developer_mode;
+        setting_control_row(
+            ui,
+            match self.locale {
+                Locale::Chinese => "开发者模式",
+                Locale::English => "Developer mode",
+            },
+            match self.locale {
+                Locale::Chinese => "开启后显示本地日志与诊断入口。",
+                Locale::English => "Shows local log and diagnostics tools when enabled.",
+            },
+            |ui| {
+                ui.checkbox(&mut self.developer_mode, "");
+            },
+        );
+        if was_developer_mode && !self.developer_mode {
+            self.settings_pane = SettingsPane::Preferences;
+            self.diagnostics.hide_window();
+        }
+        ui.separator();
+    }
+
+    fn diagnostics_settings(&mut self, ui: &mut egui::Ui) {
+        section_heading(
+            ui,
+            match self.locale {
+                Locale::Chinese => "连接信息",
+                Locale::English => "Connection information",
+            },
+        );
         egui::Grid::new("connection-info")
             .num_columns(2)
             .spacing([18.0, 8.0])
@@ -693,6 +997,7 @@ impl MoqCastApp {
             ui.colored_label(Color32::LIGHT_RED, error);
         }
         ui.separator();
+        ui.add_space(20.0);
         self.diagnostics.show_settings(ui, self.locale);
     }
 }
@@ -752,7 +1057,7 @@ impl eframe::App for MoqCastApp {
                 self.top_bar(ui);
             });
         egui::CentralPanel::default().show(ui, |ui| {
-            let content = content_rect(ui.available_rect_before_wrap(), self.page, viewing);
+            let content = content_rect(ui.available_rect_before_wrap());
             ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
                 ui.set_width(content.width());
                 if let Some(error) = &self.command_error {
@@ -762,6 +1067,7 @@ impl eframe::App for MoqCastApp {
                 match self.page {
                     Page::Nearby => self.nearby(ui),
                     Page::ScreenShare => self.screen_share(ui),
+                    Page::Watch => self.watch(ui),
                     Page::Settings => {
                         egui::ScrollArea::vertical().show(ui, |ui| self.settings(ui));
                     }
@@ -778,6 +1084,18 @@ impl eframe::App for MoqCastApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(
+            STORAGE_LOCALE,
+            match self.locale {
+                Locale::Chinese => "zh",
+                Locale::English => "en",
+            }
+            .to_owned(),
+        );
+        storage.set_string(
+            STORAGE_DEVELOPER_MODE,
+            if self.developer_mode { "true" } else { "false" }.to_owned(),
+        );
+        storage.set_string(
             STORAGE_DETAILED_DIAGNOSTICS,
             if self.diagnostics.detailed() {
                 "true"
@@ -786,6 +1104,156 @@ impl eframe::App for MoqCastApp {
             }
             .to_owned(),
         );
+    }
+}
+
+fn page_header(ui: &mut egui::Ui, title: &str, description: &str) {
+    ui.label(RichText::new(title).size(28.0).strong());
+    ui.add_space(4.0);
+    ui.label(RichText::new(description).color(ui.visuals().weak_text_color()));
+    ui.add_space(24.0);
+}
+
+fn section_heading(ui: &mut egui::Ui, title: &str) {
+    ui.label(RichText::new(title).size(18.0).strong());
+    ui.add_space(6.0);
+}
+
+fn setting_control_row(
+    ui: &mut egui::Ui,
+    title: &str,
+    help: &str,
+    control: impl FnOnce(&mut egui::Ui),
+) {
+    ui.horizontal(|ui| {
+        ui.set_min_height(56.0);
+        ui.vertical(|ui| {
+            ui.label(RichText::new(title).strong());
+            if !help.is_empty() {
+                ui.small(help);
+            }
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), control);
+    });
+}
+
+fn setting_value_row(ui: &mut egui::Ui, title: &str, help: &str, value: &str) {
+    setting_control_row(ui, title, help, |ui| {
+        ui.label(
+            RichText::new(value)
+                .strong()
+                .color(ui.visuals().weak_text_color()),
+        );
+    });
+}
+
+fn selected_peer(peers: &[PeerView], selected: Option<&str>) -> Option<String> {
+    if let Some(selected) = selected
+        && peers.iter().any(|peer| peer.id == selected)
+    {
+        return Some(selected.to_owned());
+    }
+    peers.first().map(|peer| peer.id.clone())
+}
+
+fn nearby_uses_stacked_layout(width: f32) -> bool {
+    width < NEARBY_SPLIT_MIN_WIDTH
+}
+
+fn peer_display_name(locale: Locale, id: &str) -> String {
+    let compact: String = id
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect();
+    let suffix: String = compact
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>()
+        .to_ascii_uppercase();
+    let base = match locale {
+        Locale::Chinese => "附近设备",
+        Locale::English => "Nearby device",
+    };
+    if suffix.is_empty() {
+        base.to_owned()
+    } else {
+        format!("{base} · {suffix}")
+    }
+}
+
+fn peer_status(locale: Locale, peer: &PeerView) -> &'static str {
+    if peer.screen == ScreenAvailability::Available {
+        return match locale {
+            Locale::Chinese => "屏幕可观看",
+            Locale::English => "Screen available",
+        };
+    }
+    match (locale, peer.transport.phase) {
+        (Locale::Chinese, TransportPhaseView::Connected) => "已连接",
+        (Locale::English, TransportPhaseView::Connected) => "Connected",
+        (Locale::Chinese, TransportPhaseView::Connecting) => "正在连接",
+        (Locale::English, TransportPhaseView::Connecting) => "Connecting",
+        (Locale::Chinese, TransportPhaseView::Rejected) => "无法验证设备",
+        (Locale::English, TransportPhaseView::Rejected) => "Could not verify device",
+        (Locale::Chinese, TransportPhaseView::Failed) => "连接不可用",
+        (Locale::English, TransportPhaseView::Failed) => "Connection unavailable",
+        (Locale::Chinese, TransportPhaseView::Disconnected) => "等待设备",
+        (Locale::English, TransportPhaseView::Disconnected) => "Waiting for device",
+        (Locale::Chinese, TransportPhaseView::Waiting) => "等待设备",
+        (Locale::English, TransportPhaseView::Waiting) => "Waiting for device",
+    }
+}
+
+fn discovery_summary(locale: Locale, snapshot: &RuntimeSnapshot) -> String {
+    match (locale, snapshot.discovery) {
+        (Locale::Chinese, DiscoveryState::Ready) => {
+            format!("{} 台附近设备", snapshot.present_peer_count())
+        }
+        (Locale::English, DiscoveryState::Ready) => {
+            format!("{} nearby", snapshot.present_peer_count())
+        }
+        (Locale::Chinese, DiscoveryState::Empty) => "正在扫描".to_owned(),
+        (Locale::English, DiscoveryState::Empty) => "Scanning".to_owned(),
+        (Locale::Chinese, DiscoveryState::Starting) => "正在启动".to_owned(),
+        (Locale::English, DiscoveryState::Starting) => "Starting".to_owned(),
+        (Locale::Chinese, DiscoveryState::Failed) => "附近服务不可用".to_owned(),
+        (Locale::English, DiscoveryState::Failed) => "Nearby unavailable".to_owned(),
+        (Locale::Chinese, DiscoveryState::Stopped) => "扫描已停止".to_owned(),
+        (Locale::English, DiscoveryState::Stopped) => "Scan stopped".to_owned(),
+    }
+}
+
+fn share_audio_status(locale: Locale, phase: AudioPhase) -> &'static str {
+    match (locale, phase) {
+        (Locale::Chinese, AudioPhase::Publishing) => "正在共享",
+        (Locale::English, AudioPhase::Publishing) => "Sharing",
+        (Locale::Chinese, AudioPhase::Preparing) => "正在准备",
+        (Locale::English, AudioPhase::Preparing) => "Preparing",
+        (Locale::Chinese, AudioPhase::Silent) => "当前静音",
+        (Locale::English, AudioPhase::Silent) => "Silent",
+        (Locale::Chinese, AudioPhase::Recovering) => "正在恢复",
+        (Locale::English, AudioPhase::Recovering) => "Recovering",
+        (Locale::Chinese, AudioPhase::Failed) => "不可用，视频继续",
+        (Locale::English, AudioPhase::Failed) => "Unavailable, video continues",
+        (Locale::Chinese, AudioPhase::Stopping) => "正在停止",
+        (Locale::English, AudioPhase::Stopping) => "Stopping",
+        (Locale::Chinese, AudioPhase::Idle) => "随共享开启",
+        (Locale::English, AudioPhase::Idle) => "Starts with sharing",
+    }
+}
+
+fn watch_stage_size(available: egui::Vec2) -> egui::Vec2 {
+    let available = egui::vec2(available.x.max(1.0), available.y.max(1.0));
+    let width = available.x.min(960.0);
+    let height = width * 9.0 / 16.0;
+    if height <= available.y {
+        egui::vec2(width, height)
+    } else {
+        egui::vec2(available.y * 16.0 / 9.0, available.y)
     }
 }
 
@@ -828,17 +1296,6 @@ fn video_encoding_label(locale: Locale, policy: VideoEncodingPolicy) -> &'static
     }
 }
 
-fn phase(phase: TransportPhaseView) -> &'static str {
-    match phase {
-        TransportPhaseView::Waiting => "waiting",
-        TransportPhaseView::Connecting => "connecting",
-        TransportPhaseView::Connected => "connected",
-        TransportPhaseView::Rejected => "rejected",
-        TransportPhaseView::Failed => "failed",
-        TransportPhaseView::Disconnected => "disconnected",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -863,11 +1320,11 @@ mod tests {
 
     #[test]
     fn routing_and_language_are_independent() {
-        let page = Page::Settings;
         let locale = Locale::English;
-        assert_eq!(page, Page::Settings);
         assert_eq!(locale.settings(), "Settings");
+        assert_eq!(locale.watch(), "Watch");
         assert_ne!(Page::Nearby, Page::ScreenShare);
+        assert_ne!(Page::Watch, Page::Settings);
     }
 
     #[test]
@@ -905,22 +1362,59 @@ mod tests {
         assert!(!parse_stored_bool(Some("false".to_owned())));
         assert!(!parse_stored_bool(Some("unexpected".to_owned())));
         assert!(parse_stored_bool(Some("true".to_owned())));
+        assert_eq!(parse_stored_locale(None), Locale::Chinese);
+        assert_eq!(parse_stored_locale(Some("zh".to_owned())), Locale::Chinese);
+        assert_eq!(parse_stored_locale(Some("en".to_owned())), Locale::English);
     }
 
     #[test]
-    fn active_player_content_keeps_panel_height_without_expanding_other_pages() {
+    fn content_uses_the_shared_desktop_width_and_keeps_panel_height() {
         let available =
             egui::Rect::from_min_size(egui::pos2(20.0, 30.0), egui::vec2(1200.0, 700.0));
 
-        let player = content_rect(available, Page::ScreenShare, true);
-        assert_eq!(player.min, egui::pos2(20.0, 48.0));
-        assert_eq!(player.size(), egui::vec2(1200.0, 682.0));
+        let content = content_rect(available);
+        assert_eq!(content.min, egui::pos2(100.0, 54.0));
+        assert_eq!(content.size(), egui::vec2(1040.0, 676.0));
+    }
 
-        for page in [Page::Nearby, Page::Settings] {
-            let content = content_rect(available, page, true);
-            assert_eq!(content.min, egui::pos2(170.0, 48.0));
-            assert_eq!(content.size(), egui::vec2(900.0, 682.0));
-        }
+    #[test]
+    fn nearby_layout_and_selection_are_stable_across_resizes_and_lost_peers() {
+        assert!(!nearby_uses_stacked_layout(900.0));
+        assert!(nearby_uses_stacked_layout(700.0));
+
+        let peers = vec![peer("alpha"), peer("beta")];
+        assert_eq!(selected_peer(&peers, Some("beta")).as_deref(), Some("beta"));
+        assert_eq!(
+            selected_peer(&peers, Some("lost")).as_deref(),
+            Some("alpha")
+        );
+        assert_eq!(selected_peer(&[], Some("alpha")), None);
+    }
+
+    #[test]
+    fn nearby_names_and_statuses_hide_transport_internals() {
+        let mut visible = peer("0123-abcd");
+        visible.transport.phase = TransportPhaseView::Connecting;
+        assert_eq!(
+            peer_display_name(Locale::Chinese, &visible.id),
+            "附近设备 · ABCD"
+        );
+        assert_eq!(peer_status(Locale::English, &visible), "Connecting");
+
+        visible.screen = ScreenAvailability::Available;
+        assert_eq!(peer_status(Locale::Chinese, &visible), "屏幕可观看");
+    }
+
+    #[test]
+    fn watch_stage_is_stable_sixteen_by_nine_and_height_bounded() {
+        assert_eq!(
+            watch_stage_size(egui::vec2(1000.0, 700.0)),
+            egui::vec2(960.0, 540.0)
+        );
+        assert_eq!(
+            watch_stage_size(egui::vec2(800.0, 300.0)),
+            egui::vec2(533.333_3, 300.0)
+        );
     }
 
     #[test]
@@ -973,5 +1467,18 @@ mod tests {
                 ..current
             },
         ));
+    }
+
+    fn peer(id: &str) -> PeerView {
+        PeerView {
+            id: id.to_owned(),
+            candidates: Vec::new(),
+            should_dial: true,
+            authenticated_discovery: false,
+            tls_pinned: true,
+            present: true,
+            transport: Default::default(),
+            screen: ScreenAvailability::Unavailable,
+        }
     }
 }
