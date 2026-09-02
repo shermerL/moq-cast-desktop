@@ -1,14 +1,15 @@
 use std::borrow::Cow;
 
 use eframe::egui::{
-    self, Align, Context, Frame, Id, Layout, Margin, ScrollArea, Stroke, Ui, ViewportCommand, vec2,
+    self, Align, Context, Frame, Id, Layout, Margin, ScrollArea, Sense, Stroke, Ui, UiBuilder,
+    ViewportCommand, vec2,
 };
 use moqcast_ui::{
     BadgeTone, ButtonSpec, COLORS, CheckboxSpec, ControlRole, DeviceBadgeSpec, DeviceListItemSpec,
     DeviceListSpec, DeviceRowSpec, DialogSpec, IconButtonSpec, Interaction, NavItemSpec,
     SelectSpec, SettingRowSpec, Size, Spacing, StatePanelKind, StatePanelSpec, SwitchSpec, Theme,
     TypographyRole, checkbox, control_button, device_list, device_row, dialog, install_ui_font,
-    nav_item, page_header, player_icon_button, player_stage, player_toolbar, primary_button,
+    nav_item, page_header, player_button, player_icon_button, player_surface, primary_button,
     secondary_button, section_header, select, setting_row, state_panel, status_badge, switch,
     typography,
 };
@@ -109,14 +110,7 @@ impl Catalog {
 impl eframe::App for Catalog {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         Theme.apply(ui.ctx());
-        Frame::new()
-            .fill(COLORS.canvas.into())
-            .inner_margin(Margin::same(Spacing::LG as i8))
-            .show(ui, |ui| {
-                fixture_toolbar(self, ui);
-                ui.add_space(Spacing::LG);
-                ScrollArea::vertical().show(ui, |ui| catalog_content(self, ui));
-            });
+        catalog_root(self, ui);
 
         if self.dialog_open {
             let cancel_id = Id::new("catalog-dialog-cancel");
@@ -153,6 +147,25 @@ impl eframe::App for Catalog {
             }
         }
     }
+}
+
+fn catalog_root(catalog: &mut Catalog, ui: &mut Ui) -> egui::Response {
+    let rect = ui.available_rect_before_wrap();
+    let response = ui.allocate_rect(rect, Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, COLORS.canvas);
+    let inner = rect.shrink(Spacing::LG);
+    let mut root = ui.new_child(
+        UiBuilder::new()
+            .max_rect(inner)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    root.set_min_size(inner.size());
+    fixture_toolbar(catalog, &mut root);
+    root.add_space(Spacing::LG);
+    ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(&mut root, |ui| catalog_content(catalog, ui));
+    response
 }
 
 fn fixture_toolbar(catalog: &mut Catalog, ui: &mut Ui) {
@@ -220,7 +233,7 @@ fn fixture_toolbar(catalog: &mut Catalog, ui: &mut Ui) {
 
 fn catalog_content(catalog: &mut Catalog, ui: &mut Ui) {
     let platform = PlatformFixture::ALL[catalog.platform];
-    let width = ui.available_width().min(Size::PAGE_WIDE_MAX);
+    let width = catalog_content_width(ui.available_width());
     ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
         page_header(
             ui,
@@ -239,6 +252,10 @@ fn catalog_content(catalog: &mut Catalog, ui: &mut Ui) {
         ui.add_space(Spacing::XXL);
         state_catalog(catalog, ui);
     });
+}
+
+fn catalog_content_width(available_width: f32) -> f32 {
+    available_width.min(Size::PAGE_WIDE_MAX)
 }
 
 fn navigation_catalog(catalog: &Catalog, ui: &mut Ui) {
@@ -512,37 +529,37 @@ fn fixture_label(ui: &mut Ui, label: &str) {
 
 fn player_catalog(catalog: &Catalog, ui: &mut Ui) {
     section_header(ui, catalog.text("直播播放器", "Live player"), None);
-    player_stage(ui, |ui| {
-        ui.centered_and_justified(|ui| {
+    let _ = player_surface(
+        ui,
+        |ui| {
+            ui.centered_and_justified(|ui| {
+                ui.label(typography(
+                    catalog.text(
+                        "16:9 舞台 · contain · 允许黑边",
+                        "16:9 stage · contain · letterbox allowed",
+                    ),
+                    TypographyRole::Body,
+                    COLORS.player_muted.into(),
+                ));
+            });
+        },
+        |ui| {
+            status_badge(ui, "LIVE", BadgeTone::Danger);
             ui.label(typography(
-                catalog.text(
-                    "16:9 舞台 · contain · 允许黑边",
-                    "16:9 stage · contain · letterbox allowed",
-                ),
-                TypographyRole::Body,
-                COLORS.player_muted.into(),
+                "moqcast.screen/device",
+                TypographyRole::Mono,
+                COLORS.player_text.into(),
             ));
-        });
-    });
-    ui.add_space(Size::PLAYER_SPACING);
-    let _ = player_toolbar(ui, |ui| {
-        status_badge(ui, "LIVE", BadgeTone::Danger);
-        ui.label(typography(
-            "moqcast.screen/device",
-            TypographyRole::Mono,
-            COLORS.player_text.into(),
-        ));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            player_icon_button(
-                ui,
-                IconButtonSpec::player("⛶", catalog.text("全屏", "Fullscreen")),
-            );
-            player_icon_button(
-                ui,
-                IconButtonSpec::player("■", catalog.text("停止观看", "Stop watching")),
-            );
-        });
-    });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                player_icon_button(
+                    ui,
+                    IconButtonSpec::player("⛶", catalog.text("全屏", "Fullscreen")),
+                )
+                .on_hover_text(catalog.text("全屏", "Fullscreen"));
+                player_button(ui, catalog.text("停止观看", "Stop watching"), true);
+            });
+        },
+    );
 }
 
 fn state_catalog(catalog: &Catalog, ui: &mut Ui) {
@@ -560,4 +577,31 @@ fn state_catalog(catalog: &Catalog, ui: &mut Ui) {
             primary_button(ui, catalog.text("开始扫描", "Start scan"), true);
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_root_consumes_the_available_viewport() {
+        egui::__run_test_ui(|ui| {
+            ui.set_width(1000.0);
+            ui.set_height(700.0);
+            let available = ui.available_rect_before_wrap();
+            let mut catalog = Catalog::new(ui.ctx());
+            let response = catalog_root(&mut catalog, ui);
+
+            assert_eq!(response.rect, available);
+        });
+    }
+
+    #[test]
+    fn catalog_content_uses_available_width_up_to_the_shared_limit() {
+        assert_eq!(catalog_content_width(760.0), 760.0);
+        assert_eq!(
+            catalog_content_width(Size::PAGE_WIDE_MAX + 200.0),
+            Size::PAGE_WIDE_MAX
+        );
+    }
 }

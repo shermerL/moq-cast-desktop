@@ -191,3 +191,25 @@ pub fn icon_button(ui: &mut Ui, spec: IconButtonSpec<'_>) -> Response {
 pub fn player_icon_button(ui: &mut Ui, spec: IconButtonSpec<'_>) -> Response {
     control_button(ui, spec.button)
 }
+
+/// Renders a text command on a dark player toolbar.
+pub fn player_button(ui: &mut Ui, label: &str, enabled: bool) -> Response {
+    control_button(
+        ui,
+        ButtonSpec::new(label, ControlRole::PlayerIcon).enabled(enabled),
+    )
+}
+
+#[cfg(test)]
+mod player_tests {
+    use super::*;
+
+    #[test]
+    fn player_text_commands_are_wider_than_icon_hit_targets() {
+        egui::__run_test_ui(|ui| {
+            let response = player_button(ui, "Stop watching", true);
+            assert!(response.rect.width() > Size::CONTROL);
+            assert_eq!(response.rect.height(), Size::CONTROL);
+        });
+    }
+}

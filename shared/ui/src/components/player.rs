@@ -11,6 +11,18 @@ pub struct PlayerRects {
     pub toolbar: Rect,
 }
 
+/// Outputs from one coupled windowed player surface.
+pub struct PlayerSurfaceResponse<S, T> {
+    /// The allocated stage and toolbar rectangles.
+    pub rects: PlayerRects,
+    /// The caller-owned stage content output.
+    pub stage: S,
+    /// The caller-owned toolbar content output.
+    pub toolbar: T,
+    /// The response for the complete player surface.
+    pub response: Response,
+}
+
 /// Resolves a player stage and toolbar from one stable available rectangle.
 pub fn player_rects(available: Rect, fullscreen: bool) -> PlayerRects {
     let available = Rect::from_min_max(
@@ -51,6 +63,32 @@ pub fn player_rects(available: Rect, fullscreen: bool) -> PlayerRects {
     PlayerRects { stage, toolbar }
 }
 
+/// Renders one windowed player whose stage and attached toolbar share a width.
+pub fn player_surface<S, T>(
+    ui: &mut Ui,
+    stage: impl FnOnce(&mut Ui) -> S,
+    toolbar: impl FnOnce(&mut Ui) -> T,
+) -> PlayerSurfaceResponse<S, T> {
+    let available = ui.available_rect_before_wrap();
+    let available = Rect::from_min_size(
+        available.min,
+        vec2(
+            available.width().min(Size::PAGE_MEDIUM_MAX),
+            available.height(),
+        ),
+    );
+    let rects = player_rects(available, false);
+    let response = ui.allocate_rect(rects.stage.union(rects.toolbar), Sense::hover());
+    let stage = player_stage_at(ui, rects.stage, stage);
+    let toolbar = player_toolbar_at(ui, rects.toolbar, toolbar);
+    PlayerSurfaceResponse {
+        rects,
+        stage,
+        toolbar,
+        response,
+    }
+}
+
 /// Renders a stable 16:9 dark player stage up to the shared watch width.
 pub fn player_stage<R>(ui: &mut Ui, content: impl FnOnce(&mut Ui) -> R) -> R {
     let width = ui.available_width().min(Size::PAGE_MEDIUM_MAX);
@@ -80,10 +118,9 @@ pub fn player_stage_at<R>(ui: &mut Ui, rect: Rect, content: impl FnOnce(&mut Ui)
 
 /// Renders a fifty-two-point dark toolbar with forty-point controls.
 pub fn player_toolbar<R>(ui: &mut Ui, content: impl FnOnce(&mut Ui) -> R) -> (Response, R) {
-    let (rect, response) = ui.allocate_exact_size(
-        vec2(ui.available_width(), Size::PLAYER_TOOLBAR),
-        Sense::hover(),
-    );
+    let width = ui.available_width().min(Size::PAGE_MEDIUM_MAX);
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(width, Size::PLAYER_TOOLBAR), Sense::hover());
     let inner = player_toolbar_at(ui, rect, content);
     (response, inner)
 }
@@ -134,11 +171,16 @@ mod tests {
     }
 
     #[test]
-    fn player_toolbar_fills_the_available_width() {
+    fn player_toolbar_fills_available_width_up_to_the_player_limit() {
         egui::__run_test_ui(|ui| {
             ui.set_width(640.0);
             let (response, ()) = player_toolbar(ui, |_| ());
             assert_eq!(response.rect.width(), 640.0);
+        });
+        egui::__run_test_ui(|ui| {
+            ui.set_width(Size::PAGE_WIDE_MAX);
+            let (response, ()) = player_toolbar(ui, |_| ());
+            assert_eq!(response.rect.width(), Size::PAGE_MEDIUM_MAX);
         });
     }
 
@@ -148,6 +190,7 @@ mod tests {
         let windowed = player_rects(available, false);
         assert_eq!(windowed.stage.width(), Size::PAGE_MEDIUM_MAX);
         assert_eq!(windowed.stage.width() / windowed.stage.height(), 16.0 / 9.0);
+        assert_eq!(windowed.toolbar.width(), windowed.stage.width());
         assert_eq!(windowed.toolbar.top(), windowed.stage.bottom());
         assert_eq!(windowed.toolbar.height(), Size::PLAYER_TOOLBAR);
         assert_eq!(
@@ -157,21 +200,36 @@ mod tests {
 
         let fullscreen = player_rects(available, true);
         assert_eq!(fullscreen.stage, available);
+        assert_eq!(fullscreen.toolbar.width(), fullscreen.stage.width());
         assert_eq!(fullscreen.toolbar.bottom(), fullscreen.stage.bottom());
         assert_eq!(fullscreen.toolbar.height(), Size::PLAYER_TOOLBAR);
     }
 
     #[test]
-    fn player_stage_and_toolbar_are_adjacent() {
+    fn player_surface_keeps_stage_and_toolbar_equal_width_and_adjacent() {
+        egui::__run_test_ui(|ui| {
+            ui.set_width(Size::PAGE_WIDE_MAX);
+            let output = player_surface(ui, |ui| ui.max_rect(), |ui| ui.max_rect());
+            assert_eq!(output.rects.toolbar.width(), output.rects.stage.width());
+            assert_eq!(output.rects.toolbar.top(), output.rects.stage.bottom());
+            assert_eq!(
+                output.rects.toolbar.bottom() - output.rects.stage.top(),
+                output.rects.stage.height() + Size::PLAYER_TOOLBAR
+            );
+        });
+    }
+
+    #[test]
+    fn player_surface_stays_inside_a_height_constrained_viewport() {
         egui::__run_test_ui(|ui| {
             ui.set_width(640.0);
-            let stage = player_stage(ui, |ui| ui.max_rect());
-            let (toolbar, ()) = player_toolbar(ui, |_| ());
-            assert_eq!(toolbar.rect.top(), stage.bottom());
-            assert_eq!(
-                toolbar.rect.bottom() - stage.top(),
-                stage.height() + Size::PLAYER_TOOLBAR
-            );
+            ui.set_height(300.0);
+            let available = ui.available_rect_before_wrap();
+            let output = player_surface(ui, |_| (), |_| ());
+
+            assert!(output.response.rect.width() <= available.width());
+            assert!(output.response.rect.height() <= available.height());
+            assert_eq!(output.rects.toolbar.bottom(), available.bottom());
         });
     }
 }
