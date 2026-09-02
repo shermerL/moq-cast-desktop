@@ -450,13 +450,6 @@ impl Locale {
         }
     }
 
-    pub(super) fn this_device(self) -> &'static str {
-        match self {
-            Self::Chinese => "本机",
-            Self::English => "This device",
-        }
-    }
-
     pub(super) fn media_idle(self) -> &'static str {
         match self {
             Self::Chinese => "屏幕媒体空闲",

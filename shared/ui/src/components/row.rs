@@ -1,8 +1,16 @@
-use egui::{Align, Id, Layout, Response, Ui, UiBuilder, WidgetInfo, WidgetType, vec2};
+use std::{fmt::Debug, hash::Hash};
+
+use egui::{
+    Align, Id, Label, Layout, Rect, Response, ScrollArea, Ui, UiBuilder, WidgetInfo, WidgetType,
+    containers::scroll_area::ScrollBarVisibility, vec2,
+};
 
 use crate::{COLORS, ControlRole, Interaction, Size, Spacing, TypographyRole, typography};
 
-use super::common::{paint_focus, paint_surface, resolve, sense};
+use super::{
+    common::{effective_enabled, paint_focus, paint_surface, pointing_hand, resolve, sense},
+    state_panel::{BadgeTone, status_badge},
+};
 
 /// Display-only configuration for a settings row.
 #[derive(Clone, Copy, Debug)]
@@ -49,6 +57,91 @@ pub struct DeviceRowSpec<'a> {
     selected: bool,
     enabled: bool,
     preview: Option<Interaction>,
+}
+
+/// Display-only badge attached to a device-list item.
+#[derive(Clone, Copy, Debug)]
+pub struct DeviceBadgeSpec<'a> {
+    label: &'a str,
+    tone: BadgeTone,
+}
+
+impl<'a> DeviceBadgeSpec<'a> {
+    /// Creates a badge with a semantic tone.
+    pub fn new(label: &'a str, tone: BadgeTone) -> Self {
+        Self { label, tone }
+    }
+}
+
+/// Pure presentation data for one item in a shared device list.
+#[derive(Clone, Debug)]
+pub struct DeviceListItemSpec<'a, I> {
+    id: I,
+    title: &'a str,
+    subtitle: Option<&'a str>,
+    badge: Option<DeviceBadgeSpec<'a>>,
+    selected: bool,
+    enabled: bool,
+    preview: Option<Interaction>,
+}
+
+impl<'a, I> DeviceListItemSpec<'a, I> {
+    /// Creates an enabled device item with a stable caller-owned ID.
+    pub fn new(id: I, title: &'a str) -> Self {
+        Self {
+            id,
+            title,
+            subtitle: None,
+            badge: None,
+            selected: false,
+            enabled: true,
+            preview: None,
+        }
+    }
+
+    /// Adds supporting device state or identity copy.
+    pub fn subtitle(mut self, subtitle: &'a str) -> Self {
+        self.subtitle = Some(subtitle);
+        self
+    }
+
+    /// Adds a compact capability or status badge.
+    pub fn badge(mut self, badge: DeviceBadgeSpec<'a>) -> Self {
+        self.badge = Some(badge);
+        self
+    }
+
+    /// Sets the item's selected state.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    /// Sets whether the item accepts pointer or keyboard activation.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Forces a deterministic interaction state for review fixtures.
+    pub fn preview_interaction(mut self, state: Interaction) -> Self {
+        self.preview = Some(state);
+        self
+    }
+}
+
+/// Display-only configuration for a shared device list.
+#[derive(Clone, Copy, Debug)]
+pub struct DeviceListSpec<'a, I> {
+    id: Id,
+    items: &'a [DeviceListItemSpec<'a, I>],
+}
+
+impl<'a, I> DeviceListSpec<'a, I> {
+    /// Creates a device list with a stable scroll-area ID and item slice.
+    pub fn new(id: Id, items: &'a [DeviceListItemSpec<'a, I>]) -> Self {
+        Self { id, items }
+    }
 }
 
 impl<'a> DeviceRowSpec<'a> {
@@ -206,59 +299,170 @@ pub fn device_row<R>(
     spec: DeviceRowSpec<'_>,
     trailing: impl FnOnce(&mut Ui) -> R,
 ) -> (Response, R) {
+    let output = render_device_row(ui, spec, trailing);
+    (output.response, output.inner)
+}
+
+struct DeviceRowOutput<R> {
+    response: Response,
+    inner: R,
+    content_rect: Rect,
+}
+
+fn render_device_row<R>(
+    ui: &mut Ui,
+    spec: DeviceRowSpec<'_>,
+    trailing: impl FnOnce(&mut Ui) -> R,
+) -> DeviceRowOutput<R> {
     let rect = ui
         .allocate_space(vec2(ui.available_width(), Size::DEVICE_ROW))
         .1;
-    let response = ui.interact(rect, spec.id, sense(spec.enabled));
+    let enabled = effective_enabled(spec.enabled, spec.preview);
+    let response = pointing_hand(ui.interact(rect, spec.id, sense(enabled)), enabled);
     let (state, visual) = resolve(
         &response,
         ControlRole::Secondary,
-        spec.enabled,
+        enabled,
         spec.selected,
         spec.preview,
     );
     paint_surface(ui, rect, visual, crate::Radius::MD as u8);
-    let inner = ui
-        .scope_builder(
-            UiBuilder::new()
-                .max_rect(rect.shrink2(vec2(Size::ROW_HORIZONTAL_INSET, Spacing::MD)))
-                .layout(Layout::left_to_right(Align::Center)),
-            |ui| {
-                ui.vertical(|ui| {
-                    ui.label(typography(
-                        spec.title,
-                        TypographyRole::Row,
-                        visual.text.into(),
-                    ));
-                    if let Some(detail) = spec.detail {
-                        ui.label(typography(
-                            detail,
-                            TypographyRole::Meta,
-                            COLORS.muted.into(),
-                        ));
-                    }
-                });
-                let available = ui.available_rect_before_wrap();
-                ui.scope_builder(
-                    UiBuilder::new()
-                        .max_rect(available)
-                        .layout(Layout::right_to_left(Align::Center)),
-                    trailing,
-                )
-                .inner
-            },
-        )
-        .inner;
+    let content_rect = rect.shrink2(vec2(Size::ROW_HORIZONTAL_INSET, Spacing::MD));
+    let mut content_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(content_rect)
+            .layout(Layout::right_to_left(Align::Center)),
+    );
+    content_ui.set_clip_rect(content_rect.intersect(ui.clip_rect()));
+    let inner = trailing(&mut content_ui);
+    let text_rect = content_ui.available_rect_before_wrap();
+    let mut text_ui = content_ui.new_child(
+        UiBuilder::new().max_rect(text_rect).layout(
+            Layout::top_down(Align::Min)
+                .with_main_align(Align::Center)
+                .with_cross_justify(true),
+        ),
+    );
+    text_ui.set_clip_rect(text_rect.intersect(content_ui.clip_rect()));
+    text_ui.spacing_mut().item_spacing.y = Spacing::XS;
+    text_ui.add(
+        Label::new(typography(
+            spec.title,
+            TypographyRole::Row,
+            visual.text.into(),
+        ))
+        .truncate(),
+    );
+    if let Some(detail) = spec.detail {
+        text_ui.add(
+            Label::new(typography(
+                detail,
+                TypographyRole::Meta,
+                COLORS.muted.into(),
+            ))
+            .truncate(),
+        );
+    }
     paint_focus(ui, rect, &response, state, crate::Radius::MD);
     response.widget_info(|| {
         WidgetInfo::selected(
             WidgetType::SelectableLabel,
-            spec.enabled,
+            enabled,
             spec.selected,
             spec.title,
         )
     });
-    (response, inner)
+    DeviceRowOutput {
+        response,
+        inner,
+        content_rect: text_rect,
+    }
+}
+
+/// Renders a scrollable device list and returns the activated stable item ID.
+pub fn device_list<I>(ui: &mut Ui, spec: DeviceListSpec<'_, I>) -> Option<I>
+where
+    I: Clone + Debug + Hash,
+{
+    render_device_list(ui, spec).activated
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+struct DeviceListOutput<I> {
+    activated: Option<I>,
+    row_rects: Vec<Rect>,
+    content_rects: Vec<Rect>,
+    content_rect: Rect,
+    content_cursor_y: f32,
+    viewport_rect: Rect,
+    content_size: egui::Vec2,
+}
+
+fn render_device_list<I>(ui: &mut Ui, spec: DeviceListSpec<'_, I>) -> DeviceListOutput<I>
+where
+    I: Clone + Debug + Hash,
+{
+    let output = ScrollArea::vertical()
+        .id_salt(spec.id)
+        .max_height(Size::DEVICE_LIST_MAX_HEIGHT)
+        .auto_shrink([false, true])
+        .scroll_bar_visibility(ScrollBarVisibility::VisibleWhenNeeded)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let item_spacing_y = ui.spacing().item_spacing.y;
+            ui.spacing_mut().item_spacing.y = Spacing::NONE;
+            let mut activated = None;
+            let mut row_rects = Vec::with_capacity(spec.items.len());
+            let mut content_rects = Vec::with_capacity(spec.items.len());
+
+            for (index, item) in spec.items.iter().enumerate() {
+                if index > 0 {
+                    ui.add_space(Spacing::SM);
+                }
+                let badge = item.badge;
+                let mut row_spec = DeviceRowSpec::new(spec.id.with(&item.id), item.title)
+                    .selected(item.selected)
+                    .enabled(item.enabled);
+                if let Some(subtitle) = item.subtitle {
+                    row_spec = row_spec.detail(subtitle);
+                }
+                if let Some(preview) = item.preview {
+                    row_spec = row_spec.preview_interaction(preview);
+                }
+                let output = render_device_row(ui, row_spec, |ui| {
+                    if let Some(badge) = badge {
+                        status_badge(ui, badge.label, badge.tone);
+                    }
+                });
+                let keyboard_activated = output.response.has_focus()
+                    && ui.input(|input| {
+                        input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+                    });
+                if output.response.clicked() || keyboard_activated {
+                    activated = Some(item.id.clone());
+                }
+                row_rects.push(output.response.rect);
+                content_rects.push(output.content_rect);
+            }
+            let content_cursor_y = ui.next_widget_position().y;
+            ui.spacing_mut().item_spacing.y = item_spacing_y;
+            (activated, row_rects, content_rects, content_cursor_y)
+        });
+    let (activated, row_rects, content_rects, content_cursor_y) = output.inner;
+    let content_rect = row_rects
+        .iter()
+        .copied()
+        .reduce(Rect::union)
+        .unwrap_or(Rect::NOTHING);
+    DeviceListOutput {
+        activated,
+        row_rects,
+        content_rects,
+        content_rect,
+        content_cursor_y,
+        viewport_rect: output.inner_rect,
+        content_size: output.content_size,
+    }
 }
 
 #[cfg(test)]
@@ -296,5 +500,162 @@ mod tests {
                 assert!(response.rect.right() <= row_bounds.left() + width);
             });
         }
+    }
+
+    #[test]
+    fn adjacent_device_rows_consume_their_full_rect_without_overlap() {
+        for (case, width) in [Size::NEARBY_LIST, 240.0].into_iter().enumerate() {
+            egui::__run_test_ui(|ui| {
+                ui.set_width(width);
+                ui.spacing_mut().item_spacing.y = Spacing::SM;
+                let (first, ()) = device_row(
+                    ui,
+                    DeviceRowSpec::new(Id::new(("device-row", case, 1)), "First device")
+                        .detail("Available"),
+                    |_| {},
+                );
+                let (second, ()) = device_row(
+                    ui,
+                    DeviceRowSpec::new(Id::new(("device-row", case, 2)), "Second device")
+                        .detail("Available"),
+                    |_| {},
+                );
+
+                assert_eq!(first.rect.height(), Size::DEVICE_ROW);
+                assert_eq!(second.rect.height(), Size::DEVICE_ROW);
+                assert_eq!(second.rect.top() - first.rect.bottom(), Spacing::SM);
+                assert_eq!(ui.min_rect().bottom(), second.rect.bottom());
+            });
+        }
+    }
+
+    #[test]
+    fn device_list_keeps_standard_and_narrow_rows_disjoint_without_tail_spacing() {
+        for (case, width) in [Size::NEARBY_LIST, 240.0].into_iter().enumerate() {
+            egui::__run_test_ui(|ui| {
+                ui.set_width(width);
+                let items = [
+                    DeviceListItemSpec::new("peer-a", "First device")
+                        .subtitle("Discovered")
+                        .badge(DeviceBadgeSpec::new("Found", BadgeTone::Neutral))
+                        .preview_interaction(Interaction::Hovered),
+                    DeviceListItemSpec::new("peer-b", "Second device")
+                        .subtitle("Connected · A1B2")
+                        .badge(DeviceBadgeSpec::new("Connected", BadgeTone::Info))
+                        .selected(true),
+                    DeviceListItemSpec::new("peer-c", "Third device")
+                        .subtitle("Unavailable · C3D4")
+                        .badge(DeviceBadgeSpec::new("Unavailable", BadgeTone::Warning))
+                        .enabled(false)
+                        .preview_interaction(Interaction::Focused),
+                ];
+                let output = render_device_list(
+                    ui,
+                    DeviceListSpec::new(Id::new(("device-list-geometry", case)), &items),
+                );
+
+                assert_eq!(output.row_rects.len(), items.len());
+                for pair in output.row_rects.windows(2) {
+                    assert!(!pair[0].intersects(pair[1]));
+                    assert_eq!(pair[1].top() - pair[0].bottom(), Spacing::SM);
+                }
+                for (row, content) in output.row_rects.iter().zip(&output.content_rects) {
+                    assert!(row.contains(content.min));
+                    assert!(row.contains(content.max));
+                    assert!(content.width() >= 0.0);
+                }
+                let last = output.row_rects.last().expect("fixture is not empty");
+                assert_eq!(output.content_rect.bottom(), last.bottom());
+                assert_eq!(output.content_cursor_y, last.bottom());
+                assert!(output.content_size.y <= output.viewport_rect.height());
+            });
+        }
+    }
+
+    #[test]
+    fn long_and_duplicate_device_names_stay_clipped_inside_fixed_rows() {
+        egui::__run_test_ui(|ui| {
+            ui.set_width(240.0);
+            let items = [
+                DeviceListItemSpec::new(
+                    "peer-cn",
+                    "会议室里用于演示和跨设备联调的超长中文设备名称",
+                )
+                .subtitle("同名设备 · 7F2A")
+                .badge(DeviceBadgeSpec::new("可观看", BadgeTone::Info)),
+                DeviceListItemSpec::new(
+                    "peer-en",
+                    "Conference room presentation and interoperability workstation",
+                )
+                .subtitle("Same name · 9C4D")
+                .badge(DeviceBadgeSpec::new("Watch", BadgeTone::Info)),
+            ];
+            let output =
+                render_device_list(ui, DeviceListSpec::new(Id::new("long-device-list"), &items));
+
+            for (row, content) in output.row_rects.iter().zip(&output.content_rects) {
+                assert_eq!(row.height(), Size::DEVICE_ROW);
+                assert!(row.contains(content.min));
+                assert!(row.contains(content.max));
+            }
+        });
+    }
+
+    #[test]
+    fn long_device_lists_scroll_and_keep_the_last_row_tail_free() {
+        egui::__run_test_ui(|ui| {
+            ui.set_width(Size::NEARBY_LIST);
+            let titles = (1..=7)
+                .map(|index| format!("Review device {index}"))
+                .collect::<Vec<_>>();
+            let items = titles
+                .iter()
+                .enumerate()
+                .map(|(index, title)| {
+                    DeviceListItemSpec::new(index, title.as_str())
+                        .subtitle("Review fixture")
+                        .badge(DeviceBadgeSpec::new(
+                            if index % 2 == 0 { "Found" } else { "Watch" },
+                            if index % 2 == 0 {
+                                BadgeTone::Neutral
+                            } else {
+                                BadgeTone::Info
+                            },
+                        ))
+                })
+                .collect::<Vec<_>>();
+            let output = render_device_list(
+                ui,
+                DeviceListSpec::new(Id::new("scroll-device-list"), &items),
+            );
+
+            assert_eq!(output.row_rects.len(), 7);
+            assert!(output.content_size.y > output.viewport_rect.height());
+            assert!(output.viewport_rect.height() <= Size::DEVICE_LIST_MAX_HEIGHT);
+            for pair in output.row_rects.windows(2) {
+                assert!(!pair[0].intersects(pair[1]));
+                assert_eq!(pair[1].top() - pair[0].bottom(), Spacing::SM);
+            }
+            let first = output.row_rects.first().expect("fixture is not empty");
+            let last = output.row_rects.last().expect("fixture is not empty");
+            assert_eq!(output.content_rect.top(), first.top());
+            assert_eq!(output.content_rect.bottom(), last.bottom());
+            assert_eq!(output.content_cursor_y, last.bottom());
+        });
+    }
+
+    #[test]
+    fn empty_device_lists_do_not_activate_or_allocate_rows() {
+        egui::__run_test_ui(|ui| {
+            ui.set_width(Size::NEARBY_LIST);
+            let items: [DeviceListItemSpec<'_, u8>; 0] = [];
+            let output = render_device_list(
+                ui,
+                DeviceListSpec::new(Id::new("empty-device-list"), &items),
+            );
+            assert!(output.activated.is_none());
+            assert!(output.row_rects.is_empty());
+            assert!(output.content_rects.is_empty());
+        });
     }
 }

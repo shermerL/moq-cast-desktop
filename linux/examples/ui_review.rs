@@ -4,12 +4,13 @@ use std::borrow::Cow;
 
 use eframe::egui::{self, Align, Frame, Layout, ScrollArea, Sense};
 use moqcast_ui::{
-    BadgeTone, COLORS, DetailRowSpec, DeviceRowSpec, IconButtonSpec, NavItemSpec, PageWidth,
-    SelectSpec, SettingRowSpec, Size, Spacing, StatePanelKind, StatePanelSpec, SwitchSpec, Theme,
-    TypographyRole, app_bar_content_rect, control_button, detail_row, device_row, install_ui_font,
-    nav_item, page_content_rect, page_header, player_icon_button, player_rects, player_stage_at,
-    player_toolbar_at, section_header, select, setting_row, state_panel, status_badge,
-    status_strip, switch, typography,
+    BadgeTone, COLORS, DetailRowSpec, DeviceBadgeSpec, DeviceListItemSpec, DeviceListSpec,
+    IconButtonSpec, NavItemSpec, PageWidth, SelectSpec, SettingRowSpec, Size, Spacing,
+    StatePanelKind, StatePanelSpec, SwitchSpec, Theme, TypographyRole, app_bar_content_rect,
+    control_button, detail_row, device_list, install_ui_font, nav_item, page_content_rect,
+    page_header, player_icon_button, player_rects, player_stage_at, player_toolbar_at,
+    section_header, select, setting_row, state_panel, status_badge, status_strip, switch,
+    typography,
 };
 
 const WORKSPACE_GAP: f32 = Spacing::LG;
@@ -234,46 +235,39 @@ fn nearby(ui: &mut egui::Ui, selected: &mut usize, locale: Locale) {
 }
 
 fn review_device_list(ui: &mut egui::Ui, selected: &mut usize, locale: Locale) {
-    ui.spacing_mut().item_spacing.y = Spacing::XS;
-    for (index, (name, detail)) in [
+    let fixtures = [
         (
             locale.text("客厅显示器", "Living room display"),
             locale.text("屏幕可观看", "Screen available"),
+            "review-peer-a",
         ),
         (
-            locale.text("工作电脑", "Work laptop"),
+            locale.text("客厅显示器", "Living room display"),
             locale.text("已连接", "Connected"),
+            "review-peer-b",
         ),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        if index > 0 {
-            ui.add_space(Spacing::SM);
-        }
-        let (response, ()) = device_row(
-            ui,
-            DeviceRowSpec::new(egui::Id::new(("review-device", index)), name)
-                .detail(detail)
-                .selected(*selected == index),
-            |ui| {
-                if index == 0 {
-                    status_badge(ui, locale.text("屏幕", "Screen"), BadgeTone::Info);
-                }
-            },
-        );
-        if response.clicked() {
-            *selected = index;
-        }
-        settle_device_row(ui, response.rect);
+    ];
+    let subtitles = fixtures
+        .iter()
+        .map(|(_, detail, id)| format!("{detail} · {}: {id}", locale.text("设备 ID", "Device ID")))
+        .collect::<Vec<_>>();
+    let items = fixtures
+        .iter()
+        .zip(&subtitles)
+        .enumerate()
+        .map(|(index, ((name, detail, _), subtitle))| {
+            DeviceListItemSpec::new(index, *name)
+                .subtitle(subtitle)
+                .badge(DeviceBadgeSpec::new(detail, BadgeTone::Info))
+                .selected(*selected == index)
+        })
+        .collect::<Vec<_>>();
+    if let Some(index) = device_list(
+        ui,
+        DeviceListSpec::new(egui::Id::new("linux-review-devices"), &items),
+    ) {
+        *selected = index;
     }
-}
-
-fn settle_device_row(ui: &mut egui::Ui, rect: egui::Rect) {
-    let item_spacing_y = ui.spacing().item_spacing.y;
-    ui.spacing_mut().item_spacing.y = 0.0;
-    ui.advance_cursor_after_rect(rect);
-    ui.spacing_mut().item_spacing.y = item_spacing_y;
 }
 
 fn review_device_detail(ui: &mut egui::Ui, selected: usize, locale: Locale, available: f32) {
@@ -289,8 +283,12 @@ fn review_device_detail(ui: &mut egui::Ui, selected: usize, locale: Locale, avai
     );
     let rows = [
         (
-            locale.text("附近状态", "Nearby status"),
-            locale.text("已发现", "Discovered"),
+            locale.text("设备 ID", "Device ID"),
+            if selected == 0 {
+                "review-peer-a"
+            } else {
+                "review-peer-b"
+            },
         ),
         (
             locale.text("连接", "Connection"),
@@ -543,31 +541,10 @@ mod tests {
     }
 
     #[test]
-    fn review_device_rows_have_visible_spacing_without_a_trailing_gap() {
-        egui::__run_test_ui(|ui| {
-            ui.set_width(360.0);
-            let (first, second) = ui
-                .vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = Spacing::XS;
-                    let (first, ()) = device_row(
-                        ui,
-                        DeviceRowSpec::new(egui::Id::new("review-first"), "First"),
-                        |_| {},
-                    );
-                    settle_device_row(ui, first.rect);
-                    ui.add_space(Spacing::SM);
-                    let (second, ()) = device_row(
-                        ui,
-                        DeviceRowSpec::new(egui::Id::new("review-second"), "Second"),
-                        |_| {},
-                    );
-                    settle_device_row(ui, second.rect);
-                    assert_eq!(ui.next_widget_position().y, second.rect.bottom());
-                    (first, second)
-                })
-                .inner;
-
-            assert_eq!(second.rect.top() - first.rect.bottom(), Spacing::SM);
-        });
+    fn review_fixture_uses_the_shared_device_list_without_cursor_workarounds() {
+        let source = include_str!("ui_review.rs");
+        assert!(source.contains("device_list("));
+        assert!(source.contains("Device ID"));
+        assert!(!source.contains("settle_device_row"));
     }
 }

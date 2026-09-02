@@ -23,7 +23,10 @@ pub use navigation::{NavItemSpec, nav_item};
 pub use player::{
     PlayerRects, player_rects, player_stage, player_stage_at, player_toolbar, player_toolbar_at,
 };
-pub use row::{DetailRowSpec, DeviceRowSpec, SettingRowSpec, detail_row, device_row, setting_row};
+pub use row::{
+    DetailRowSpec, DeviceBadgeSpec, DeviceListItemSpec, DeviceListSpec, DeviceRowSpec,
+    SettingRowSpec, detail_row, device_list, device_row, setting_row,
+};
 pub use state_panel::{
     BadgeTone, StatePanelKind, StatePanelSpec, state_panel, status_badge, status_strip,
 };

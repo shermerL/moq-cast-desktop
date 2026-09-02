@@ -161,6 +161,7 @@ pub(crate) struct AppSnapshot {
     pub(crate) capture: Lifecycle<CapabilityPhase>,
     pub(crate) decoder: Lifecycle<CapabilityPhase>,
     pub(crate) local_device_name: Option<String>,
+    pub(crate) local_peer_id: Option<String>,
     pub(crate) peers: BTreeMap<String, PeerSnapshot>,
     pub(crate) remote_screens: BTreeMap<String, ScreenView>,
     pub(crate) inbound_sessions: usize,
@@ -189,6 +190,7 @@ impl Default for AppSnapshot {
             capture: Lifecycle::new(CapabilityPhase::Available),
             decoder: Lifecycle::new(CapabilityPhase::Available),
             local_device_name: local_device_name(),
+            local_peer_id: None,
             peers: BTreeMap::new(),
             remote_screens: BTreeMap::new(),
             inbound_sessions: 0,
@@ -772,6 +774,7 @@ async fn run(
             }
         };
 
+        snapshot.local_peer_id = Some(services.local_peer_id().to_owned());
         snapshot
             .discovery
             .apply(generations.discovery, DiscoveryPhase::Scanning);
@@ -857,6 +860,7 @@ enum SuspendedAction {
 }
 
 fn begin_network_start(snapshot: &mut AppSnapshot) -> NetworkGenerations {
+    snapshot.local_peer_id = None;
     snapshot.peers.clear();
     snapshot.remote_screens.clear();
     snapshot.inbound_sessions = 0;
@@ -880,6 +884,7 @@ fn mark_network_failed(
     snapshot.peers.clear();
     snapshot.remote_screens.clear();
     snapshot.inbound_sessions = 0;
+    snapshot.local_peer_id = None;
     snapshot
         .discovery
         .apply(generations.discovery, DiscoveryPhase::Failed);
@@ -1362,6 +1367,7 @@ fn stop_snapshot(
     snapshot_tx: &watch::Sender<Arc<AppSnapshot>>,
     wake: &Arc<dyn Fn() + Send + Sync>,
 ) {
+    snapshot.local_peer_id = None;
     snapshot.runtime.begin(RuntimePhase::Stopped);
     snapshot.discovery.begin(DiscoveryPhase::Stopped);
     snapshot.session.begin(SessionPhase::Stopped);
@@ -1375,6 +1381,7 @@ fn suspend_snapshot(
     snapshot_tx: &watch::Sender<Arc<AppSnapshot>>,
     wake: &Arc<dyn Fn() + Send + Sync>,
 ) {
+    snapshot.local_peer_id = None;
     snapshot.runtime.begin(RuntimePhase::Suspended);
     snapshot.discovery.begin(DiscoveryPhase::Stopped);
     snapshot.session.begin(SessionPhase::Stopped);
@@ -1769,7 +1776,9 @@ mod tests {
     #[test]
     fn stale_network_generation_cannot_mutate_snapshot() {
         let mut snapshot = AppSnapshot::default();
+        snapshot.local_peer_id = Some("previous-run".to_owned());
         let stale = begin_network_start(&mut snapshot);
+        assert!(snapshot.local_peer_id.is_none());
         apply_network_event(
             &mut snapshot,
             stale.discovery,
@@ -1798,6 +1807,20 @@ mod tests {
         assert_eq!(snapshot.session.phase(), SessionPhase::Starting);
         assert_eq!(snapshot.discovery.generation(), current.discovery);
         assert_eq!(snapshot.session.generation(), current.session);
+    }
+
+    #[test]
+    fn failed_network_start_clears_the_current_run_peer_id() {
+        let mut snapshot = AppSnapshot::default();
+        let generation = begin_network_start(&mut snapshot);
+        snapshot.local_peer_id = Some("failed-run".to_owned());
+
+        assert!(mark_network_failed(
+            &mut snapshot,
+            generation,
+            NearbyIssue::ServicesStopped,
+        ));
+        assert!(snapshot.local_peer_id.is_none());
     }
 
     #[test]

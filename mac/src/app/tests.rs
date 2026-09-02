@@ -175,6 +175,24 @@ fn ordinary_ui_copy_keeps_internal_provenance_private() {
 }
 
 #[test]
+fn identity_copy_shows_current_run_and_remote_peer_ids_without_provenance() {
+    let local = local_device_description(
+        Locale::English,
+        "Mac Studio",
+        "Nearby is ready",
+        Some("local-peer"),
+    );
+    let remote = peer_list_subtitle(Locale::English, "remote-peer", "Connected");
+
+    assert_eq!(local_device_id_label(Locale::English), "This device ID");
+    assert_eq!(remote_device_id_label(Locale::English), "Device ID");
+    assert!(local.contains("Current run: local-peer"));
+    assert!(remote.contains("Device ID: remote-peer"));
+    assert!(!local.contains("fingerprint"));
+    assert!(!remote.contains("fingerprint"));
+}
+
+#[test]
 fn share_action_requires_permission_source_and_idle_media() {
     let mut snapshot = AppSnapshot::default();
     assert!(!share_action_available(

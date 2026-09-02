@@ -2,10 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use eframe::egui::{self, Key};
+use eframe::egui;
 use moqcast_ui::{
-    DetailRowSpec, DeviceRowSpec, SettingRowSpec, Size, Spacing, detail_row, device_row,
-    section_header, setting_row,
+    DetailRowSpec, DeviceBadgeSpec, DeviceListItemSpec, DeviceListSpec, SettingRowSpec, Size,
+    Spacing, detail_row, device_list, section_header, setting_row,
 };
 
 use super::super::components::{self, BadgeTone, primary_button, secondary_button, status_badge};
@@ -72,10 +72,15 @@ fn workspace_toolbar(
         DiscoveryState::Empty => (locale.no_devices(), BadgeTone::Neutral),
         DiscoveryState::Error => (locale.discovery_error(), BadgeTone::Error),
     };
-    let description = format!("{local_device_name} · {status}");
+    let description = local_device_description(
+        locale,
+        local_device_name,
+        status,
+        snapshot.local_peer_id.as_deref(),
+    );
     setting_row(
         ui,
-        SettingRowSpec::new(locale.this_device()).description(&description),
+        SettingRowSpec::new(device_id_label(locale)).description(&description),
         |ui| {
             let label = if discovery_active {
                 locale.stop_scan()
@@ -146,40 +151,32 @@ fn show_device_list(
     snapshot: &AppSnapshot,
     selected_peer: &mut Option<String>,
 ) {
-    ui.spacing_mut().item_spacing.y = Spacing::XS;
-    for (index, (peer_id, peer)) in snapshot.peers.iter().enumerate() {
-        if index > 0 {
-            ui.add_space(Spacing::SM);
-        }
-        let selectable = peer_can_be_selected(peer);
-        let selected = selected_peer.as_deref() == Some(peer_id.as_str());
-        let summary = peer_row_summary(locale, peer);
-        let (response, ()) = device_row(
-            ui,
-            DeviceRowSpec::new(egui::Id::new(("linux-nearby-peer", peer_id)), &peer.name)
-                .detail(summary)
-                .selected(selected)
-                .enabled(selectable),
-            |ui| {
-                if peer.screen == ScreenAvailability::Available {
-                    status_badge(ui, locale.screen_available(), BadgeTone::Info);
-                }
-            },
-        );
-        let keyboard_activated = response.has_focus()
-            && ui.input(|input| input.key_pressed(Key::Enter) || input.key_pressed(Key::Space));
-        if response.clicked() || keyboard_activated {
-            *selected_peer = Some(peer_id.clone());
-        }
-        settle_device_row(ui, response.rect);
+    let subtitles = snapshot
+        .peers
+        .iter()
+        .map(|(peer_id, peer)| peer_list_subtitle(locale, peer, peer_id))
+        .collect::<Vec<_>>();
+    let items = snapshot
+        .peers
+        .iter()
+        .zip(&subtitles)
+        .map(|((peer_id, peer), subtitle)| {
+            DeviceListItemSpec::new(peer_id.clone(), &peer.name)
+                .subtitle(subtitle)
+                .badge(DeviceBadgeSpec::new(
+                    peer_row_summary(locale, peer),
+                    peer_badge_tone(peer),
+                ))
+                .selected(selected_peer.as_deref() == Some(peer_id.as_str()))
+                .enabled(peer_can_be_selected(peer))
+        })
+        .collect::<Vec<_>>();
+    if let Some(peer_id) = device_list(
+        ui,
+        DeviceListSpec::new(egui::Id::new("linux-nearby-peers"), &items),
+    ) {
+        *selected_peer = Some(peer_id);
     }
-}
-
-fn settle_device_row(ui: &mut egui::Ui, rect: egui::Rect) {
-    let item_spacing_y = ui.spacing().item_spacing.y;
-    ui.spacing_mut().item_spacing.y = 0.0;
-    ui.advance_cursor_after_rect(rect);
-    ui.spacing_mut().item_spacing.y = item_spacing_y;
 }
 
 fn show_device_detail(
@@ -197,6 +194,13 @@ fn show_device_detail(
     };
 
     section_header(ui, &peer.name, Some(peer_row_summary(locale, peer)));
+    detail_value(
+        ui,
+        remote_device_id_label(locale),
+        peer_id,
+        BadgeTone::Neutral,
+    );
+    ui.separator();
     detail_value(
         ui,
         locale.discovery_status(),
@@ -283,6 +287,60 @@ fn peer_row_summary(locale: Locale, peer: &PeerSnapshot) -> &'static str {
         (DialRole::Outbound, TransportState::Connected) => locale.transport_connected(),
         (DialRole::Outbound, TransportState::Failed) => locale.transport_failed(),
         (DialRole::Outbound, TransportState::Waiting) => locale.transport_waiting(),
+    }
+}
+
+fn device_id_label(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Chinese => "本机 ID",
+        Locale::English => "This device ID",
+    }
+}
+
+fn remote_device_id_label(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Chinese => "设备 ID",
+        Locale::English => "Device ID",
+    }
+}
+
+fn local_device_description(
+    locale: Locale,
+    device_name: &str,
+    status: &str,
+    peer_id: Option<&str>,
+) -> String {
+    let identity = match (locale, peer_id) {
+        (Locale::Chinese, Some(peer_id)) => format!("本次运行：{peer_id}"),
+        (Locale::English, Some(peer_id)) => format!("Current run: {peer_id}"),
+        (Locale::Chinese, None) => "本次运行尚未生成 ID".to_owned(),
+        (Locale::English, None) => "No ID for the current run yet".to_owned(),
+    };
+    format!("{device_name} · {status} · {identity}")
+}
+
+fn peer_list_subtitle(locale: Locale, peer: &PeerSnapshot, peer_id: &str) -> String {
+    format!(
+        "{} · {}: {peer_id}",
+        peer_row_summary(locale, peer),
+        remote_device_id_label(locale)
+    )
+}
+
+fn peer_badge_tone(peer: &PeerSnapshot) -> moqcast_ui::BadgeTone {
+    if peer.discovery == PeerDiscoveryState::Lost {
+        return moqcast_ui::BadgeTone::Neutral;
+    }
+    if peer.screen == ScreenAvailability::Available {
+        return moqcast_ui::BadgeTone::Info;
+    }
+    match (&peer.dial_role, &peer.transport) {
+        (DialRole::Outbound, TransportState::Failed) => moqcast_ui::BadgeTone::Danger,
+        (DialRole::Inbound, _)
+        | (DialRole::Outbound, TransportState::Connecting | TransportState::Connected) => {
+            moqcast_ui::BadgeTone::Info
+        }
+        (DialRole::Outbound, TransportState::Waiting) => moqcast_ui::BadgeTone::Neutral,
     }
 }
 
@@ -400,31 +458,21 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_device_rows_have_a_visible_gap() {
-        egui::__run_test_ui(|ui| {
-            ui.set_width(360.0);
-            let (first, second) = ui
-                .vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = Spacing::XS;
-                    let (first, ()) = device_row(
-                        ui,
-                        DeviceRowSpec::new(egui::Id::new("first-device"), "First"),
-                        |_| {},
-                    );
-                    settle_device_row(ui, first.rect);
-                    ui.add_space(Spacing::SM);
-                    let (second, ()) = device_row(
-                        ui,
-                        DeviceRowSpec::new(egui::Id::new("second-device"), "Second"),
-                        |_| {},
-                    );
-                    settle_device_row(ui, second.rect);
-                    assert_eq!(ui.next_widget_position().y, second.rect.bottom());
-                    (first, second)
-                })
-                .inner;
+    fn identity_copy_exposes_only_current_run_and_remote_peer_ids() {
+        let peer = peer(PeerDiscoveryState::Found, ScreenAvailability::Available);
+        let local = local_device_description(
+            Locale::English,
+            "Workstation",
+            "Nearby is on",
+            Some("local-peer"),
+        );
+        let remote = peer_list_subtitle(Locale::English, &peer, "remote-peer");
 
-            assert_eq!(second.rect.top() - first.rect.bottom(), Spacing::SM);
-        });
+        assert_eq!(device_id_label(Locale::English), "This device ID");
+        assert_eq!(remote_device_id_label(Locale::English), "Device ID");
+        assert!(local.contains("Current run: local-peer"));
+        assert!(remote.contains("Device ID: remote-peer"));
+        assert!(!local.contains("192.0.2.1"));
+        assert!(!remote.contains("192.0.2.1"));
     }
 }
