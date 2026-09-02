@@ -130,6 +130,79 @@ fn watch_idle_and_failed_use_state_panels_while_active_phases_use_the_player() {
 }
 
 #[test]
+fn nearby_copy_and_confirmation_follow_the_network_and_media_lifecycles() {
+    let mut snapshot = AppSnapshot::default();
+    snapshot.discovery.begin(DiscoveryPhase::Starting);
+    assert_eq!(
+        global_summary(&snapshot, Locale::Chinese),
+        "正在开启附近设备"
+    );
+    assert_eq!(
+        global_summary(&snapshot, Locale::English),
+        "Turning on Nearby"
+    );
+
+    snapshot.discovery.begin(DiscoveryPhase::Scanning);
+    snapshot.session.begin(SessionPhase::Listening);
+    assert_eq!(global_summary(&snapshot, Locale::Chinese), "附近设备已开启");
+    assert_eq!(global_summary(&snapshot, Locale::English), "Nearby is on");
+    assert_eq!(
+        local_status(&snapshot, Locale::Chinese),
+        "附近设备已开启，正在自动查找"
+    );
+    assert!(!has_active_media(&snapshot));
+
+    snapshot.media.begin(MediaPhase::PreparingWatch);
+    assert!(has_active_media(&snapshot));
+
+    snapshot.discovery.begin(DiscoveryPhase::Stopped);
+    snapshot.session.begin(SessionPhase::Stopped);
+    assert_eq!(local_status(&snapshot, Locale::Chinese), "附近设备已关闭");
+}
+
+#[test]
+fn nearby_action_pending_coalesces_duplicate_start_intents_until_acknowledged() {
+    let mut snapshot = AppSnapshot::default();
+    snapshot.discovery.begin(DiscoveryPhase::Stopped);
+    let generation = snapshot.discovery.generation();
+    let mut pending = None;
+    let mut sends = 0;
+
+    assert!(begin_nearby_action(
+        &mut pending,
+        NearbyAction::TurnOn,
+        generation,
+        || {
+            sends += 1;
+            true
+        },
+    ));
+    assert!(!begin_nearby_action(
+        &mut pending,
+        NearbyAction::TurnOn,
+        generation,
+        || {
+            sends += 1;
+            true
+        },
+    ));
+    assert_eq!(sends, 1);
+    assert!(!nearby_action_enabled(pending, RuntimePhase::Ready));
+
+    reconcile_nearby_action(&mut pending, &snapshot);
+    assert!(pending.is_some());
+    snapshot.discovery.begin(DiscoveryPhase::Stopped);
+    snapshot.runtime.begin(RuntimePhase::Suspended);
+    reconcile_nearby_action(&mut pending, &snapshot);
+    assert!(pending.is_some());
+    snapshot.runtime.begin(RuntimePhase::Ready);
+    snapshot.discovery.begin(DiscoveryPhase::Starting);
+    reconcile_nearby_action(&mut pending, &snapshot);
+    assert!(pending.is_none());
+    assert!(nearby_action_enabled(pending, RuntimePhase::Ready));
+}
+
+#[test]
 fn shared_navigation_uses_the_compact_height_below_the_split_breakpoint() {
     assert_eq!(navigation_height(919.0), Size::APP_BAR_COMPACT);
     assert_eq!(navigation_height(920.0), Size::APP_BAR);

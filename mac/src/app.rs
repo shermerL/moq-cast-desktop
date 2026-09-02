@@ -8,10 +8,11 @@ mod view;
 
 use eframe::egui::{self, Align, Color32, Frame, Key, Layout, Modifiers};
 use moqcast_ui::{
-    BadgeTone, COLORS, DetailRowSpec, DeviceBadgeSpec, DeviceListItemSpec, DeviceListSpec,
-    NavItemSpec, PageWidth, SelectSpec, SettingRowSpec, Size, Spacing, StatePanelKind,
-    StatePanelSpec, SwitchSpec, Theme, TypographyRole, app_bar_content_rect, danger_button,
-    detail_row as compact_detail_row, device_list, install_ui_font, nav_item, page_header,
+    BadgeTone, ButtonSpec, COLORS, ControlRole, DetailRowSpec, DeviceBadgeSpec, DeviceListItemSpec,
+    DeviceListSpec, DialogClosePolicy, DialogSpec, NavItemSpec, PageWidth, SelectSpec,
+    SettingRowSpec, Size, Spacing, StatePanelKind, StatePanelSpec, SwitchSpec, Theme,
+    TypographyRole, app_bar_content_rect, control_button, danger_button,
+    detail_row as compact_detail_row, device_list, dialog, install_ui_font, nav_item, page_header,
     page_shell, primary_button, secondary_button, section_header, select, setting_row, state_panel,
     status_badge, status_strip, switch, typography,
 };
@@ -24,8 +25,8 @@ use crate::network::PeerSession;
 use crate::playback::FrameIdentity;
 use crate::remote::ScreenAvailability;
 use crate::runtime::{
-    AppSnapshot, DiscoveryPhase, MediaOwner, MediaPhase, NearbyIssue, PeerSnapshot, RuntimeOwner,
-    RuntimePhase, SessionPhase, ShareAudioPhase,
+    AppSnapshot, DiscoveryPhase, Generation, MediaOwner, MediaPhase, NearbyIssue, PeerSnapshot,
+    RuntimeOwner, RuntimePhase, SessionPhase, ShareAudioPhase,
 };
 
 const STORAGE_LOCALE: &str = "moqcast.macos.locale";
@@ -74,6 +75,18 @@ enum WatchProjection {
     Player,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NearbyAction {
+    TurnOn,
+    TurnOff,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NearbyActionPending {
+    action: NearbyAction,
+    discovery_generation: Generation,
+}
+
 impl Locale {
     fn stored(self) -> &'static str {
         match self {
@@ -96,6 +109,8 @@ pub(crate) struct MoqCastApp {
     developer_mode: bool,
     diagnostics: diagnostics::DiagnosticsUi,
     selected_peer: Option<String>,
+    confirm_turn_off_nearby: bool,
+    nearby_action_pending: Option<NearbyActionPending>,
     runtime: RuntimeOwner,
     system_lifecycle: Option<system_lifecycle::Observer>,
     player: player::Player,
@@ -142,6 +157,8 @@ impl MoqCastApp {
             developer_mode,
             diagnostics: diagnostics::DiagnosticsUi::new(diagnostics, developer_mode),
             selected_peer: None,
+            confirm_turn_off_nearby: false,
+            nearby_action_pending: None,
             runtime,
             system_lifecycle,
             player: player::Player::default(),
@@ -373,6 +390,77 @@ impl MoqCastApp {
         });
     }
 
+    fn request_turn_on_nearby(&mut self, snapshot: &AppSnapshot) {
+        let pending = &mut self.nearby_action_pending;
+        let runtime = &self.runtime;
+        begin_nearby_action(
+            pending,
+            NearbyAction::TurnOn,
+            snapshot.discovery.generation(),
+            || runtime.restart_network(),
+        );
+    }
+
+    fn request_turn_off_nearby(&mut self, snapshot: &AppSnapshot) {
+        let pending = &mut self.nearby_action_pending;
+        let runtime = &self.runtime;
+        begin_nearby_action(
+            pending,
+            NearbyAction::TurnOff,
+            snapshot.discovery.generation(),
+            || runtime.stop_network(),
+        );
+    }
+
+    fn show_turn_off_nearby_confirmation(&mut self, context: &egui::Context) {
+        if !self.confirm_turn_off_nearby {
+            return;
+        }
+        let title = self.text("关闭附近设备？", "Turn off Nearby?");
+        let body = self.text(
+            "关闭会停止当前观看或共享，并断开附近连接。",
+            "Turning off Nearby stops the current watch or share and closes nearby connections.",
+        );
+        let confirm_label = self.text("关闭附近设备", "Turn off Nearby");
+        let cancel_label = self.text("取消", "Cancel");
+        let cancel_id = egui::Id::new("mac-cancel-turn-off-nearby");
+        let response = dialog(
+            context,
+            DialogSpec::new(
+                egui::Id::new("mac-turn-off-nearby-dialog"),
+                title,
+                cancel_id,
+            )
+            .close_policy(DialogClosePolicy::EscapeAndBackdrop),
+            |ui| {
+                ui.label(typography(body, TypographyRole::Body, COLORS.muted.into()));
+                ui.add_space(Spacing::XL);
+                let mut cancel = false;
+                let mut confirm = false;
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    confirm =
+                        control_button(ui, ButtonSpec::new(confirm_label, ControlRole::Danger))
+                            .clicked();
+                    cancel = control_button(
+                        ui,
+                        ButtonSpec::new(cancel_label, ControlRole::Secondary).id(cancel_id),
+                    )
+                    .clicked();
+                });
+                (cancel, confirm)
+            },
+        );
+        let should_close = response.should_close();
+        let (cancel, confirm) = response.into_inner();
+        if should_close || cancel {
+            self.confirm_turn_off_nearby = false;
+        } else if confirm {
+            self.confirm_turn_off_nearby = false;
+            let snapshot = self.runtime.snapshot();
+            self.request_turn_off_nearby(&snapshot);
+        }
+    }
+
     fn nearby(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
         self.selected_peer = selected_peer(self.selected_peer.as_deref(), &snapshot.peers);
         page_header(
@@ -400,14 +488,16 @@ impl MoqCastApp {
                 )
             {
                 ui.add_space(Spacing::SM);
+                let action_enabled =
+                    nearby_action_enabled(self.nearby_action_pending, snapshot.runtime.phase());
                 if secondary_button(
                     ui,
                     self.text("重新启动附近设备服务", "Restart Nearby services"),
-                    true,
+                    action_enabled,
                 )
                 .clicked()
                 {
-                    self.runtime.restart_network();
+                    self.request_turn_on_nearby(snapshot);
                 }
             }
             ui.add_space(Spacing::LG);
@@ -445,6 +535,7 @@ impl MoqCastApp {
             }
             DiscoveryPhase::Failed if snapshot.peers.is_empty() => self.recovery_placeholder(
                 ui,
+                snapshot,
                 self.text("无法搜索本地网络", "Could not search the local network"),
                 self.text(
                     "请检查本地网络权限，然后重试。",
@@ -465,19 +556,20 @@ impl MoqCastApp {
                     ),
                 );
             }
-            DiscoveryPhase::Stopped if snapshot.peers.is_empty() => self.recovery_placeholder(
+            DiscoveryPhase::Stopped if snapshot.peers.is_empty() => self.placeholder(
                 ui,
-                self.text("附近设备服务已停止", "Nearby services stopped"),
+                false,
+                self.text("附近设备已关闭", "Nearby is off"),
                 self.text(
-                    "可以重新启动附近设备服务。",
-                    "Nearby services can be started again.",
+                    "需要时可以重新开启附近设备。",
+                    "Turn Nearby on again when needed.",
                 ),
             ),
             _ => self.device_workspace(ui, snapshot),
         }
     }
 
-    fn local_summary(&self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
+    fn local_summary(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
         let device_name = snapshot
             .local_device_name
             .as_deref()
@@ -489,17 +581,77 @@ impl MoqCastApp {
             status,
             snapshot.local_peer_id.as_deref(),
         );
-        let counts = count_summary(snapshot, self.locale);
+        let nearby_active = !matches!(
+            snapshot.discovery.phase(),
+            DiscoveryPhase::Failed | DiscoveryPhase::Stopped
+        );
+        let action = match (
+            self.locale,
+            snapshot.discovery.phase(),
+            self.nearby_action_pending,
+        ) {
+            (
+                Locale::Chinese,
+                _,
+                Some(NearbyActionPending {
+                    action: NearbyAction::TurnOff,
+                    ..
+                }),
+            ) => "正在关闭",
+            (
+                Locale::English,
+                _,
+                Some(NearbyActionPending {
+                    action: NearbyAction::TurnOff,
+                    ..
+                }),
+            ) => "Turning off",
+            (
+                Locale::Chinese,
+                _,
+                Some(NearbyActionPending {
+                    action: NearbyAction::TurnOn,
+                    ..
+                }),
+            ) => "正在开启",
+            (
+                Locale::English,
+                _,
+                Some(NearbyActionPending {
+                    action: NearbyAction::TurnOn,
+                    ..
+                }),
+            ) => "Turning on",
+            (Locale::Chinese, DiscoveryPhase::Failed, None) => "重试",
+            (Locale::English, DiscoveryPhase::Failed, None) => "Try again",
+            (Locale::Chinese, _, None) if nearby_active => "关闭附近设备",
+            (Locale::English, _, None) if nearby_active => "Turn off Nearby",
+            (Locale::Chinese, _, None) => "开启附近设备",
+            (Locale::English, _, None) => "Turn on Nearby",
+        };
+        let action_enabled =
+            nearby_action_enabled(self.nearby_action_pending, snapshot.runtime.phase());
 
         setting_row(
             ui,
             SettingRowSpec::new(local_device_id_label(self.locale)).description(&description),
             |ui| {
-                ui.label(typography(
-                    counts,
-                    TypographyRole::Meta,
-                    COLORS.muted.into(),
-                ));
+                let response = if nearby_active {
+                    danger_button(ui, action, action_enabled)
+                } else {
+                    primary_button(ui, action, action_enabled)
+                };
+                if response.clicked() {
+                    if nearby_active {
+                        if has_active_media(snapshot) {
+                            self.confirm_turn_off_nearby = true;
+                        } else {
+                            self.request_turn_off_nearby(snapshot);
+                        }
+                    } else {
+                        self.request_turn_on_nearby(snapshot);
+                    }
+                }
             },
         );
     }
@@ -524,17 +676,26 @@ impl MoqCastApp {
         );
     }
 
-    fn recovery_placeholder(&mut self, ui: &mut egui::Ui, title: &str, body: &str) {
+    fn recovery_placeholder(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &AppSnapshot,
+        title: &str,
+        body: &str,
+    ) {
         let mut retry = false;
+        let action_enabled =
+            nearby_action_enabled(self.nearby_action_pending, snapshot.runtime.phase());
         state_panel(
             ui,
             StatePanelSpec::new(StatePanelKind::Failed, title, body),
             |ui| {
-                retry = primary_button(ui, self.text("重试", "Try Again"), true).clicked();
+                retry =
+                    primary_button(ui, self.text("重试", "Try Again"), action_enabled).clicked();
             },
         );
         if retry {
-            self.runtime.restart_network();
+            self.request_turn_on_nearby(snapshot);
         }
     }
 
@@ -1071,6 +1232,13 @@ impl eframe::App for MoqCastApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_capture_picker(ui.ctx());
         let snapshot = self.runtime.snapshot();
+        reconcile_nearby_action(&mut self.nearby_action_pending, &snapshot);
+        if matches!(
+            snapshot.discovery.phase(),
+            DiscoveryPhase::Stopped | DiscoveryPhase::Failed
+        ) {
+            self.confirm_turn_off_nearby = false;
+        }
         self.update_playback_texture(ui.ctx(), &snapshot);
         let player_active = Self::player_active(&snapshot);
         let fullscreen = self.player.reconcile_fullscreen(ui.ctx(), player_active);
@@ -1104,6 +1272,7 @@ impl eframe::App for MoqCastApp {
                         });
                 }
             });
+        self.show_turn_off_nearby_confirmation(ui.ctx());
         self.diagnostics.show_window(ui.ctx(), self.locale);
     }
 
@@ -1144,16 +1313,69 @@ fn watch_projection(owner: Option<MediaOwner>, phase: MediaPhase) -> WatchProjec
     }
 }
 
+fn has_active_media(snapshot: &AppSnapshot) -> bool {
+    matches!(
+        snapshot.media.phase(),
+        MediaPhase::PreparingWatch
+            | MediaPhase::Watching
+            | MediaPhase::PreparingShare
+            | MediaPhase::Sharing
+            | MediaPhase::Stopping
+    )
+}
+
+fn begin_nearby_action(
+    pending: &mut Option<NearbyActionPending>,
+    action: NearbyAction,
+    discovery_generation: Generation,
+    send: impl FnOnce() -> bool,
+) -> bool {
+    if pending.is_some() || !send() {
+        return false;
+    }
+    *pending = Some(NearbyActionPending {
+        action,
+        discovery_generation,
+    });
+    true
+}
+
+fn reconcile_nearby_action(pending: &mut Option<NearbyActionPending>, snapshot: &AppSnapshot) {
+    let acknowledged = pending.is_some_and(|pending| {
+        if pending.discovery_generation == snapshot.discovery.generation() {
+            return false;
+        }
+        match pending.action {
+            NearbyAction::TurnOn => !matches!(snapshot.discovery.phase(), DiscoveryPhase::Stopped),
+            NearbyAction::TurnOff => {
+                snapshot.runtime.phase() != RuntimePhase::Suspended
+                    && snapshot.discovery.phase() == DiscoveryPhase::Stopped
+            }
+        }
+    });
+    if acknowledged {
+        *pending = None;
+    }
+}
+
+fn nearby_action_enabled(
+    pending: Option<NearbyActionPending>,
+    runtime_phase: RuntimePhase,
+) -> bool {
+    pending.is_none() && runtime_phase != RuntimePhase::Suspended
+}
+
 fn global_summary(snapshot: &AppSnapshot, locale: Locale) -> String {
     if snapshot.runtime.phase() == RuntimePhase::Suspended {
         return text(locale, "已暂停", "Suspended").to_owned();
     }
     match snapshot.discovery.phase() {
-        DiscoveryPhase::Starting => text(locale, "正在启动", "Starting").to_owned(),
-        DiscoveryPhase::Scanning => text(locale, "正在扫描", "Scanning").to_owned(),
-        DiscoveryPhase::Failed | DiscoveryPhase::Stopped => {
-            text(locale, "扫描不可用", "Scan unavailable").to_owned()
+        DiscoveryPhase::Starting => {
+            text(locale, "正在开启附近设备", "Turning on Nearby").to_owned()
         }
+        DiscoveryPhase::Scanning => text(locale, "附近设备已开启", "Nearby is on").to_owned(),
+        DiscoveryPhase::Failed => text(locale, "附近设备不可用", "Nearby unavailable").to_owned(),
+        DiscoveryPhase::Stopped => text(locale, "附近设备已关闭", "Nearby is off").to_owned(),
         DiscoveryPhase::Empty => text(locale, "未发现设备", "No devices found").to_owned(),
         DiscoveryPhase::Ready => count_summary(snapshot, locale),
     }
@@ -1181,16 +1403,19 @@ fn local_status(snapshot: &AppSnapshot, locale: Locale) -> &'static str {
         return text(locale, "睡眠期间已暂停", "Paused while the Mac sleeps");
     }
     match (snapshot.discovery.phase(), snapshot.session.phase()) {
-        (DiscoveryPhase::Starting, _) => {
-            text(locale, "正在启动附近设备服务", "Starting Nearby services")
-        }
-        (DiscoveryPhase::Scanning, _) => {
-            text(locale, "正在查找附近设备", "Searching for nearby devices")
-        }
-        (DiscoveryPhase::Failed | DiscoveryPhase::Stopped, _) => {
-            text(locale, "本地网络不可用", "Local network unavailable")
-        }
-        (_, SessionPhase::Listening) => text(locale, "可被发现", "Available on the local network"),
+        (DiscoveryPhase::Starting, _) => text(locale, "正在开启附近设备", "Turning on Nearby"),
+        (DiscoveryPhase::Scanning, _) => text(
+            locale,
+            "附近设备已开启，正在自动查找",
+            "Nearby is on and discovering automatically",
+        ),
+        (DiscoveryPhase::Failed, _) => text(locale, "附近设备不可用", "Nearby is unavailable"),
+        (DiscoveryPhase::Stopped, _) => text(locale, "附近设备已关闭", "Nearby is off"),
+        (_, SessionPhase::Listening) => text(
+            locale,
+            "附近设备已开启，正在自动查找",
+            "Nearby is on and discovering automatically",
+        ),
         (_, SessionPhase::Starting) => {
             text(locale, "正在准备设备连接", "Preparing device connections")
         }
