@@ -2,16 +2,25 @@
 
 use std::collections::BTreeMap;
 
-use eframe::egui::{self, RichText};
-
-use super::super::components::{
-    self, BadgeTone, primary_button, secondary_button, status_badge, status_line,
+use eframe::egui::{self, Key};
+use moqcast_ui::{
+    DetailRowSpec, DeviceRowSpec, SettingRowSpec, Size, Spacing, detail_row, device_row,
+    section_header, setting_row,
 };
-use super::super::theme::{MUTED, TEXT};
+
+use super::super::components::{self, BadgeTone, primary_button, secondary_button, status_badge};
 use super::super::{
     AppSnapshot, DeviceWorkspaceLayout, DialRole, DiscoveryState, Locale, MediaState,
     PeerDiscoveryState, PeerSnapshot, ScreenAvailability, TransportState, UserCommand,
 };
+
+const WORKSPACE_GAP: f32 = Spacing::LG;
+
+fn split_workspace_widths(total_width: f32) -> (f32, f32) {
+    let detail_width = Size::NEARBY_LIST.min((total_width - WORKSPACE_GAP).max(1.0));
+    let list_width = (total_width - detail_width - WORKSPACE_GAP).max(1.0);
+    (list_width, detail_width)
+}
 
 pub(in crate::app) fn show(
     ui: &mut egui::Ui,
@@ -20,31 +29,10 @@ pub(in crate::app) fn show(
     local_device_name: &str,
     selected_peer: &mut Option<String>,
     layout: DeviceWorkspaceLayout,
-    system_audio: bool,
 ) -> Option<UserCommand> {
-    let mut command = workspace_toolbar(ui, locale, snapshot, local_device_name, system_audio);
+    let mut command = workspace_toolbar(ui, locale, snapshot, local_device_name);
 
-    if snapshot.inbound_session_count > 0 {
-        ui.add_space(12.0);
-        ui.horizontal_wrapped(|ui| {
-            status_line(
-                ui,
-                &format!(
-                    "{}: {}",
-                    locale.inbound_sessions(),
-                    snapshot.inbound_session_count
-                ),
-                BadgeTone::Info,
-            );
-            ui.label(
-                RichText::new(locale.mesh_status_hint())
-                    .size(12.0)
-                    .color(MUTED),
-            );
-        });
-    }
-
-    ui.add_space(16.0);
+    ui.add_space(Spacing::LG);
     if snapshot.peers.is_empty() {
         *selected_peer = None;
         components::empty_state(
@@ -74,63 +62,36 @@ fn workspace_toolbar(
     locale: Locale,
     snapshot: &AppSnapshot,
     local_device_name: &str,
-    system_audio: bool,
 ) -> Option<UserCommand> {
     let discovery_active = snapshot.discovery.is_active();
     let mut command = None;
-    ui.horizontal_wrapped(|ui| {
-        let (status, tone) = match snapshot.discovery {
-            DiscoveryState::Idle => (locale.discovery_idle(), BadgeTone::Neutral),
-            DiscoveryState::Scanning => (locale.scanning(), BadgeTone::Info),
-            DiscoveryState::Ready => (locale.discovery_ready(), BadgeTone::Success),
-            DiscoveryState::Empty => (locale.no_devices(), BadgeTone::Neutral),
-            DiscoveryState::Error => (locale.discovery_error(), BadgeTone::Error),
-        };
-        status_line(ui, status, tone);
-        ui.label(
-            RichText::new(format!(
-                "{}: Linux · {local_device_name}",
-                locale.this_device()
-            ))
-            .size(12.0)
-            .color(MUTED),
-        );
-        if let Some(peer_id) = snapshot.local_peer_id.as_deref() {
-            ui.label(
-                RichText::new(format!(
-                    "{}: {}",
-                    locale.lan_session(),
-                    short_peer_id(peer_id)
-                ))
-                .monospace()
-                .size(11.0)
-                .color(MUTED),
-            );
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let share_enabled = snapshot.has_mesh_session() && snapshot.media == MediaState::Idle;
-            if primary_button(ui, locale.share_local_screen(), share_enabled).clicked() {
-                command = Some(UserCommand::StartScreenShare { system_audio });
-            }
-            let scan_label = if discovery_active {
+    let (status, _) = match snapshot.discovery {
+        DiscoveryState::Idle => (locale.discovery_idle(), BadgeTone::Neutral),
+        DiscoveryState::Scanning => (locale.scanning(), BadgeTone::Info),
+        DiscoveryState::Ready => (locale.discovery_ready(), BadgeTone::Success),
+        DiscoveryState::Empty => (locale.no_devices(), BadgeTone::Neutral),
+        DiscoveryState::Error => (locale.discovery_error(), BadgeTone::Error),
+    };
+    let description = format!("{local_device_name} · {status}");
+    setting_row(
+        ui,
+        SettingRowSpec::new(locale.this_device()).description(&description),
+        |ui| {
+            let label = if discovery_active {
                 locale.stop_scan()
             } else {
                 locale.start_scan()
             };
-            if secondary_button(ui, scan_label, true).clicked() {
+            if secondary_button(ui, label, true).clicked() {
                 command = Some(if discovery_active {
                     UserCommand::StopDiscovery
                 } else {
                     UserCommand::StartDiscovery
                 });
             }
-        });
-    });
+        },
+    );
     command
-}
-
-fn short_peer_id(peer_id: &str) -> String {
-    peer_id.chars().take(8).collect()
 }
 
 fn show_split_workspace(
@@ -140,8 +101,7 @@ fn show_split_workspace(
     selected_peer: &mut Option<String>,
 ) -> Option<UserCommand> {
     let total_width = ui.available_width();
-    let list_width = total_width.mul_add(0.34, 0.0).clamp(304.0, 344.0);
-    let detail_width = (total_width - list_width - 16.0).max(1.0);
+    let (list_width, detail_width) = split_workspace_widths(total_width);
     let mut command = None;
     ui.horizontal_top(|ui| {
         ui.allocate_ui_with_layout(
@@ -149,7 +109,7 @@ fn show_split_workspace(
             egui::Layout::top_down(egui::Align::Min),
             |ui| show_device_list(ui, locale, snapshot, selected_peer),
         );
-        ui.add_space(8.0);
+        ui.add_space(WORKSPACE_GAP);
         ui.allocate_ui_with_layout(
             egui::vec2(detail_width, 1.0),
             egui::Layout::top_down(egui::Align::Min),
@@ -168,8 +128,16 @@ fn show_single_workspace(
     selected_peer: &mut Option<String>,
 ) -> Option<UserCommand> {
     show_device_list(ui, locale, snapshot, selected_peer);
-    ui.add_space(16.0);
-    show_device_detail(ui, locale, snapshot, selected_peer.as_deref())
+    ui.add_space(Spacing::LG);
+    let mut command = None;
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 1.0),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            command = show_device_detail(ui, locale, snapshot, selected_peer.as_deref());
+        },
+    );
+    command
 }
 
 fn show_device_list(
@@ -178,29 +146,40 @@ fn show_device_list(
     snapshot: &AppSnapshot,
     selected_peer: &mut Option<String>,
 ) {
-    components::surface().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        components::section_title(ui, locale.devices(), None);
-        ui.add_space(8.0);
-        for (index, (peer_id, peer)) in snapshot.peers.iter().enumerate() {
-            if index > 0 {
-                ui.separator();
-            }
-            let selectable = peer_can_be_selected(peer);
-            let selected = selected_peer.as_deref() == Some(peer_id.as_str());
-            let summary = peer_row_summary(locale, peer);
-            let response = ui.add_enabled(
-                selectable,
-                egui::Button::new(RichText::new(format!("{}\n{summary}", peer.name)).size(13.0))
-                    .selected(selected)
-                    .wrap()
-                    .min_size(egui::vec2(ui.available_width(), 56.0)),
-            );
-            if response.clicked() {
-                *selected_peer = Some(peer_id.clone());
-            }
+    ui.spacing_mut().item_spacing.y = Spacing::XS;
+    for (index, (peer_id, peer)) in snapshot.peers.iter().enumerate() {
+        if index > 0 {
+            ui.add_space(Spacing::SM);
         }
-    });
+        let selectable = peer_can_be_selected(peer);
+        let selected = selected_peer.as_deref() == Some(peer_id.as_str());
+        let summary = peer_row_summary(locale, peer);
+        let (response, ()) = device_row(
+            ui,
+            DeviceRowSpec::new(egui::Id::new(("linux-nearby-peer", peer_id)), &peer.name)
+                .detail(summary)
+                .selected(selected)
+                .enabled(selectable),
+            |ui| {
+                if peer.screen == ScreenAvailability::Available {
+                    status_badge(ui, locale.screen_available(), BadgeTone::Info);
+                }
+            },
+        );
+        let keyboard_activated = response.has_focus()
+            && ui.input(|input| input.key_pressed(Key::Enter) || input.key_pressed(Key::Space));
+        if response.clicked() || keyboard_activated {
+            *selected_peer = Some(peer_id.clone());
+        }
+        settle_device_row(ui, response.rect);
+    }
+}
+
+fn settle_device_row(ui: &mut egui::Ui, rect: egui::Rect) {
+    let item_spacing_y = ui.spacing().item_spacing.y;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    ui.advance_cursor_after_rect(rect);
+    ui.spacing_mut().item_spacing.y = item_spacing_y;
 }
 
 fn show_device_detail(
@@ -210,70 +189,17 @@ fn show_device_detail(
     selected_peer: Option<&str>,
 ) -> Option<UserCommand> {
     let mut command = None;
-    components::surface().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        components::section_title(ui, locale.device_details(), None);
-        ui.add_space(10.0);
-        let Some((peer_id, peer)) = selected_peer
-            .and_then(|peer_id| snapshot.peers.get(peer_id).map(|peer| (peer_id, peer)))
-        else {
-            ui.label(
-                RichText::new(locale.select_device())
-                    .size(13.0)
-                    .color(MUTED),
-            );
-            return;
-        };
+    let Some((peer_id, peer)) =
+        selected_peer.and_then(|peer_id| snapshot.peers.get(peer_id).map(|peer| (peer_id, peer)))
+    else {
+        section_header(ui, locale.device_details(), Some(locale.select_device()));
+        return None;
+    };
 
-        ui.label(RichText::new(&peer.name).size(18.0).strong().color(TEXT));
-        ui.label(
-            RichText::new(format!("{}: {peer_id}", locale.peer_identifier()))
-                .monospace()
-                .size(11.0)
-                .color(MUTED),
-        );
-        ui.add_space(10.0);
-        ui.horizontal_wrapped(|ui| {
-            peer_statuses(ui, locale, peer);
-        });
-        if !peer.endpoints.is_empty() {
-            ui.add_space(12.0);
-            ui.label(
-                RichText::new(locale.network_endpoints())
-                    .size(12.0)
-                    .strong()
-                    .color(TEXT),
-            );
-            ui.add(
-                egui::Label::new(
-                    RichText::new(peer.endpoints.join("  ·  "))
-                        .monospace()
-                        .size(11.0)
-                        .color(MUTED),
-                )
-                .wrap(),
-            );
-        }
-        if peer.fingerprint_pinned {
-            ui.add_space(10.0);
-            status_badge(ui, locale.fingerprint_pinning(), BadgeTone::Neutral);
-        }
-        ui.add_space(18.0);
-        if peer.screen == ScreenAvailability::Available {
-            let watch_enabled = snapshot.has_mesh_session() && snapshot.media == MediaState::Idle;
-            if secondary_button(ui, locale.watch(), watch_enabled).clicked() {
-                command = Some(UserCommand::StartWatching {
-                    path: crate::screen_path::for_peer(peer_id),
-                });
-            }
-        }
-    });
-    command
-}
-
-fn peer_statuses(ui: &mut egui::Ui, locale: Locale, peer: &PeerSnapshot) {
-    status_badge(
+    section_header(ui, &peer.name, Some(peer_row_summary(locale, peer)));
+    detail_value(
         ui,
+        locale.discovery_status(),
         match peer.discovery {
             PeerDiscoveryState::Found => locale.discovery_found(),
             PeerDiscoveryState::Lost => locale.discovery_lost(),
@@ -283,25 +209,17 @@ fn peer_statuses(ui: &mut egui::Ui, locale: Locale, peer: &PeerSnapshot) {
             PeerDiscoveryState::Lost => BadgeTone::Neutral,
         },
     );
-
-    let (transport, tone) = match (&peer.dial_role, &peer.transport) {
-        (DialRole::Inbound, _) => (locale.transport_inbound_role(), BadgeTone::Info),
-        (DialRole::Outbound, TransportState::Waiting) => {
-            (locale.transport_waiting(), BadgeTone::Neutral)
-        }
-        (DialRole::Outbound, TransportState::Connecting) => {
-            (locale.transport_connecting(), BadgeTone::Info)
-        }
-        (DialRole::Outbound, TransportState::Connected) => {
-            (locale.transport_connected(), BadgeTone::Success)
-        }
-        (DialRole::Outbound, TransportState::Failed) => {
-            (locale.transport_failed(), BadgeTone::Error)
-        }
-    };
-    status_badge(ui, transport, tone);
-    status_badge(
+    ui.separator();
+    detail_value(
         ui,
+        locale.connection_status(),
+        transport_label(locale, peer),
+        transport_tone(peer),
+    );
+    ui.separator();
+    detail_value(
+        ui,
+        locale.shared_screen_status(),
         if peer.screen == ScreenAvailability::Available {
             locale.screen_available()
         } else {
@@ -313,6 +231,43 @@ fn peer_statuses(ui: &mut egui::Ui, locale: Locale, peer: &PeerSnapshot) {
             BadgeTone::Neutral
         },
     );
+    if peer.screen == ScreenAvailability::Available {
+        ui.add_space(Spacing::LG);
+        let watch_enabled = snapshot.has_mesh_session() && snapshot.media == MediaState::Idle;
+        if primary_button(ui, locale.watch(), watch_enabled).clicked() {
+            command = Some(UserCommand::StartWatching {
+                path: crate::screen_path::for_peer(peer_id),
+            });
+        }
+    }
+    command
+}
+
+fn detail_value(ui: &mut egui::Ui, label: &str, value: &str, tone: BadgeTone) {
+    detail_row(ui, DetailRowSpec::new(label), |ui| {
+        status_badge(ui, value, tone);
+    });
+}
+
+fn transport_label(locale: Locale, peer: &PeerSnapshot) -> &'static str {
+    match (&peer.dial_role, &peer.transport) {
+        (DialRole::Inbound, _) => locale.transport_inbound_role(),
+        (DialRole::Outbound, TransportState::Waiting) => locale.transport_waiting(),
+        (DialRole::Outbound, TransportState::Connecting) => locale.transport_connecting(),
+        (DialRole::Outbound, TransportState::Connected) => locale.transport_connected(),
+        (DialRole::Outbound, TransportState::Failed) => locale.transport_failed(),
+    }
+}
+
+fn transport_tone(peer: &PeerSnapshot) -> BadgeTone {
+    match (&peer.dial_role, &peer.transport) {
+        (DialRole::Inbound, _) | (DialRole::Outbound, TransportState::Connecting) => {
+            BadgeTone::Info
+        }
+        (DialRole::Outbound, TransportState::Connected) => BadgeTone::Success,
+        (DialRole::Outbound, TransportState::Failed) => BadgeTone::Error,
+        (DialRole::Outbound, TransportState::Waiting) => BadgeTone::Neutral,
+    }
 }
 
 fn peer_row_summary(locale: Locale, peer: &PeerSnapshot) -> &'static str {
@@ -422,5 +377,54 @@ mod tests {
         ]);
 
         assert_eq!(reconcile_peer_selection(Some("peer-a"), &peers), None);
+    }
+
+    #[test]
+    fn compact_detail_rows_keep_the_shared_fixed_height() {
+        egui::__run_test_ui(|ui| {
+            ui.set_width(420.0);
+            let (rect, ()) = detail_row(ui, DetailRowSpec::new("Connection"), |ui| {
+                ui.label("Connected");
+            });
+            assert_eq!(rect.width(), 420.0);
+            assert_eq!(rect.height(), Size::DETAIL_ROW);
+        });
+    }
+
+    #[test]
+    fn split_workspace_keeps_the_detail_column_compact() {
+        assert_eq!(
+            split_workspace_widths(944.0),
+            (944.0 - Size::NEARBY_LIST - WORKSPACE_GAP, Size::NEARBY_LIST)
+        );
+    }
+
+    #[test]
+    fn adjacent_device_rows_have_a_visible_gap() {
+        egui::__run_test_ui(|ui| {
+            ui.set_width(360.0);
+            let (first, second) = ui
+                .vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = Spacing::XS;
+                    let (first, ()) = device_row(
+                        ui,
+                        DeviceRowSpec::new(egui::Id::new("first-device"), "First"),
+                        |_| {},
+                    );
+                    settle_device_row(ui, first.rect);
+                    ui.add_space(Spacing::SM);
+                    let (second, ()) = device_row(
+                        ui,
+                        DeviceRowSpec::new(egui::Id::new("second-device"), "Second"),
+                        |_| {},
+                    );
+                    settle_device_row(ui, second.rect);
+                    assert_eq!(ui.next_widget_position().y, second.rect.bottom());
+                    (first, second)
+                })
+                .inner;
+
+            assert_eq!(second.rect.top() - first.rect.bottom(), Spacing::SM);
+        });
     }
 }
