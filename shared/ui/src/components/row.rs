@@ -307,6 +307,10 @@ struct DeviceRowOutput<R> {
     response: Response,
     inner: R,
     content_rect: Rect,
+    #[cfg(test)]
+    title_rect: Rect,
+    #[cfg(test)]
+    detail_rect: Option<Rect>,
 }
 
 fn render_device_row<R>(
@@ -318,7 +322,7 @@ fn render_device_row<R>(
         .allocate_space(vec2(ui.available_width(), Size::DEVICE_ROW))
         .1;
     let enabled = effective_enabled(spec.enabled, spec.preview);
-    let response = pointing_hand(ui.interact(rect, spec.id, sense(enabled)), enabled);
+    let mut response = pointing_hand(ui.interact(rect, spec.id, sense(enabled)), enabled);
     let (state, visual) = resolve(
         &response,
         ControlRole::Secondary,
@@ -345,23 +349,41 @@ fn render_device_row<R>(
     );
     text_ui.set_clip_rect(text_rect.intersect(content_ui.clip_rect()));
     text_ui.spacing_mut().item_spacing.y = Spacing::XS;
-    text_ui.add(
-        Label::new(typography(
-            spec.title,
-            TypographyRole::Row,
-            visual.text.into(),
-        ))
-        .truncate(),
-    );
-    if let Some(detail) = spec.detail {
+    let title_response = pointing_hand(
         text_ui.add(
             Label::new(typography(
-                detail,
-                TypographyRole::Meta,
-                COLORS.muted.into(),
+                spec.title,
+                TypographyRole::Row,
+                visual.text.into(),
             ))
+            .sense(sense(enabled))
             .truncate(),
+        ),
+        enabled,
+    );
+    #[cfg(test)]
+    let title_rect = title_response.rect;
+    response |= title_response;
+    #[cfg(test)]
+    let mut detail_rect = None;
+    if let Some(detail) = spec.detail {
+        let detail_response = pointing_hand(
+            text_ui.add(
+                Label::new(typography(
+                    detail,
+                    TypographyRole::Meta,
+                    COLORS.muted.into(),
+                ))
+                .sense(sense(enabled))
+                .truncate(),
+            ),
+            enabled,
         );
+        #[cfg(test)]
+        {
+            detail_rect = Some(detail_response.rect);
+        }
+        response |= detail_response;
     }
     paint_focus(ui, rect, &response, state, crate::Radius::MD);
     response.widget_info(|| {
@@ -376,6 +398,10 @@ fn render_device_row<R>(
         response,
         inner,
         content_rect: text_rect,
+        #[cfg(test)]
+        title_rect,
+        #[cfg(test)]
+        detail_rect,
     }
 }
 
@@ -392,10 +418,28 @@ struct DeviceListOutput<I> {
     activated: Option<I>,
     row_rects: Vec<Rect>,
     content_rects: Vec<Rect>,
+    #[cfg(test)]
+    hit_rects: Vec<DeviceListHitRects>,
     content_rect: Rect,
     content_cursor_y: f32,
     viewport_rect: Rect,
     content_size: egui::Vec2,
+}
+
+#[cfg(test)]
+struct DeviceListHitRects {
+    title: Rect,
+    detail: Option<Rect>,
+    badge: Option<Rect>,
+}
+
+struct DeviceListContent<I> {
+    activated: Option<I>,
+    row_rects: Vec<Rect>,
+    content_rects: Vec<Rect>,
+    #[cfg(test)]
+    hit_rects: Vec<DeviceListHitRects>,
+    content_cursor_y: f32,
 }
 
 fn render_device_list<I>(ui: &mut Ui, spec: DeviceListSpec<'_, I>) -> DeviceListOutput<I>
@@ -414,6 +458,8 @@ where
             let mut activated = None;
             let mut row_rects = Vec::with_capacity(spec.items.len());
             let mut content_rects = Vec::with_capacity(spec.items.len());
+            #[cfg(test)]
+            let mut hit_rects = Vec::with_capacity(spec.items.len());
 
             for (index, item) in spec.items.iter().enumerate() {
                 if index > 0 {
@@ -429,37 +475,58 @@ where
                 if let Some(preview) = item.preview {
                     row_spec = row_spec.preview_interaction(preview);
                 }
+                let enabled = effective_enabled(item.enabled, item.preview);
                 let output = render_device_row(ui, row_spec, |ui| {
-                    if let Some(badge) = badge {
-                        status_badge(ui, badge.label, badge.tone);
-                    }
+                    badge.map(|badge| status_badge(ui, badge.label, badge.tone))
                 });
-                let keyboard_activated = output.response.has_focus()
+                #[cfg(test)]
+                let badge_rect = output.inner.as_ref().map(|response| response.rect);
+                let badge_clicked = output.inner.is_some_and(|response| {
+                    pointing_hand(response.interact(sense(enabled)), enabled).clicked()
+                });
+                let keyboard_activated = enabled
+                    && output.response.has_focus()
                     && ui.input(|input| {
                         input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
                     });
-                if output.response.clicked() || keyboard_activated {
+                if enabled && (output.response.clicked() || badge_clicked || keyboard_activated) {
                     activated = Some(item.id.clone());
                 }
                 row_rects.push(output.response.rect);
                 content_rects.push(output.content_rect);
+                #[cfg(test)]
+                hit_rects.push(DeviceListHitRects {
+                    title: output.title_rect,
+                    detail: output.detail_rect,
+                    badge: badge_rect,
+                });
             }
             let content_cursor_y = ui.next_widget_position().y;
             ui.spacing_mut().item_spacing.y = item_spacing_y;
-            (activated, row_rects, content_rects, content_cursor_y)
+            DeviceListContent {
+                activated,
+                row_rects,
+                content_rects,
+                #[cfg(test)]
+                hit_rects,
+                content_cursor_y,
+            }
         });
-    let (activated, row_rects, content_rects, content_cursor_y) = output.inner;
-    let content_rect = row_rects
+    let content = output.inner;
+    let content_rect = content
+        .row_rects
         .iter()
         .copied()
         .reduce(Rect::union)
         .unwrap_or(Rect::NOTHING);
     DeviceListOutput {
-        activated,
-        row_rects,
-        content_rects,
+        activated: content.activated,
+        row_rects: content.row_rects,
+        content_rects: content.content_rects,
+        #[cfg(test)]
+        hit_rects: content.hit_rects,
         content_rect,
-        content_cursor_y,
+        content_cursor_y: content.content_cursor_y,
         viewport_rect: output.inner_rect,
         content_size: output.content_size,
     }
@@ -468,6 +535,67 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CLICK_LIST_ID: &str = "device-list-click-fixture";
+    const CLICK_ITEM_ID: &str = "peer-a";
+
+    fn pointer_input(pos: egui::Pos2, pressed: bool) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn key_input(key: egui::Key) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn render_click_fixture(
+        context: &egui::Context,
+        input: egui::RawInput,
+        enabled: bool,
+    ) -> DeviceListOutput<&'static str> {
+        let items = [DeviceListItemSpec::new(CLICK_ITEM_ID, "Conference display")
+            .subtitle("Connected · A1B2")
+            .badge(DeviceBadgeSpec::new("Watch", BadgeTone::Info))
+            .enabled(enabled)];
+        let mut output = None;
+        let frame = context.run_ui(input, |ui| {
+            ui.set_width(Size::NEARBY_LIST);
+            output = Some(render_device_list(
+                ui,
+                DeviceListSpec::new(Id::new(CLICK_LIST_ID), &items),
+            ));
+        });
+        frame.drop_without_applying_deltas();
+        output.expect("device list fixture renders")
+    }
+
+    fn click_fixture(
+        context: &egui::Context,
+        pos: egui::Pos2,
+        enabled: bool,
+    ) -> DeviceListOutput<&'static str> {
+        render_click_fixture(context, pointer_input(pos, true), enabled);
+        render_click_fixture(context, pointer_input(pos, false), enabled)
+    }
 
     #[test]
     fn detail_rows_keep_a_fixed_compact_height_in_narrow_columns() {
@@ -570,6 +698,58 @@ mod tests {
                 assert!(output.content_size.y <= output.viewport_rect.height());
             });
         }
+    }
+
+    #[test]
+    fn device_list_activates_the_same_item_across_the_entire_display_row() {
+        for target in ["title", "subtitle", "row whitespace", "status badge"] {
+            let context = egui::Context::default();
+            let initial = render_click_fixture(&context, egui::RawInput::default(), true);
+            let pos = match target {
+                "title" => initial.hit_rects[0].title.center(),
+                "subtitle" => initial.hit_rects[0]
+                    .detail
+                    .expect("fixture has a subtitle")
+                    .center(),
+                "row whitespace" => egui::pos2(
+                    initial.row_rects[0].left() + Spacing::XS,
+                    initial.row_rects[0].center().y,
+                ),
+                "status badge" => initial.hit_rects[0]
+                    .badge
+                    .expect("fixture has a status badge")
+                    .center(),
+                _ => unreachable!(),
+            };
+            let clicked = click_fixture(&context, pos, true);
+            assert_eq!(clicked.activated, Some(CLICK_ITEM_ID), "{target}");
+        }
+    }
+
+    #[test]
+    fn disabled_device_list_items_ignore_pointer_and_keyboard_activation() {
+        let context = egui::Context::default();
+        let initial = render_click_fixture(&context, egui::RawInput::default(), false);
+        let clicked = click_fixture(&context, initial.hit_rects[0].title.center(), false);
+        assert!(clicked.activated.is_none());
+
+        context.memory_mut(|memory| {
+            memory.request_focus(Id::new(CLICK_LIST_ID).with(CLICK_ITEM_ID));
+        });
+        let keyed = render_click_fixture(&context, key_input(egui::Key::Enter), false);
+        assert!(keyed.activated.is_none());
+    }
+
+    #[test]
+    fn focused_device_list_items_keep_keyboard_activation() {
+        let context = egui::Context::default();
+        render_click_fixture(&context, egui::RawInput::default(), true);
+        context.memory_mut(|memory| {
+            memory.request_focus(Id::new(CLICK_LIST_ID).with(CLICK_ITEM_ID));
+        });
+
+        let output = render_click_fixture(&context, key_input(egui::Key::Space), true);
+        assert_eq!(output.activated, Some(CLICK_ITEM_ID));
     }
 
     #[test]
