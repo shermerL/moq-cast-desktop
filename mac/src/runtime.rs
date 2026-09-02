@@ -1775,8 +1775,10 @@ mod tests {
 
     #[test]
     fn stale_network_generation_cannot_mutate_snapshot() {
-        let mut snapshot = AppSnapshot::default();
-        snapshot.local_peer_id = Some("previous-run".to_owned());
+        let mut snapshot = AppSnapshot {
+            local_peer_id: Some("previous-run".to_owned()),
+            ..AppSnapshot::default()
+        };
         let stale = begin_network_start(&mut snapshot);
         assert!(snapshot.local_peer_id.is_none());
         apply_network_event(
