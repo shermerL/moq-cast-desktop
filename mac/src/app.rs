@@ -8,12 +8,12 @@ mod view;
 
 use eframe::egui::{self, Align, Color32, Frame, Key, Layout, Modifiers};
 use moqcast_ui::{
-    BadgeTone, COLORS, DetailRowSpec, DeviceRowSpec, NavItemSpec, PageWidth, SelectSpec,
-    SettingRowSpec, Size, Spacing, StatePanelKind, StatePanelSpec, SwitchSpec, Theme,
-    TypographyRole, app_bar_content_rect, danger_button, detail_row as compact_detail_row,
-    device_row, install_ui_font, nav_item, page_header, page_shell, primary_button,
-    secondary_button, section_header, select, setting_row, state_panel, status_badge, status_strip,
-    switch, typography,
+    BadgeTone, COLORS, DetailRowSpec, DeviceBadgeSpec, DeviceListItemSpec, DeviceListSpec,
+    NavItemSpec, PageWidth, SelectSpec, SettingRowSpec, Size, Spacing, StatePanelKind,
+    StatePanelSpec, SwitchSpec, Theme, TypographyRole, app_bar_content_rect, danger_button,
+    detail_row as compact_detail_row, device_list, install_ui_font, nav_item, page_header,
+    page_shell, primary_button, secondary_button, section_header, select, setting_row, state_panel,
+    status_badge, status_strip, switch, typography,
 };
 
 use self::view::{
@@ -478,22 +478,30 @@ impl MoqCastApp {
     }
 
     fn local_summary(&self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
-        let title = match snapshot.local_device_name.as_deref() {
-            Some(device_name) => {
-                format!("{} · {device_name}", self.text("这台 Mac", "This Mac"))
-            }
-            None => self.text("这台 Mac", "This Mac").to_owned(),
-        };
+        let device_name = snapshot
+            .local_device_name
+            .as_deref()
+            .unwrap_or(self.text("这台 Mac", "This Mac"));
         let status = local_status(snapshot, self.locale);
+        let description = local_device_description(
+            self.locale,
+            device_name,
+            status,
+            snapshot.local_peer_id.as_deref(),
+        );
         let counts = count_summary(snapshot, self.locale);
 
-        setting_row(ui, SettingRowSpec::new(&title).description(status), |ui| {
-            ui.label(typography(
-                counts,
-                TypographyRole::Meta,
-                COLORS.muted.into(),
-            ));
-        });
+        setting_row(
+            ui,
+            SettingRowSpec::new(local_device_id_label(self.locale)).description(&description),
+            |ui| {
+                ui.label(typography(
+                    counts,
+                    TypographyRole::Meta,
+                    COLORS.muted.into(),
+                ));
+            },
+        );
     }
 
     fn placeholder(&self, ui: &mut egui::Ui, busy: bool, title: &str, body: &str) {
@@ -559,29 +567,46 @@ impl MoqCastApp {
     }
 
     fn device_list(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot, selected: Option<&str>) {
-        ui.spacing_mut().item_spacing.y = Spacing::XS;
-        for (id, peer) in &snapshot.peers {
-            let presentation = PeerPresentation::from(peer);
-            let title = device_name(peer, self.locale);
-            let detail = peer_line(presentation, self.locale);
-            let (response, ()) = device_row(
-                ui,
-                DeviceRowSpec::new(egui::Id::new(("nearby-peer", id)), &title)
-                    .detail(detail)
-                    .selected(selected == Some(id)),
-                |ui| {
-                    status_badge(
-                        ui,
-                        connection_badge(presentation.connection, self.locale),
-                        connection_tone(presentation.connection),
-                    );
-                },
-            );
-            let keyboard_activated = response.has_focus()
-                && ui.input(|input| input.key_pressed(Key::Enter) || input.key_pressed(Key::Space));
-            if response.clicked() || keyboard_activated {
-                self.selected_peer = Some(id.clone());
-            }
+        let titles = snapshot
+            .peers
+            .values()
+            .map(|peer| device_name(peer, self.locale))
+            .collect::<Vec<_>>();
+        let subtitles = snapshot
+            .peers
+            .iter()
+            .map(|(id, peer)| {
+                let presentation = PeerPresentation::from(peer);
+                let screen = screen_availability(id, &snapshot.remote_screens);
+                peer_list_subtitle(
+                    self.locale,
+                    id,
+                    device_status(presentation, screen, self.locale),
+                )
+            })
+            .collect::<Vec<_>>();
+        let items = snapshot
+            .peers
+            .iter()
+            .zip(&titles)
+            .zip(&subtitles)
+            .map(|(((id, peer), title), subtitle)| {
+                let presentation = PeerPresentation::from(peer);
+                let screen = screen_availability(id, &snapshot.remote_screens);
+                DeviceListItemSpec::new(id.clone(), title)
+                    .subtitle(subtitle)
+                    .badge(DeviceBadgeSpec::new(
+                        device_status(presentation, screen, self.locale),
+                        device_status_tone(presentation, screen),
+                    ))
+                    .selected(selected == Some(id))
+            })
+            .collect::<Vec<_>>();
+        if let Some(peer_id) = device_list(
+            ui,
+            DeviceListSpec::new(egui::Id::new("mac-nearby-peers"), &items),
+        ) {
+            self.selected_peer = Some(peer_id);
         }
     }
 
@@ -596,12 +621,7 @@ impl MoqCastApp {
         let screen = screen_availability(peer_id, &snapshot.remote_screens);
         let peer_name = device_name(peer, self.locale);
         section_header(ui, &peer_name, Some(peer_line(presentation, self.locale)));
-        detail_row(
-            ui,
-            self.text("附近状态", "Nearby status"),
-            presence_label(presentation.presence, self.locale),
-            None,
-        );
+        detail_row(ui, remote_device_id_label(self.locale), peer_id, None);
         detail_row(
             ui,
             self.text("连接", "Connection"),
@@ -1278,6 +1298,54 @@ fn device_name(peer: &PeerSnapshot, locale: Locale) -> String {
     }
 }
 
+fn local_device_id_label(locale: Locale) -> &'static str {
+    text(locale, "本机 ID", "This device ID")
+}
+
+fn remote_device_id_label(locale: Locale) -> &'static str {
+    text(locale, "设备 ID", "Device ID")
+}
+
+fn local_device_description(
+    locale: Locale,
+    device_name: &str,
+    status: &str,
+    peer_id: Option<&str>,
+) -> String {
+    let identity = match (locale, peer_id) {
+        (Locale::Chinese, Some(peer_id)) => format!("本次运行：{peer_id}"),
+        (Locale::English, Some(peer_id)) => format!("Current run: {peer_id}"),
+        (Locale::Chinese, None) => "本次运行尚未生成 ID".to_owned(),
+        (Locale::English, None) => "No ID for the current run yet".to_owned(),
+    };
+    format!("{device_name} · {status} · {identity}")
+}
+
+fn peer_list_subtitle(locale: Locale, peer_id: &str, status: &str) -> String {
+    format!("{status} · {}: {peer_id}", remote_device_id_label(locale))
+}
+
+fn device_status(
+    peer: PeerPresentation,
+    screen: ScreenAvailability,
+    locale: Locale,
+) -> &'static str {
+    if screen == ScreenAvailability::Available {
+        return text(locale, "可观看", "Watchable");
+    }
+    peer_line(peer, locale)
+}
+
+fn device_status_tone(peer: PeerPresentation, screen: ScreenAvailability) -> BadgeTone {
+    if screen == ScreenAvailability::Available {
+        return BadgeTone::Info;
+    }
+    if peer.presence == PresenceView::NotNearby && peer.connection != ConnectionView::Connected {
+        return BadgeTone::Warning;
+    }
+    connection_tone(peer.connection)
+}
+
 fn peer_line(peer: PeerPresentation, locale: Locale) -> &'static str {
     match (peer.presence, peer.connection) {
         (PresenceView::NotNearby, ConnectionView::Connected) => text(
@@ -1286,35 +1354,20 @@ fn peer_line(peer: PeerPresentation, locale: Locale) -> &'static str {
             "No longer nearby · Session active",
         ),
         (PresenceView::NotNearby, _) => text(locale, "已离开附近范围", "No longer nearby"),
-        (PresenceView::Nearby, ConnectionView::Waiting) => {
-            text(locale, "附近 · 等待对端连接", "Nearby · Waiting for device")
+        (PresenceView::Nearby, ConnectionView::Waiting) => text(locale, "已发现", "Found"),
+        (PresenceView::Nearby, ConnectionView::ConnectingSecurely) => {
+            text(locale, "正在安全连接", "Connecting securely")
         }
-        (PresenceView::Nearby, ConnectionView::ConnectingSecurely) => text(
-            locale,
-            "附近 · 正在安全连接",
-            "Nearby · Connecting securely",
-        ),
-        (PresenceView::Nearby, ConnectionView::Connected) => {
-            text(locale, "附近 · 已连接", "Nearby · Connected")
+        (PresenceView::Nearby, ConnectionView::Connected) => text(locale, "已连接", "Connected"),
+        (PresenceView::Nearby, ConnectionView::Rejected) => {
+            text(locale, "无法验证连接", "Could not verify connection")
         }
-        (PresenceView::Nearby, ConnectionView::Rejected) => text(
-            locale,
-            "附近 · 无法验证连接",
-            "Nearby · Could not verify connection",
-        ),
         (PresenceView::Nearby, ConnectionView::Failed) => {
-            text(locale, "附近 · 连接失败", "Nearby · Connection failed")
+            text(locale, "连接失败", "Connection failed")
         }
         (PresenceView::Nearby, ConnectionView::Disconnected) => {
-            text(locale, "附近 · 连接已结束", "Nearby · Session ended")
+            text(locale, "连接已结束", "Session ended")
         }
-    }
-}
-
-fn presence_label(presence: PresenceView, locale: Locale) -> &'static str {
-    match presence {
-        PresenceView::Nearby => text(locale, "附近", "Nearby"),
-        PresenceView::NotNearby => text(locale, "已离开附近范围", "No longer nearby"),
     }
 }
 
@@ -1326,13 +1379,6 @@ fn connection_label(connection: ConnectionView, locale: Locale) -> &'static str 
         ConnectionView::Rejected => text(locale, "无法验证", "Could not verify"),
         ConnectionView::Failed => text(locale, "连接失败", "Connection failed"),
         ConnectionView::Disconnected => text(locale, "连接已结束", "Session ended"),
-    }
-}
-
-fn connection_badge(connection: ConnectionView, locale: Locale) -> &'static str {
-    match connection {
-        ConnectionView::ConnectingSecurely => text(locale, "连接中", "Connecting"),
-        _ => connection_label(connection, locale),
     }
 }
 

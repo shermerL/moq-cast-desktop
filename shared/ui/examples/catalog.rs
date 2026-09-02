@@ -4,12 +4,13 @@ use eframe::egui::{
     self, Align, Context, Frame, Id, Layout, Margin, ScrollArea, Stroke, Ui, ViewportCommand, vec2,
 };
 use moqcast_ui::{
-    BadgeTone, ButtonSpec, COLORS, CheckboxSpec, ControlRole, DeviceRowSpec, DialogSpec,
-    IconButtonSpec, Interaction, NavItemSpec, SelectSpec, SettingRowSpec, Size, Spacing,
-    StatePanelKind, StatePanelSpec, SwitchSpec, Theme, TypographyRole, checkbox, control_button,
-    device_row, dialog, install_ui_font, nav_item, page_header, player_icon_button, player_stage,
-    player_toolbar, primary_button, secondary_button, section_header, select, setting_row,
-    state_panel, status_badge, switch, typography,
+    BadgeTone, ButtonSpec, COLORS, CheckboxSpec, ControlRole, DeviceBadgeSpec, DeviceListItemSpec,
+    DeviceListSpec, DeviceRowSpec, DialogSpec, IconButtonSpec, Interaction, NavItemSpec,
+    SelectSpec, SettingRowSpec, Size, Spacing, StatePanelKind, StatePanelSpec, SwitchSpec, Theme,
+    TypographyRole, checkbox, control_button, device_list, device_row, dialog, install_ui_font,
+    nav_item, page_header, player_icon_button, player_stage, player_toolbar, primary_button,
+    secondary_button, section_header, select, setting_row, state_panel, status_badge, switch,
+    typography,
 };
 
 fn main() -> eframe::Result {
@@ -80,6 +81,7 @@ struct Catalog {
     checkbox_value: bool,
     select_value: usize,
     dialog_open: bool,
+    selected_device: &'static str,
 }
 
 impl Catalog {
@@ -95,6 +97,7 @@ impl Catalog {
             checkbox_value: true,
             select_value: 0,
             dialog_open: false,
+            selected_device: "review-b",
         }
     }
 
@@ -229,6 +232,8 @@ fn catalog_content(catalog: &mut Catalog, ui: &mut Ui) {
         controls_catalog(catalog, ui);
         ui.add_space(Spacing::XXL);
         rows_catalog(catalog, ui);
+        ui.add_space(Size::MAJOR_SECTION_SPACING);
+        device_list_catalog(catalog, ui);
         ui.add_space(Size::MAJOR_SECTION_SPACING);
         player_catalog(catalog, ui);
         ui.add_space(Spacing::XXL);
@@ -380,6 +385,129 @@ fn rows_catalog(catalog: &Catalog, ui: &mut Ui) {
             status_badge(ui, catalog.text("在线", "Online"), BadgeTone::Info);
         },
     );
+}
+
+fn device_list_catalog(catalog: &mut Catalog, ui: &mut Ui) {
+    section_header(
+        ui,
+        catalog.text("设备列表审阅矩阵", "Device-list review matrix"),
+        Some(catalog.text(
+            "仅用于共享组件静态审阅，不代表运行时发现或连接状态。",
+            "Static review fixture only. It does not represent runtime discovery or connection state.",
+        )),
+    );
+
+    fixture_label(ui, catalog.text("空列表", "Empty list"));
+    let empty: [DeviceListItemSpec<'_, &'static str>; 0] = [];
+    let _ = device_list(
+        ui,
+        DeviceListSpec::new(Id::new("catalog-device-list-empty"), &empty),
+    );
+    ui.label(typography(
+        catalog.text("没有分配设备行。", "No device rows allocated."),
+        TypographyRole::Help,
+        COLORS.muted.into(),
+    ));
+    ui.add_space(Spacing::LG);
+
+    fixture_label(ui, catalog.text("单项", "Single item"));
+    let single = [DeviceListItemSpec::new(
+        "review-single",
+        catalog.text("客厅设备", "Living room device"),
+    )
+    .subtitle(catalog.text("设备 ID：A1B2C3D4", "Device ID: A1B2C3D4"))
+    .badge(DeviceBadgeSpec::new(
+        catalog.text("已发现", "Found"),
+        BadgeTone::Neutral,
+    ))];
+    let _ = device_list(
+        ui,
+        DeviceListSpec::new(Id::new("catalog-device-list-single"), &single),
+    );
+    ui.add_space(Spacing::LG);
+
+    fixture_label(
+        ui,
+        catalog.text(
+            "多项、同名与混合状态",
+            "Multiple, duplicate, and mixed states",
+        ),
+    );
+    let mixed = [
+        DeviceListItemSpec::new("review-a", catalog.text("会议室", "Meeting room"))
+            .subtitle(catalog.text("设备 ID：7F2A104C", "Device ID: 7F2A104C"))
+            .badge(DeviceBadgeSpec::new(
+                catalog.text("可观看", "Watchable"),
+                BadgeTone::Info,
+            ))
+            .selected(catalog.selected_device == "review-a")
+            .preview_interaction(Interaction::Hovered),
+        DeviceListItemSpec::new("review-b", catalog.text("会议室", "Meeting room"))
+            .subtitle(catalog.text("设备 ID：9C4D22E1", "Device ID: 9C4D22E1"))
+            .badge(DeviceBadgeSpec::new(
+                catalog.text("已连接", "Connected"),
+                BadgeTone::Info,
+            ))
+            .selected(catalog.selected_device == "review-b"),
+        DeviceListItemSpec::new(
+            "review-c",
+            catalog.text(
+                "用于跨设备联调与演示的超长中文设备名称",
+                "A very long interoperability review workstation name",
+            ),
+        )
+        .subtitle(catalog.text("设备 ID：D81E5A60", "Device ID: D81E5A60"))
+        .badge(DeviceBadgeSpec::new(
+            catalog.text("已发现", "Found"),
+            BadgeTone::Neutral,
+        ))
+        .selected(catalog.selected_device == "review-c")
+        .preview_interaction(Interaction::Focused),
+        DeviceListItemSpec::new("review-d", catalog.text("离线设备", "Unavailable device"))
+            .subtitle(catalog.text("设备 ID：11AA22BB", "Device ID: 11AA22BB"))
+            .badge(DeviceBadgeSpec::new(
+                catalog.text("不可用", "Unavailable"),
+                BadgeTone::Warning,
+            ))
+            .enabled(false),
+    ];
+    if let Some(selected) = device_list(
+        ui,
+        DeviceListSpec::new(Id::new("catalog-device-list-mixed"), &mixed),
+    ) {
+        catalog.selected_device = selected;
+    }
+    ui.add_space(Spacing::LG);
+
+    fixture_label(
+        ui,
+        catalog.text("窄列与七项滚动", "Narrow column and seven-item scrolling"),
+    );
+    ui.allocate_ui_with_layout(
+        vec2(ui.available_width().min(240.0), 0.0),
+        Layout::top_down(Align::Min),
+        |ui| {
+            let ids = [
+                "scroll-1", "scroll-2", "scroll-3", "scroll-4", "scroll-5", "scroll-6", "scroll-7",
+            ];
+            let items = ids.map(|id| {
+                DeviceListItemSpec::new(id, catalog.text("滚动审阅设备", "Scrolling review device"))
+                    .subtitle(catalog.text("设备 ID：FIXTURE", "Device ID: FIXTURE"))
+                    .badge(DeviceBadgeSpec::new(
+                        catalog.text("已发现", "Found"),
+                        BadgeTone::Neutral,
+                    ))
+            });
+            let _ = device_list(
+                ui,
+                DeviceListSpec::new(Id::new("catalog-device-list-scroll"), &items),
+            );
+        },
+    );
+}
+
+fn fixture_label(ui: &mut Ui, label: &str) {
+    ui.label(typography(label, TypographyRole::Meta, COLORS.muted.into()));
 }
 
 fn player_catalog(catalog: &Catalog, ui: &mut Ui) {

@@ -2,12 +2,12 @@
 
 use eframe::egui::{self, Align, Color32, Frame, Layout};
 use moqcast_ui::{
-    BadgeTone, ButtonSpec, COLORS, ControlRole, DeviceRowSpec, DialogClosePolicy, DialogSpec,
-    NavItemSpec, PageWidth, SelectSpec, SettingRowSpec, Size, Spacing, StatePanelKind,
-    StatePanelSpec, SwitchSpec, Theme, TypographyRole, app_bar_content_rect, control_button,
-    danger_button, device_row, dialog, install_ui_font, major_section_break, nav_item, page_header,
-    page_shell, primary_button, secondary_button, section_header, select, setting_row, state_panel,
-    status_badge, switch, typography,
+    BadgeTone, ButtonSpec, COLORS, ControlRole, DeviceBadgeSpec, DeviceListItemSpec,
+    DeviceListSpec, DialogClosePolicy, DialogSpec, NavItemSpec, PageWidth, SelectSpec,
+    SettingRowSpec, Size, Spacing, StatePanelKind, StatePanelSpec, SwitchSpec, Theme,
+    TypographyRole, app_bar_content_rect, control_button, danger_button, device_list, dialog,
+    install_ui_font, major_section_break, nav_item, page_header, page_shell, primary_button,
+    secondary_button, section_header, select, setting_row, state_panel, switch, typography,
 };
 
 use crate::{
@@ -392,14 +392,15 @@ impl MoqCastApp {
             (Locale::Chinese, DiscoveryState::Failed) => "附近设备不可用",
             (Locale::English, DiscoveryState::Failed) => "Nearby is unavailable",
         };
-        let local_detail = format!("{} · {local_status}", self.snapshot.local_device_name);
+        let local_detail = local_device_description(
+            self.locale,
+            &self.snapshot.local_device_name,
+            local_status,
+            self.snapshot.local_id.as_deref(),
+        );
         setting_row(
             ui,
-            SettingRowSpec::new(match self.locale {
-                Locale::Chinese => "本机设备",
-                Locale::English => "This device",
-            })
-            .description(&local_detail),
+            SettingRowSpec::new(local_device_id_label(self.locale)).description(&local_detail),
             |ui| {
                 let response = if nearby_active {
                     danger_button(ui, nearby_action, !turning_off)
@@ -436,9 +437,7 @@ impl MoqCastApp {
             .and_then(|id| peers.iter().find(|peer| peer.id == id))
             .cloned();
         if nearby_uses_stacked_layout(ui.available_width()) {
-            egui::ScrollArea::vertical()
-                .max_height(260.0)
-                .show(ui, |ui| self.peer_list(ui, &peers));
+            self.peer_list(ui, &peers);
             ui.separator();
             self.peer_detail(
                 ui,
@@ -452,9 +451,7 @@ impl MoqCastApp {
                 ui.allocate_ui_with_layout(
                     egui::vec2(list_width, height),
                     Layout::top_down(Align::Min),
-                    |ui| {
-                        egui::ScrollArea::vertical().show(ui, |ui| self.peer_list(ui, &peers));
-                    },
+                    |ui| self.peer_list(ui, &peers),
                 );
                 ui.separator();
                 ui.allocate_ui_with_layout(
@@ -521,24 +518,34 @@ impl MoqCastApp {
     }
 
     fn peer_list(&mut self, ui: &mut egui::Ui, peers: &[PeerView]) {
-        for (index, peer) in peers.iter().enumerate() {
-            let selected = self.selected_peer.as_deref() == Some(peer.id.as_str());
-            let title = peer_display_name(self.locale, index + 1);
-            let detail = peer_status(self.locale, peer);
-            let (response, ()) = device_row(
-                ui,
-                DeviceRowSpec::new(egui::Id::new(("nearby-peer", &peer.id)), &title)
-                    .detail(detail)
-                    .selected(selected),
-                |ui| {
-                    if peer.screen == ScreenAvailability::Available {
-                        status_badge(ui, detail, BadgeTone::Info);
-                    }
-                },
-            );
-            if response.clicked() {
-                self.selected_peer = Some(peer.id.clone());
-            }
+        let titles = peers
+            .iter()
+            .enumerate()
+            .map(|(index, _)| peer_display_name(self.locale, index + 1))
+            .collect::<Vec<_>>();
+        let subtitles = peers
+            .iter()
+            .map(|peer| peer_list_subtitle(self.locale, peer))
+            .collect::<Vec<_>>();
+        let items = peers
+            .iter()
+            .zip(&titles)
+            .zip(&subtitles)
+            .map(|((peer, title), subtitle)| {
+                DeviceListItemSpec::new(peer.id.clone(), title)
+                    .subtitle(subtitle)
+                    .badge(DeviceBadgeSpec::new(
+                        peer_status(self.locale, peer),
+                        peer_badge_tone(peer),
+                    ))
+                    .selected(self.selected_peer.as_deref() == Some(peer.id.as_str()))
+            })
+            .collect::<Vec<_>>();
+        if let Some(peer_id) = device_list(
+            ui,
+            DeviceListSpec::new(egui::Id::new("windows-nearby-peers"), &items),
+        ) {
+            self.selected_peer = Some(peer_id);
         }
     }
 
@@ -555,6 +562,17 @@ impl MoqCastApp {
                 Locale::Chinese => "所选设备",
                 Locale::English => "Selected device",
             }),
+        );
+        setting_value_row(
+            ui,
+            remote_device_id_label(self.locale),
+            match self.locale {
+                Locale::Chinese => "用于区分同名设备，仅表示对方当前运行实例。",
+                Locale::English => {
+                    "Distinguishes duplicate names and identifies the peer's current run."
+                }
+            },
+            &peer.id,
         );
 
         if !peer.present {
@@ -1408,6 +1426,58 @@ fn peer_display_name(locale: Locale, ordinal: usize) -> String {
     format!("{base} {ordinal}")
 }
 
+fn local_device_id_label(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Chinese => "本机 ID",
+        Locale::English => "This device ID",
+    }
+}
+
+fn remote_device_id_label(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Chinese => "设备 ID",
+        Locale::English => "Device ID",
+    }
+}
+
+fn local_device_description(
+    locale: Locale,
+    device_name: &str,
+    status: &str,
+    peer_id: Option<&str>,
+) -> String {
+    let identity = match (locale, peer_id) {
+        (Locale::Chinese, Some(peer_id)) => format!("本次运行：{peer_id}"),
+        (Locale::English, Some(peer_id)) => format!("Current run: {peer_id}"),
+        (Locale::Chinese, None) => "本次运行尚未生成 ID".to_owned(),
+        (Locale::English, None) => "No ID for the current run yet".to_owned(),
+    };
+    format!("{device_name} · {status} · {identity}")
+}
+
+fn peer_list_subtitle(locale: Locale, peer: &PeerView) -> String {
+    format!(
+        "{} · {}: {}",
+        peer_status(locale, peer),
+        remote_device_id_label(locale),
+        peer.id
+    )
+}
+
+fn peer_badge_tone(peer: &PeerView) -> BadgeTone {
+    if !peer.present {
+        return BadgeTone::Warning;
+    }
+    if peer.screen == ScreenAvailability::Available {
+        return BadgeTone::Info;
+    }
+    match peer.transport.phase {
+        TransportPhaseView::Rejected | TransportPhaseView::Failed => BadgeTone::Danger,
+        TransportPhaseView::Connected | TransportPhaseView::Connecting => BadgeTone::Info,
+        TransportPhaseView::Waiting | TransportPhaseView::Disconnected => BadgeTone::Neutral,
+    }
+}
+
 fn peer_status(locale: Locale, peer: &PeerView) -> &'static str {
     if !peer.present {
         return match locale {
@@ -1668,13 +1738,26 @@ mod tests {
     }
 
     #[test]
-    fn nearby_names_and_statuses_hide_transport_internals() {
+    fn nearby_identity_copy_shows_peer_ids_without_transport_internals() {
         let mut visible = peer("0123-abcd");
+        visible.candidates.push("192.0.2.1:4443".to_owned());
         visible.transport.phase = TransportPhaseView::Connecting;
         assert_eq!(peer_display_name(Locale::Chinese, 1), "附近设备 1");
         assert_eq!(peer_display_name(Locale::English, 2), "Nearby device 2");
         assert!(!peer_display_name(Locale::English, 1).contains("abcd"));
         assert_eq!(peer_status(Locale::English, &visible), "Connecting");
+        assert_eq!(local_device_id_label(Locale::English), "This device ID");
+        assert_eq!(remote_device_id_label(Locale::English), "Device ID");
+        let local = local_device_description(
+            Locale::English,
+            "Workstation",
+            "Nearby is on",
+            Some("local-peer"),
+        );
+        let remote = peer_list_subtitle(Locale::English, &visible);
+        assert!(local.contains("Current run: local-peer"));
+        assert!(remote.contains("Device ID: 0123-abcd"));
+        assert!(!remote.contains("192.0.2.1"));
 
         visible.screen = ScreenAvailability::Available;
         assert_eq!(peer_status(Locale::Chinese, &visible), "屏幕可观看");

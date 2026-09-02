@@ -180,6 +180,8 @@ impl Size {
     pub const DETAIL_ROW: f32 = 48.0;
     /// Device row minimum height.
     pub const DEVICE_ROW: f32 = 72.0;
+    /// Maximum device-list height before vertical scrolling is required.
+    pub const DEVICE_LIST_MAX_HEIGHT: f32 = Self::DEVICE_ROW * 5.0 + Spacing::SM * 4.0;
     /// Wide page maximum width for workspaces and dense lists.
     pub const PAGE_WIDE_MAX: f32 = 1120.0;
     /// Medium page maximum width for focused tasks and media.
