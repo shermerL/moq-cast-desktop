@@ -454,6 +454,7 @@ async fn run_inner(
     let mut video_scheduler = sync::VideoScheduler::default();
     let mut queue_drops = 0_u64;
     let mut due_skips = 0_u64;
+    let mut fallback_reanchors = 0_u64;
     let mut last_video_pts: Option<Duration> = None;
     let mut video_discontinuity_reported = false;
 
@@ -615,6 +616,7 @@ async fn run_inner(
                                 teardown_reason = "replacement",
                                 queue_drops,
                                 due_skips,
+                                fallback_reanchors,
                                 "remote video generation stopped by playback owner"
                             );
                             task.stop().await;
@@ -623,6 +625,7 @@ async fn run_inner(
                         video_scheduler.reset();
                         queue_drops = 0;
                         due_skips = 0;
+                        fallback_reanchors = 0;
                         last_video_pts = None;
                         video_discontinuity_reported = false;
                         decoder_name = None;
@@ -705,7 +708,21 @@ async fn run_inner(
                                 }
                             }
                             last_video_pts = Some(pts);
-                            let pushed = video_scheduler.push(pts, decoded);
+                            let pushed = video_scheduler.push(pts, decoded, Instant::now());
+                            if pushed.fallback_reanchored {
+                                fallback_reanchors = fallback_reanchors.saturating_add(1);
+                                if fallback_reanchors == 1 {
+                                    tracing::info!(
+                                        broadcast = path,
+                                        view_generation = generation,
+                                        decoder_generation = sequence.decoder_generation,
+                                        frame_pts_us = pts.as_micros() as u64,
+                                        latency_ceiling_ms = sync::VIDEO_FALLBACK_LATENCY_CEILING
+                                            .as_millis() as u64,
+                                        "remote video fallback clock re-anchored to the live edge"
+                                    );
+                                }
+                            }
                             if pushed.dropped.is_some() {
                                 queue_drops = queue_drops.saturating_add(1);
                                 if queue_drops == 1 {
@@ -733,6 +750,7 @@ async fn run_inner(
                                 teardown_reason = "ended",
                                 queue_drops,
                                 due_skips,
+                                fallback_reanchors,
                                 "remote video track ended; waiting for catalog replacement"
                             );
                         }
@@ -754,6 +772,7 @@ async fn run_inner(
             teardown_reason = "stop",
             queue_drops,
             due_skips,
+            fallback_reanchors,
             "remote video generation stopped by playback owner"
         );
         task.stop().await;

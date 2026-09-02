@@ -8,6 +8,7 @@ use tokio::sync::Notify;
 
 pub(super) const AUDIO_PACING_CEILING: Duration = Duration::from_secs(1);
 pub(super) const MAX_VIDEO_FRAMES: usize = 30;
+pub(super) const VIDEO_FALLBACK_LATENCY_CEILING: Duration = Duration::from_millis(33);
 
 const VIDEO_EARLY_TOLERANCE: Duration = Duration::from_millis(2);
 
@@ -177,6 +178,7 @@ pub(super) struct VideoAdvance<T> {
 pub(super) struct VideoPush<T> {
     pub(super) dropped: Option<T>,
     pub(super) accepted: bool,
+    pub(super) fallback_reanchored: bool,
 }
 
 impl<T> Default for VideoScheduler<T> {
@@ -191,7 +193,7 @@ impl<T> Default for VideoScheduler<T> {
 }
 
 impl<T> VideoScheduler<T> {
-    pub(super) fn push(&mut self, timestamp: Duration, value: T) -> VideoPush<T> {
+    pub(super) fn push(&mut self, timestamp: Duration, value: T, wall: Instant) -> VideoPush<T> {
         if self
             .last_presented
             .is_some_and(|presented| timestamp <= presented)
@@ -199,6 +201,7 @@ impl<T> VideoScheduler<T> {
             return VideoPush {
                 dropped: Some(value),
                 accepted: false,
+                fallback_reanchored: false,
             };
         }
         let mut dropped = None;
@@ -210,6 +213,7 @@ impl<T> VideoScheduler<T> {
                 return VideoPush {
                     dropped: Some(value),
                     accepted: false,
+                    fallback_reanchored: false,
                 };
             }
             dropped = self.queue.pop_front().map(|frame| frame.value);
@@ -220,10 +224,30 @@ impl<T> VideoScheduler<T> {
             .position(|frame| frame.timestamp > timestamp)
             .unwrap_or(self.queue.len());
         self.queue.insert(index, Scheduled { timestamp, value });
+        let fallback_reanchored = self.reanchor_fallback(timestamp, wall);
         VideoPush {
             dropped,
             accepted: true,
+            fallback_reanchored,
         }
+    }
+
+    fn reanchor_fallback(&mut self, timestamp: Duration, wall: Instant) -> bool {
+        let Some(fallback) = self.fallback else {
+            return false;
+        };
+        if timestamp
+            <= fallback
+                .now_at(wall)
+                .saturating_add(VIDEO_FALLBACK_LATENCY_CEILING)
+        {
+            return false;
+        }
+        self.fallback = Some(Clock::new(
+            timestamp.saturating_sub(VIDEO_FALLBACK_LATENCY_CEILING),
+            wall,
+        ));
+        true
     }
 
     pub(super) fn reset(&mut self) {
@@ -331,7 +355,7 @@ mod tests {
     fn first_video_frame_builds_fallback_without_audio() {
         let wall = Instant::now();
         let mut video = VideoScheduler::default();
-        assert!(video.push(at(900_000), 1).accepted);
+        assert!(video.push(at(900_000), 1, wall).accepted);
 
         let advance = video.advance(None, wall);
 
@@ -346,8 +370,8 @@ mod tests {
         let audio = media.audio(4);
         assert!(audio.anchor(at(2_000_000), Duration::ZERO, wall));
         let mut video = VideoScheduler::default();
-        video.push(at(2_000_000), 1);
-        video.push(at(3_000_000), 2);
+        video.push(at(2_000_000), 1, wall);
+        video.push(at(3_000_000), 2, wall);
         let advance = video.advance(media.audio_anchor(), wall);
         assert_eq!(advance.source_changed, Some(ClockSource::Audio));
 
@@ -363,10 +387,10 @@ mod tests {
     fn only_latest_due_frame_is_returned_and_future_frame_remains() {
         let wall = Instant::now();
         let mut video = VideoScheduler::default();
-        video.push(at(30_000), 3);
-        video.push(at(10_000), 1);
-        video.push(at(100_000), 4);
-        video.push(at(20_000), 2);
+        video.push(at(30_000), 3, wall);
+        video.push(at(10_000), 1, wall);
+        video.push(at(100_000), 4, wall);
+        video.push(at(20_000), 2, wall);
 
         let advance = video.advance(Some(Clock::new(at(50_000), wall)), wall);
 
@@ -375,35 +399,80 @@ mod tests {
         assert_eq!(video.queue.len(), 1);
         assert_eq!(advance.deadline, wall.checked_add(at(50_000)));
 
-        let stale = video.push(at(25_000), 5);
+        let stale = video.push(at(25_000), 5, wall);
         assert!(!stale.accepted);
         assert_eq!(stale.dropped, Some(5));
     }
 
     #[test]
     fn video_queue_stays_bounded_and_keeps_the_latest_frames() {
+        let wall = Instant::now();
         let mut video = VideoScheduler::default();
         for value in 0..MAX_VIDEO_FRAMES {
-            assert!(video.push(at(value as u64), value).accepted);
+            assert!(video.push(at(value as u64), value, wall).accepted);
         }
 
-        let pushed = video.push(at(99_000), MAX_VIDEO_FRAMES);
+        let pushed = video.push(at(99_000), MAX_VIDEO_FRAMES, wall);
 
         assert!(pushed.accepted);
         assert_eq!(pushed.dropped, Some(0));
         assert_eq!(video.queue.len(), MAX_VIDEO_FRAMES);
 
-        let rejected = video.push(Duration::ZERO, MAX_VIDEO_FRAMES + 1);
+        let rejected = video.push(Duration::ZERO, MAX_VIDEO_FRAMES + 1, wall);
         assert!(!rejected.accepted);
         assert_eq!(rejected.dropped, Some(MAX_VIDEO_FRAMES + 1));
         assert_eq!(video.queue.len(), MAX_VIDEO_FRAMES);
     }
 
     #[test]
+    fn video_fallback_reanchors_when_decode_runs_ahead_of_wall_clock() {
+        let wall = Instant::now();
+        let mut video = VideoScheduler::default();
+        assert!(video.push(Duration::ZERO, 1, wall).accepted);
+        assert_eq!(video.advance(None, wall).due, Some(1));
+
+        let received = wall + at(10_000);
+        let pushed = video.push(at(1_000_000), 2, received);
+
+        assert!(pushed.fallback_reanchored);
+        let waiting = video.advance(None, received);
+        assert_eq!(waiting.due, None);
+        assert_eq!(
+            waiting.deadline,
+            received.checked_add(VIDEO_FALLBACK_LATENCY_CEILING)
+        );
+        assert_eq!(
+            video
+                .advance(None, received + VIDEO_FALLBACK_LATENCY_CEILING)
+                .due,
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn audio_clock_prevents_video_fallback_reanchoring() {
+        let wall = Instant::now();
+        let mut video = VideoScheduler::default();
+        assert!(video.push(Duration::ZERO, 1, wall).accepted);
+        assert_eq!(video.advance(None, wall).due, Some(1));
+
+        let audio = Clock::new(at(100_000), wall);
+        assert_eq!(
+            video.advance(Some(audio), wall).source_changed,
+            Some(ClockSource::Audio)
+        );
+        let pushed = video.push(at(1_000_000), 2, wall);
+
+        assert!(!pushed.fallback_reanchored);
+        assert!(video.fallback.is_none());
+        assert_eq!(video.advance(Some(audio), wall).due, None);
+    }
+
+    #[test]
     fn decoder_replacement_clears_queue_and_clock_source() {
         let wall = Instant::now();
         let mut video = VideoScheduler::default();
-        video.push(at(10_000), 1);
+        video.push(at(10_000), 1, wall);
         video.advance(None, wall);
 
         video.reset();
@@ -411,6 +480,6 @@ mod tests {
         assert!(video.queue.is_empty());
         assert!(video.fallback.is_none());
         assert!(video.source.is_none());
-        assert!(video.push(Duration::ZERO, 2).accepted);
+        assert!(video.push(Duration::ZERO, 2, wall).accepted);
     }
 }
