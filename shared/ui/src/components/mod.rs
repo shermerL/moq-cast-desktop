@@ -10,8 +10,8 @@ mod row;
 mod state_panel;
 
 pub use button::{
-    ButtonSpec, IconButtonSpec, control_button, danger_button, icon_button, player_icon_button,
-    primary_button, secondary_button,
+    ButtonSpec, IconButtonSpec, control_button, danger_button, icon_button, player_button,
+    player_icon_button, primary_button, secondary_button,
 };
 pub use dialog::{DialogClosePolicy, DialogResponse, DialogSpec, dialog};
 pub use form::{CheckboxSpec, SelectError, SelectSpec, SwitchSpec, checkbox, select, switch};
@@ -21,7 +21,8 @@ pub use layout::{
 };
 pub use navigation::{NavItemSpec, nav_item};
 pub use player::{
-    PlayerRects, player_rects, player_stage, player_stage_at, player_toolbar, player_toolbar_at,
+    PlayerRects, PlayerSurfaceResponse, player_rects, player_stage, player_stage_at,
+    player_surface, player_toolbar, player_toolbar_at,
 };
 pub use row::{
     DetailRowSpec, DeviceBadgeSpec, DeviceListItemSpec, DeviceListSpec, DeviceRowSpec,
