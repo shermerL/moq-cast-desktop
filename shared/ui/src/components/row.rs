@@ -135,12 +135,23 @@ impl<'a, I> DeviceListItemSpec<'a, I> {
 pub struct DeviceListSpec<'a, I> {
     id: Id,
     items: &'a [DeviceListItemSpec<'a, I>],
+    viewport_height: Option<f32>,
 }
 
 impl<'a, I> DeviceListSpec<'a, I> {
     /// Creates a device list with a stable scroll-area ID and item slice.
     pub fn new(id: Id, items: &'a [DeviceListItemSpec<'a, I>]) -> Self {
-        Self { id, items }
+        Self {
+            id,
+            items,
+            viewport_height: None,
+        }
+    }
+
+    /// Fills a caller-owned viewport with this logical height.
+    pub fn viewport_height(mut self, height: f32) -> Self {
+        self.viewport_height = Some(height.max(Size::DEVICE_ROW));
+        self
     }
 }
 
@@ -446,10 +457,13 @@ fn render_device_list<I>(ui: &mut Ui, spec: DeviceListSpec<'_, I>) -> DeviceList
 where
     I: Clone + Debug + Hash,
 {
+    let viewport_height = spec.viewport_height.unwrap_or(Size::DEVICE_LIST_MAX_HEIGHT);
+    let shrink_vertically = spec.viewport_height.is_none();
     let output = ScrollArea::vertical()
         .id_salt(spec.id)
-        .max_height(Size::DEVICE_LIST_MAX_HEIGHT)
-        .auto_shrink([false, true])
+        .max_height(viewport_height)
+        .min_scrolled_height(viewport_height)
+        .auto_shrink([false, shrink_vertically])
         .scroll_bar_visibility(ScrollBarVisibility::VisibleWhenNeeded)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -821,6 +835,36 @@ mod tests {
             assert_eq!(output.content_rect.top(), first.top());
             assert_eq!(output.content_rect.bottom(), last.bottom());
             assert_eq!(output.content_cursor_y, last.bottom());
+        });
+    }
+
+    #[test]
+    fn device_list_can_fill_a_caller_owned_remaining_height() {
+        egui::__run_test_ui(|ui| {
+            ui.set_width(Size::NEARBY_LIST);
+            let titles = (1..=8)
+                .map(|index| format!("Device {index}"))
+                .collect::<Vec<_>>();
+            let items = titles
+                .iter()
+                .enumerate()
+                .map(|(index, title)| DeviceListItemSpec::new(index, title.as_str()))
+                .collect::<Vec<_>>();
+            let viewport_height = Size::DEVICE_ROW * 3.0 + Spacing::SM * 2.0;
+            let output = render_device_list(
+                ui,
+                DeviceListSpec::new(Id::new("remaining-height-device-list"), &items)
+                    .viewport_height(viewport_height),
+            );
+
+            assert_eq!(output.viewport_rect.height(), viewport_height);
+            assert!(output.content_size.y > output.viewport_rect.height());
+            assert!(
+                output
+                    .row_rects
+                    .iter()
+                    .all(|row| row.height() == Size::DEVICE_ROW)
+            );
         });
     }
 

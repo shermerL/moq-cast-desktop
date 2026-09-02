@@ -16,6 +16,10 @@ use super::super::{
 
 const WORKSPACE_GAP: f32 = Spacing::LG;
 
+fn device_list_viewport_height(available_height: f32) -> f32 {
+    available_height.max(Size::DEVICE_ROW)
+}
+
 fn split_workspace_widths(total_width: f32) -> (f32, f32) {
     let detail_width = Size::NEARBY_LIST.min((total_width - WORKSPACE_GAP).max(1.0));
     let list_width = (total_width - detail_width - WORKSPACE_GAP).max(1.0);
@@ -106,17 +110,18 @@ fn show_split_workspace(
     selected_peer: &mut Option<String>,
 ) -> Option<UserCommand> {
     let total_width = ui.available_width();
+    let workspace_height = device_list_viewport_height(ui.available_height());
     let (list_width, detail_width) = split_workspace_widths(total_width);
     let mut command = None;
     ui.horizontal_top(|ui| {
         ui.allocate_ui_with_layout(
-            egui::vec2(list_width, 1.0),
+            egui::vec2(list_width, workspace_height),
             egui::Layout::top_down(egui::Align::Min),
-            |ui| show_device_list(ui, locale, snapshot, selected_peer),
+            |ui| show_device_list(ui, locale, snapshot, selected_peer, workspace_height),
         );
         ui.add_space(WORKSPACE_GAP);
         ui.allocate_ui_with_layout(
-            egui::vec2(detail_width, 1.0),
+            egui::vec2(detail_width, workspace_height),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 command = show_device_detail(ui, locale, snapshot, selected_peer.as_deref());
@@ -132,7 +137,8 @@ fn show_single_workspace(
     snapshot: &AppSnapshot,
     selected_peer: &mut Option<String>,
 ) -> Option<UserCommand> {
-    show_device_list(ui, locale, snapshot, selected_peer);
+    let workspace_height = device_list_viewport_height(ui.available_height());
+    show_device_list(ui, locale, snapshot, selected_peer, workspace_height);
     ui.add_space(Spacing::LG);
     let mut command = None;
     ui.allocate_ui_with_layout(
@@ -150,6 +156,7 @@ fn show_device_list(
     locale: Locale,
     snapshot: &AppSnapshot,
     selected_peer: &mut Option<String>,
+    viewport_height: f32,
 ) {
     let subtitles = snapshot
         .peers
@@ -173,7 +180,8 @@ fn show_device_list(
         .collect::<Vec<_>>();
     if let Some(peer_id) = device_list(
         ui,
-        DeviceListSpec::new(egui::Id::new("linux-nearby-peers"), &items),
+        DeviceListSpec::new(egui::Id::new("linux-nearby-peers"), &items)
+            .viewport_height(viewport_height),
     ) {
         *selected_peer = Some(peer_id);
     }
@@ -455,6 +463,12 @@ mod tests {
             split_workspace_widths(944.0),
             (944.0 - Size::NEARBY_LIST - WORKSPACE_GAP, Size::NEARBY_LIST)
         );
+    }
+
+    #[test]
+    fn device_list_uses_remaining_height_with_a_row_sized_floor() {
+        assert_eq!(device_list_viewport_height(420.0), 420.0);
+        assert_eq!(device_list_viewport_height(24.0), Size::DEVICE_ROW);
     }
 
     #[test]
