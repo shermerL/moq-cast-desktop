@@ -70,7 +70,7 @@ impl PeerRecord {
     }
 }
 
-/// Current mDNS records keyed by the stable peer id.
+/// Current mDNS records keyed by the peer id for this discovery generation.
 pub(crate) struct PeerRegistry {
     local_id: String,
     peers: HashMap<String, PeerRecord>,
@@ -82,12 +82,6 @@ pub(crate) enum PeerUpdate {
     Added,
     CandidatesMerged,
     IdentityReplaced,
-}
-
-impl PeerUpdate {
-    pub(crate) fn changed(self) -> bool {
-        self != Self::Unchanged
-    }
 }
 
 impl PeerRegistry {

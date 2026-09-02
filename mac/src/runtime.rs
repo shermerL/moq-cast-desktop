@@ -1317,14 +1317,29 @@ fn apply_network_event(
             }
         }
         NetworkEvent::PeerRemoved(id) => {
-            snapshot.peers.remove(&id);
+            if has_available_screen(snapshot, &id) {
+                if let Some(peer) = snapshot.peers.get_mut(&id) {
+                    peer.discovered = false;
+                }
+            } else {
+                snapshot.peers.remove(&id);
+            }
         }
         NetworkEvent::InboundCount(count) => snapshot.inbound_sessions = count,
         NetworkEvent::InboundRejected => {
             snapshot.nearby_issue = Some(NearbyIssue::DeviceRejected);
         }
         NetworkEvent::Screen(update) => {
+            let peer_id = update.view.peer_id.clone();
+            let available = update.view.availability == ScreenAvailability::Available;
             snapshot.remote_screens.insert(update.path, update.view);
+            if !available
+                && snapshot.peers.get(&peer_id).is_some_and(|peer| {
+                    !peer.discovered && !peer.session.is_active() && snapshot.inbound_sessions == 0
+                })
+            {
+                snapshot.peers.remove(&peer_id);
+            }
         }
         NetworkEvent::DiscoveryStopped => {
             snapshot
@@ -1339,6 +1354,12 @@ fn apply_network_event(
             snapshot.nearby_issue = Some(NearbyIssue::ListenerStopped);
         }
     }
+}
+
+fn has_available_screen(snapshot: &AppSnapshot, peer_id: &str) -> bool {
+    snapshot.remote_screens.values().any(|screen| {
+        screen.peer_id == peer_id && screen.availability == ScreenAvailability::Available
+    })
 }
 
 fn refresh_discovery_result(
@@ -1887,6 +1908,107 @@ mod tests {
             snapshot.remote_screens["moqcast.screen/internal-peer"].availability,
             ScreenAvailability::Available
         );
+    }
+
+    #[test]
+    fn peer_removal_keeps_an_available_screen_until_withdrawal() {
+        let mut snapshot = AppSnapshot::default();
+        let discovery = snapshot.discovery.begin(DiscoveryPhase::Scanning);
+        let session = snapshot.session.begin(SessionPhase::Listening);
+        let path = crate::contract::screen_path("passive-peer");
+        apply_network_event(
+            &mut snapshot,
+            discovery,
+            session,
+            NetworkEvent::Peer(network::PeerStatus {
+                id: "passive-peer".to_owned(),
+                ordinal: 1,
+                discovered: true,
+                role: DialRole::Passive,
+                session: PeerSession::Waiting,
+                transport_generation: None,
+            }),
+        );
+        apply_network_event(
+            &mut snapshot,
+            discovery,
+            session,
+            NetworkEvent::Screen(crate::remote::Update {
+                path: path.clone(),
+                view: ScreenView {
+                    peer_id: "passive-peer".to_owned(),
+                    availability: ScreenAvailability::Available,
+                },
+            }),
+        );
+
+        apply_network_event(
+            &mut snapshot,
+            discovery,
+            session,
+            NetworkEvent::PeerRemoved("passive-peer".to_owned()),
+        );
+        assert!(snapshot.can_watch("passive-peer", &path));
+        assert!(!snapshot.peers["passive-peer"].discovered);
+
+        apply_network_event(
+            &mut snapshot,
+            discovery,
+            session,
+            NetworkEvent::Screen(crate::remote::Update {
+                path,
+                view: ScreenView {
+                    peer_id: "passive-peer".to_owned(),
+                    availability: ScreenAvailability::Withdrawn,
+                },
+            }),
+        );
+        assert!(!snapshot.peers.contains_key("passive-peer"));
+    }
+
+    #[test]
+    fn route_withdrawal_keeps_a_passive_peer_with_an_inbound_session() {
+        let mut snapshot = AppSnapshot::default();
+        let discovery = snapshot.discovery.begin(DiscoveryPhase::Scanning);
+        let session = snapshot.session.begin(SessionPhase::Listening);
+        snapshot.inbound_sessions = 1;
+        snapshot.peers.insert(
+            "passive-peer".to_owned(),
+            PeerSnapshot {
+                ordinal: 1,
+                discovered: false,
+                session: PeerSession::Waiting,
+            },
+        );
+
+        apply_network_event(
+            &mut snapshot,
+            discovery,
+            session,
+            NetworkEvent::Screen(crate::remote::Update {
+                path: crate::contract::screen_path("passive-peer"),
+                view: ScreenView {
+                    peer_id: "passive-peer".to_owned(),
+                    availability: ScreenAvailability::Withdrawn,
+                },
+            }),
+        );
+
+        assert!(snapshot.peers.contains_key("passive-peer"));
+
+        apply_network_event(
+            &mut snapshot,
+            discovery,
+            session,
+            NetworkEvent::InboundCount(0),
+        );
+        apply_network_event(
+            &mut snapshot,
+            discovery,
+            session,
+            NetworkEvent::PeerRemoved("passive-peer".to_owned()),
+        );
+        assert!(!snapshot.peers.contains_key("passive-peer"));
     }
 
     #[test]

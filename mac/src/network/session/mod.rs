@@ -137,6 +137,7 @@ impl SessionFoundation {
         })
     }
 
+    #[cfg(test)]
     pub(crate) async fn disconnect(&mut self, peer: &str) -> Option<TransportUpdate> {
         self.stop_outbound(peer).await;
         let state = self.states.disconnect(peer)?;
