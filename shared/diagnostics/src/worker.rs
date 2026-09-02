@@ -7,13 +7,20 @@ use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 
 use crate::config::BuildInfo;
 use crate::export::{self, ExportError, ExportRequest, ExportResult};
+
+pub(crate) struct ExportContext {
+    pub(crate) log_dir: std::path::PathBuf,
+    pub(crate) build: BuildInfo,
+    pub(crate) minimal_export_metadata: bool,
+    pub(crate) owner_only_file_permissions: bool,
+    pub(crate) active_filter: String,
+    pub(crate) dropped: u64,
+}
+
 enum Command {
     Line(Vec<u8>),
     Export {
-        log_dir: std::path::PathBuf,
-        build: BuildInfo,
-        active_filter: String,
-        dropped: u64,
+        context: ExportContext,
         request: ExportRequest,
         acknowledge: Sender<Result<ExportResult, ExportError>>,
     },
@@ -73,19 +80,13 @@ impl Writer {
 
     pub(crate) fn export(
         &self,
-        log_dir: std::path::PathBuf,
-        build: BuildInfo,
-        active_filter: String,
-        dropped: u64,
+        context: ExportContext,
         request: ExportRequest,
     ) -> Result<ExportResult, ExportError> {
         let (acknowledge, acknowledged) = bounded(0);
         self.commands
             .send(Command::Export {
-                log_dir,
-                build,
-                active_filter,
-                dropped,
+                context,
                 request,
                 acknowledge,
             })
@@ -151,10 +152,7 @@ fn run(receiver: Receiver<Command>, mut output: Box<dyn Write + Send>) {
                 }
             }
             Command::Export {
-                log_dir,
-                build,
-                active_filter,
-                dropped,
+                context,
                 request,
                 acknowledge,
             } => {
@@ -164,9 +162,15 @@ fn run(receiver: Receiver<Command>, mut output: Box<dyn Write + Send>) {
                         .map_err(ExportError::Io)
                         .and_then(|()| match &failure {
                             Some(failure) => Err(ExportError::Io(failure.to_error())),
-                            None => {
-                                export::export(&log_dir, &build, &active_filter, dropped, request)
-                            }
+                            None => export::export(
+                                &context.log_dir,
+                                &context.build,
+                                context.minimal_export_metadata,
+                                context.owner_only_file_permissions,
+                                &context.active_filter,
+                                context.dropped,
+                                request,
+                            ),
                         });
                 let _ = acknowledge.send(result);
             }
@@ -246,10 +250,14 @@ mod tests {
         let destination = directory.path().join("ordered.zip");
         let export = std::thread::spawn(move || {
             export_writer.export(
-                log_dir,
-                BuildInfo::new("test"),
-                "base=info; detailed=off".to_owned(),
-                0,
+                ExportContext {
+                    log_dir,
+                    build: BuildInfo::new("test"),
+                    minimal_export_metadata: false,
+                    owner_only_file_permissions: false,
+                    active_filter: "base=info; detailed=off".to_owned(),
+                    dropped: 0,
+                },
                 ExportRequest::new(destination),
             )
         });

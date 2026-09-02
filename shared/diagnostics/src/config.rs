@@ -1,5 +1,6 @@
 use std::env;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -14,6 +15,8 @@ pub(crate) const DEFAULT_MAX_LOG_FILES: usize = 5;
 pub enum Platform {
     /// XDG state paths used by Linux desktops.
     Linux,
+    /// User Library log paths used by macOS desktops.
+    Macos,
     /// Local application-data paths used by Windows desktops.
     Windows,
 }
@@ -23,6 +26,8 @@ impl Platform {
     pub fn current() -> Self {
         if cfg!(target_os = "windows") {
             Self::Windows
+        } else if cfg!(target_os = "macos") {
+            Self::Macos
         } else {
             Self::Linux
         }
@@ -75,6 +80,11 @@ impl Paths {
                 .or_else(|| roots.home.map(|home| home.join(".local/state")))
                 .ok_or(PathError::MissingLinuxStateRoot)?
                 .join("moqcast/logs"),
+            Platform::Macos => roots
+                .home
+                .filter(|path| !path.as_os_str().is_empty())
+                .ok_or(PathError::MissingMacHome)?
+                .join("Library/Logs/dev.moq.moqcast.macos"),
             Platform::Windows => roots
                 .local_app_data
                 .filter(|path| !path.as_os_str().is_empty())
@@ -101,6 +111,9 @@ pub enum PathError {
     /// LOCALAPPDATA is unavailable for the Windows target directory.
     #[error("LOCALAPPDATA is unavailable")]
     MissingWindowsLocalAppData,
+    /// HOME is unavailable for the macOS user log directory.
+    #[error("HOME is unavailable")]
+    MissingMacHome,
 }
 
 /// Availability of persistent local diagnostic files.
@@ -189,6 +202,10 @@ pub struct Config {
     pub(crate) queue_capacity: usize,
     pub(crate) max_file_bytes: u64,
     pub(crate) max_log_files: usize,
+    pub(crate) max_file_age: Option<Duration>,
+    pub(crate) owner_only_file_permissions: bool,
+    pub(crate) minimal_export_metadata: bool,
+    pub(crate) redact_private_locations: bool,
 }
 
 impl Config {
@@ -204,6 +221,10 @@ impl Config {
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             max_log_files: DEFAULT_MAX_LOG_FILES,
+            max_file_age: None,
+            owner_only_file_permissions: false,
+            minimal_export_metadata: false,
+            redact_private_locations: false,
         }
     }
 
@@ -219,6 +240,10 @@ impl Config {
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             max_log_files: DEFAULT_MAX_LOG_FILES,
+            max_file_age: None,
+            owner_only_file_permissions: false,
+            minimal_export_metadata: false,
+            redact_private_locations: false,
         }
     }
 
@@ -231,6 +256,30 @@ impl Config {
     /// Enable or disable mirroring local log lines to stderr.
     pub fn with_stderr(mut self, stderr: bool) -> Self {
         self.stderr = stderr;
+        self
+    }
+
+    /// Remove matching diagnostic files older than this duration.
+    pub fn with_file_retention(mut self, max_age: Duration) -> Self {
+        self.max_file_age = Some(max_age);
+        self
+    }
+
+    /// Restrict the diagnostics directory and files to the current Unix user.
+    pub fn with_owner_only_file_permissions(mut self) -> Self {
+        self.owner_only_file_permissions = true;
+        self
+    }
+
+    /// Export only public version and runtime environment metadata.
+    pub fn with_minimal_export_metadata(mut self) -> Self {
+        self.minimal_export_metadata = true;
+        self
+    }
+
+    /// Redact private identity and location details from structured and free-text fields.
+    pub fn with_private_location_redaction(mut self) -> Self {
+        self.redact_private_locations = true;
         self
     }
 
@@ -304,9 +353,48 @@ mod tests {
     }
 
     #[test]
+    fn macos_uses_the_user_library_log_directory() {
+        let paths = Paths::from_roots(
+            Platform::Macos,
+            EnvironmentRoots {
+                home: Some(PathBuf::from("/Users/person")),
+                ..EnvironmentRoots::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            paths.log_dir(),
+            Path::new("/Users/person/Library/Logs/dev.moq.moqcast.macos")
+        );
+    }
+
+    #[test]
     fn defaults_define_eight_mib_and_five_total_log_files() {
         assert_eq!(DEFAULT_MAX_FILE_BYTES, 8 * 1024 * 1024);
         assert_eq!(DEFAULT_MAX_LOG_FILES, 5);
+    }
+
+    #[test]
+    fn platform_specific_file_policies_are_opt_in() {
+        let defaults = Config::new(Paths::for_test("logs"), BuildInfo::new("test"));
+        assert_eq!(defaults.max_file_age, None);
+        assert!(!defaults.owner_only_file_permissions);
+        assert!(!defaults.minimal_export_metadata);
+        assert!(!defaults.redact_private_locations);
+
+        let macos = defaults
+            .with_file_retention(Duration::from_secs(7 * 24 * 60 * 60))
+            .with_owner_only_file_permissions()
+            .with_minimal_export_metadata()
+            .with_private_location_redaction();
+        assert_eq!(
+            macos.max_file_age,
+            Some(Duration::from_secs(7 * 24 * 60 * 60))
+        );
+        assert!(macos.owner_only_file_permissions);
+        assert!(macos.minimal_export_metadata);
+        assert!(macos.redact_private_locations);
     }
 
     #[test]

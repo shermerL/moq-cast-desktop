@@ -7,7 +7,6 @@
 
 mod app;
 mod audio;
-mod build_info;
 mod diagnostics;
 mod media;
 mod playback;
@@ -23,8 +22,12 @@ use std::{net::SocketAddr, path::PathBuf};
 use anyhow::Result;
 use clap::Parser;
 use moqcast_diagnostics::{BuildInfo, Config, Paths};
+use moqcast_ui::Size;
 use runtime::{RuntimeConfig, RuntimeOwner};
 use url::Url;
+
+const APP_ICON_SIZE: u32 = 64;
+const APP_ICON_RGBA: &[u8; 64 * 64 * 4] = include_bytes!("../assets/icons/moqcast-window-64.rgba");
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -43,15 +46,12 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    let build = BuildInfo::new(env!("CARGO_PKG_VERSION"))
-        .with_build_identity(option_env!("MOQCAST_BUILD_IDENTITY").unwrap_or("local"))
-        .with_source_identity(option_env!("MOQCAST_SOURCE_COMMIT").unwrap_or("unknown"))
-        .with_dependency_identity(build_info::dependency_identity());
+    let build = BuildInfo::new(env!("CARGO_PKG_VERSION"));
     let diagnostics_config = match Paths::discover() {
-        Ok(paths) => Config::new(paths, build),
+        Ok(paths) => Config::new(paths, build).with_minimal_export_metadata(),
         Err(error) => {
             eprintln!("MoQCast diagnostics path unavailable: {error}");
-            Config::without_file(build, error.to_string())
+            Config::without_file(build, error.to_string()).with_minimal_export_metadata()
         }
     };
     let diagnostics = moqcast_diagnostics::init(diagnostics_config);
@@ -76,8 +76,9 @@ fn main() -> Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: eframe::egui::ViewportBuilder::default()
+            .with_icon(app_icon())
             .with_inner_size([1120.0, 760.0])
-            .with_min_inner_size([680.0, 480.0]),
+            .with_min_inner_size(Size::MIN_VIEWPORT),
         ..Default::default()
     };
 
@@ -104,4 +105,12 @@ fn main() -> Result<()> {
     };
     drop(diagnostics);
     result
+}
+
+fn app_icon() -> eframe::egui::IconData {
+    eframe::egui::IconData {
+        rgba: APP_ICON_RGBA.to_vec(),
+        width: APP_ICON_SIZE,
+        height: APP_ICON_SIZE,
+    }
 }

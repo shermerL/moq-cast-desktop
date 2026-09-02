@@ -1,6 +1,6 @@
 [package]
 name = "moq-cast-desktop"
-version = "0.4.1-dev.4"
+version = "0.5.0-dev.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -17,6 +17,7 @@ eframe = { version = "0.36.1", default-features = false, features = ["accesskit"
 gethostname = "1.1.0"
 moq-tokio = { git = "https://github.com/moq-dev/moq.git", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["aws-lc-rs", "mdns", "quinn"] }
 moqcast-diagnostics = { path = "../shared/diagnostics" }
+moqcast-ui = { path = "../shared/ui" }
 rfd = "0.17.2"
 thiserror = "2"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time"] }

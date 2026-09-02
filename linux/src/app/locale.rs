@@ -33,17 +33,19 @@ impl Locale {
     pub(super) fn remote_audio_status(self, phase: RemoteAudioPhase) -> &'static str {
         match (self, phase) {
             (Self::Chinese, RemoteAudioPhase::Idle | RemoteAudioPhase::NoAudio) => "无音频",
-            (Self::Chinese, RemoteAudioPhase::Pending) => "等待音频",
-            (Self::Chinese, RemoteAudioPhase::TrackSelected) => "已选择音轨",
-            (Self::Chinese, RemoteAudioPhase::PcmDecoded) => "PCM 已解码",
-            (Self::Chinese, RemoteAudioPhase::PcmSubmitted) => "PCM 提交调用成功",
+            (Self::Chinese, RemoteAudioPhase::Pending) => "正在准备音频",
+            (Self::Chinese, RemoteAudioPhase::TrackSelected | RemoteAudioPhase::PcmDecoded) => {
+                "正在连接音频"
+            }
+            (Self::Chinese, RemoteAudioPhase::PcmSubmitted) => "音频可用",
             (Self::Chinese, RemoteAudioPhase::Failed) => "音频不可用",
-            (Self::English, RemoteAudioPhase::Idle | RemoteAudioPhase::NoAudio) => "NO AUDIO",
-            (Self::English, RemoteAudioPhase::Pending) => "AUDIO PENDING",
-            (Self::English, RemoteAudioPhase::TrackSelected) => "TRACK SELECTED",
-            (Self::English, RemoteAudioPhase::PcmDecoded) => "PCM DECODED",
-            (Self::English, RemoteAudioPhase::PcmSubmitted) => "PCM SUBMIT OK",
-            (Self::English, RemoteAudioPhase::Failed) => "AUDIO ERROR",
+            (Self::English, RemoteAudioPhase::Idle | RemoteAudioPhase::NoAudio) => "No audio",
+            (Self::English, RemoteAudioPhase::Pending) => "Preparing audio",
+            (Self::English, RemoteAudioPhase::TrackSelected | RemoteAudioPhase::PcmDecoded) => {
+                "Connecting audio"
+            }
+            (Self::English, RemoteAudioPhase::PcmSubmitted) => "Audio available",
+            (Self::English, RemoteAudioPhase::Failed) => "Audio unavailable",
         }
     }
 
@@ -61,6 +63,20 @@ impl Locale {
         }
     }
 
+    pub(super) fn watch(self) -> &'static str {
+        match self {
+            Self::Chinese => "观看",
+            Self::English => "Watch",
+        }
+    }
+
+    pub(super) fn watch_description(self) -> &'static str {
+        match self {
+            Self::Chinese => "观看附近设备正在共享的屏幕。",
+            Self::English => "Watch a screen shared by a nearby device.",
+        }
+    }
+
     pub(super) fn settings(self) -> &'static str {
         match self {
             Self::Chinese => "设置",
@@ -70,8 +86,8 @@ impl Locale {
 
     pub(super) fn settings_description(self) -> &'static str {
         match self {
-            Self::Chinese => "设置应用语言和本地诊断。",
-            Self::English => "Configure language and local diagnostics.",
+            Self::Chinese => "设置应用语言和高级选项。",
+            Self::English => "Configure language and advanced options.",
         }
     }
 
@@ -124,6 +140,13 @@ impl Locale {
         }
     }
 
+    pub(super) fn nearby_summary(self, status: &str, device_count: usize) -> String {
+        match self {
+            Self::Chinese => format!("{status} · {device_count} 台设备"),
+            Self::English => format!("{status} · {device_count} devices"),
+        }
+    }
+
     pub(super) fn no_devices(self) -> &'static str {
         match self {
             Self::Chinese => "暂未发现设备",
@@ -133,15 +156,8 @@ impl Locale {
 
     pub(super) fn no_devices_hint(self) -> &'static str {
         match self {
-            Self::Chinese => "请确保另一台设备已开启局域网模式并连接同一网络。",
-            Self::English => "Make sure another device has LAN mode enabled on the same network.",
-        }
-    }
-
-    pub(super) fn watch(self) -> &'static str {
-        match self {
-            Self::Chinese => "观看",
-            Self::English => "Watch",
+            Self::Chinese => "请确保另一台设备已打开 MoQCast 并连接同一网络。",
+            Self::English => "Make sure MoQCast is open on another device on the same network.",
         }
     }
 
@@ -161,36 +177,36 @@ impl Locale {
 
     pub(super) fn transport_waiting(self) -> &'static str {
         match self {
-            Self::Chinese => "等待 mesh 连接",
-            Self::English => "Waiting for mesh",
+            Self::Chinese => "等待连接",
+            Self::English => "Waiting to connect",
         }
     }
 
     pub(super) fn transport_inbound_role(self) -> &'static str {
         match self {
-            Self::Chinese => "由对端发起连接",
-            Self::English => "Remote peer dials this device",
+            Self::Chinese => "由对方设备发起连接",
+            Self::English => "Connection initiated by the other device",
         }
     }
 
     pub(super) fn transport_connecting(self) -> &'static str {
         match self {
-            Self::Chinese => "正在建立 mesh…",
-            Self::English => "Connecting mesh...",
+            Self::Chinese => "正在连接…",
+            Self::English => "Connecting...",
         }
     }
 
     pub(super) fn transport_connected(self) -> &'static str {
         match self {
-            Self::Chinese => "Mesh 已连接",
-            Self::English => "Mesh connected",
+            Self::Chinese => "已连接",
+            Self::English => "Connected",
         }
     }
 
     pub(super) fn transport_failed(self) -> &'static str {
         match self {
-            Self::Chinese => "Mesh 连接失败",
-            Self::English => "Mesh connection failed",
+            Self::Chinese => "连接失败",
+            Self::English => "Connection failed",
         }
     }
 
@@ -208,31 +224,10 @@ impl Locale {
         }
     }
 
-    pub(super) fn inbound_sessions(self) -> &'static str {
-        match self {
-            Self::Chinese => "未归属入站连接",
-            Self::English => "Unattributed inbound sessions",
-        }
-    }
-
-    pub(super) fn outbound_sessions(self) -> &'static str {
-        match self {
-            Self::Chinese => "出站连接",
-            Self::English => "Outbound sessions",
-        }
-    }
-
-    pub(super) fn fingerprint_pinning(self) -> &'static str {
-        match self {
-            Self::Chinese => "TLS 使用广播指纹固定",
-            Self::English => "TLS pinned to the advertised fingerprint",
-        }
-    }
-
     pub(super) fn share_description(self) -> &'static str {
         match self {
-            Self::Chinese => "共享本机屏幕，或观看一个已发布的远端屏幕。",
-            Self::English => "Share this desktop or view one available remote screen.",
+            Self::Chinese => "将本机屏幕共享给附近的 MoQCast 设备。",
+            Self::English => "Share this desktop with nearby MoQCast devices.",
         }
     }
 
@@ -245,8 +240,8 @@ impl Locale {
 
     pub(super) fn connect_first(self) -> &'static str {
         match self {
-            Self::Chinese => "正在等待同一局域网内的设备建立 mesh。",
-            Self::English => "Waiting for a device on this network to join the mesh.",
+            Self::Chinese => "正在等待同一网络内的设备连接。",
+            Self::English => "Waiting for a device on this network to connect.",
         }
     }
 
@@ -320,6 +315,41 @@ impl Locale {
         }
     }
 
+    pub(super) fn choose_watch_screen(self) -> &'static str {
+        match self {
+            Self::Chinese => "选择一个可观看屏幕",
+            Self::English => "Choose a screen to watch",
+        }
+    }
+
+    pub(super) fn choose_watch_screen_hint(self) -> &'static str {
+        match self {
+            Self::Chinese => "打开附近设备，选择正在共享屏幕的设备。",
+            Self::English => "Open Nearby and select a device that is sharing a screen.",
+        }
+    }
+
+    pub(super) fn open_nearby(self) -> &'static str {
+        match self {
+            Self::Chinese => "打开附近设备",
+            Self::English => "Open Nearby",
+        }
+    }
+
+    pub(super) fn nearby_device(self) -> &'static str {
+        match self {
+            Self::Chinese => "附近设备",
+            Self::English => "Nearby device",
+        }
+    }
+
+    pub(super) fn open_watch_to_manage(self) -> &'static str {
+        match self {
+            Self::Chinese => "请打开“观看”页面管理当前播放。",
+            Self::English => "Open Watch to manage the current playback.",
+        }
+    }
+
     pub(super) fn viewing_screen(self) -> &'static str {
         match self {
             Self::Chinese => "正在观看远端屏幕",
@@ -336,8 +366,8 @@ impl Locale {
 
     pub(super) fn media_keeps_mesh(self) -> &'static str {
         match self {
-            Self::Chinese => "停止媒体不会断开 mesh。",
-            Self::English => "Stopping media keeps the mesh connected.",
+            Self::Chinese => "停止媒体不会断开附近设备连接。",
+            Self::English => "Stopping media keeps nearby device connections active.",
         }
     }
 
@@ -369,10 +399,19 @@ impl Locale {
         }
     }
 
-    pub(super) fn devices(self) -> &'static str {
+    pub(super) fn attention_required(self) -> &'static str {
         match self {
-            Self::Chinese => "设备",
-            Self::English => "Devices",
+            Self::Chinese => "需要处理",
+            Self::English => "Needs attention",
+        }
+    }
+
+    pub(super) fn operation_failed(self) -> &'static str {
+        match self {
+            Self::Chinese => "操作未完成。请重试；详细信息已写入本地诊断日志。",
+            Self::English => {
+                "The operation did not complete. Try again; details are in local diagnostic logs."
+            }
         }
     }
 
@@ -383,6 +422,27 @@ impl Locale {
         }
     }
 
+    pub(super) fn discovery_status(self) -> &'static str {
+        match self {
+            Self::Chinese => "附近状态",
+            Self::English => "Nearby status",
+        }
+    }
+
+    pub(super) fn connection_status(self) -> &'static str {
+        match self {
+            Self::Chinese => "连接",
+            Self::English => "Connection",
+        }
+    }
+
+    pub(super) fn shared_screen_status(self) -> &'static str {
+        match self {
+            Self::Chinese => "共享屏幕",
+            Self::English => "Shared screen",
+        }
+    }
+
     pub(super) fn select_device(self) -> &'static str {
         match self {
             Self::Chinese => "选择一个在线设备查看状态和可用操作。",
@@ -390,47 +450,33 @@ impl Locale {
         }
     }
 
-    pub(super) fn peer_identifier(self) -> &'static str {
-        match self {
-            Self::Chinese => "设备标识",
-            Self::English => "Peer ID",
-        }
-    }
-
-    pub(super) fn this_device(self) -> &'static str {
-        match self {
-            Self::Chinese => "本机",
-            Self::English => "This device",
-        }
-    }
-
-    pub(super) fn lan_session(self) -> &'static str {
-        match self {
-            Self::Chinese => "LAN 会话",
-            Self::English => "LAN session",
-        }
-    }
-
-    pub(super) fn network_endpoints(self) -> &'static str {
-        match self {
-            Self::Chinese => "网络地址",
-            Self::English => "Network endpoints",
-        }
-    }
-
-    pub(super) fn mesh_status_hint(self) -> &'static str {
-        match self {
-            Self::Chinese => "设备行只显示精确出站状态；入站连接无法安全归属到具体设备。",
-            Self::English => {
-                "Device rows show exact outbound state. Inbound sessions cannot yet be assigned safely."
-            }
-        }
-    }
-
     pub(super) fn media_idle(self) -> &'static str {
         match self {
             Self::Chinese => "屏幕媒体空闲",
             Self::English => "Screen media is idle",
+        }
+    }
+
+    pub(super) fn auto_watch(self) -> &'static str {
+        match self {
+            Self::Chinese => "自动观看唯一可用屏幕",
+            Self::English => "Auto-watch the only available screen",
+        }
+    }
+
+    pub(super) fn auto_watch_hint(self) -> &'static str {
+        match self {
+            Self::Chinese => "仅在没有活跃媒体且恰好一个可观看屏幕时开始。",
+            Self::English => {
+                "Starts only when no media is active and exactly one screen is available."
+            }
+        }
+    }
+
+    pub(super) fn temporarily_unavailable(self) -> &'static str {
+        match self {
+            Self::Chinese => "暂不可开启",
+            Self::English => "Not available yet",
         }
     }
 
@@ -447,6 +493,41 @@ impl Locale {
         match self {
             Self::Chinese => "语言",
             Self::English => "Language",
+        }
+    }
+
+    pub(super) fn general(self) -> &'static str {
+        match self {
+            Self::Chinese => "通用",
+            Self::English => "General",
+        }
+    }
+
+    pub(super) fn language_hint(self) -> &'static str {
+        match self {
+            Self::Chinese => "选择界面显示语言。",
+            Self::English => "Choose the language used by the interface.",
+        }
+    }
+
+    pub(super) fn advanced(self) -> &'static str {
+        match self {
+            Self::Chinese => "高级",
+            Self::English => "Advanced",
+        }
+    }
+
+    pub(super) fn developer_mode(self) -> &'static str {
+        match self {
+            Self::Chinese => "开发者模式",
+            Self::English => "Developer mode",
+        }
+    }
+
+    pub(super) fn developer_mode_hint(self) -> &'static str {
+        match self {
+            Self::Chinese => "显示仅用于本地排查的诊断工具。",
+            Self::English => "Show local diagnostic tools used for troubleshooting.",
         }
     }
 
@@ -487,10 +568,31 @@ impl Locale {
         }
     }
 
-    pub(super) fn log_directory(self) -> &'static str {
+    pub(super) fn show_logs_hint(self) -> &'static str {
         match self {
-            Self::Chinese => "日志目录",
-            Self::English => "Log directory",
+            Self::Chinese => "在当前会话中打开可筛选的日志窗口。",
+            Self::English => "Open a filterable log window for this session.",
+        }
+    }
+
+    pub(super) fn file_diagnostics_available(self) -> &'static str {
+        match self {
+            Self::Chinese => "文件诊断可用",
+            Self::English => "File diagnostics available",
+        }
+    }
+
+    pub(super) fn file_diagnostics_unavailable_short(self) -> &'static str {
+        match self {
+            Self::Chinese => "文件诊断不可用",
+            Self::English => "File diagnostics unavailable",
+        }
+    }
+
+    pub(super) fn local_log_files(self) -> &'static str {
+        match self {
+            Self::Chinese => "本地日志文件",
+            Self::English => "Local log files",
         }
     }
 

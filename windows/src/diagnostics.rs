@@ -4,8 +4,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
 
-use eframe::egui::{self, RichText};
+use eframe::egui::{self};
 use moqcast_diagnostics::{Entry, ExportRequest, FileStatus, Handle, LogLevel, Snapshot};
+use moqcast_ui::{
+    COLORS, SelectSpec, SettingRowSpec, Spacing, SwitchSpec, TypographyRole, secondary_button,
+    section_header, select, setting_row, switch, typography,
+};
 
 use crate::app::Locale;
 
@@ -47,48 +51,71 @@ impl DiagnosticsUi {
         self.handle.detailed()
     }
 
-    pub(crate) fn show_settings(&mut self, ui: &mut egui::Ui, locale: Locale) {
-        ui.heading(text(locale, "诊断日志", "Diagnostic logs"));
-        ui.small(text(
-            locale,
-            "日志仅保存在本机，由你选择是否导出。",
-            "Logs stay on this device and are exported only when you choose.",
-        ));
-        ui.add_space(6.0);
+    pub(crate) fn hide_window(&mut self) {
+        self.visible = false;
+    }
 
-        let mut detailed = self.handle.detailed();
-        if ui
-            .checkbox(
-                &mut detailed,
-                text(locale, "详细诊断", "Detailed diagnostics"),
-            )
-            .changed()
-        {
-            self.handle.set_detailed(detailed);
-        }
-        ui.small(text(
-            locale,
-            "仅提高允许模块的日志级别；网络与 mDNS 模块仍限制为警告。",
-            "Raises only approved targets; transport and mDNS remain capped at warnings.",
-        ));
-        ui.checkbox(
-            &mut self.visible,
-            text(locale, "显示应用日志", "Show application logs"),
+    pub(crate) fn show_settings(&mut self, ui: &mut egui::Ui, locale: Locale) {
+        section_header(
+            ui,
+            text(locale, "诊断日志", "Diagnostic logs"),
+            Some(text(
+                locale,
+                "日志仅保存在本机，由你选择是否导出。",
+                "Logs stay on this device and are exported only when you choose.",
+            )),
         );
 
-        ui.add_space(6.0);
+        let mut detailed = self.handle.detailed();
+        let detailed_response = setting_row(
+            ui,
+            SettingRowSpec::new(text(locale, "详细诊断", "Detailed diagnostics")).description(
+                text(
+                    locale,
+                    "仅提高允许模块的日志级别；网络与 mDNS 模块仍限制为警告。",
+                    "Raises only approved targets; transport and mDNS remain capped at warnings.",
+                ),
+            ),
+            |ui| {
+                switch(
+                    ui,
+                    &mut detailed,
+                    SwitchSpec::new(text(locale, "详细诊断", "Detailed diagnostics")),
+                )
+            },
+        );
+        if detailed_response.changed() {
+            self.handle.set_detailed(detailed);
+        }
+        ui.separator();
+        setting_row(
+            ui,
+            SettingRowSpec::new(text(locale, "显示应用日志", "Show application logs")),
+            |ui| {
+                switch(
+                    ui,
+                    &mut self.visible,
+                    SwitchSpec::new(text(locale, "显示应用日志", "Show application logs")),
+                );
+            },
+        );
+
+        ui.add_space(Spacing::MD);
         let file_available = match self.handle.file_status() {
             FileStatus::Available(directory) => {
-                ui.small(format!(
-                    "{}: {}",
-                    text(locale, "日志目录", "Log directory"),
-                    directory.display()
+                ui.label(typography(
+                    format!(
+                        "{}: {}",
+                        text(locale, "日志目录", "Log directory"),
+                        directory.display()
+                    ),
+                    TypographyRole::Meta,
+                    COLORS.muted.into(),
                 ));
                 true
             }
             FileStatus::Unavailable(reason) => {
-                ui.colored_label(
-                    ui.visuals().error_fg_color,
+                ui.label(typography(
                     match locale {
                         Locale::Chinese => {
                             format!("文件诊断不可用：{reason}。应用仍可继续运行。")
@@ -97,37 +124,47 @@ impl DiagnosticsUi {
                             "File diagnostics unavailable: {reason}. The application can continue."
                         ),
                     },
-                );
+                    TypographyRole::Help,
+                    COLORS.danger.into(),
+                ));
                 false
             }
         };
-        ui.small(format!(
-            "{}: {}",
-            text(locale, "已丢弃诊断项", "Dropped diagnostics"),
-            self.handle.dropped_count()
+        ui.label(typography(
+            format!(
+                "{}: {}",
+                text(locale, "已丢弃诊断项", "Dropped diagnostics"),
+                self.handle.dropped_count()
+            ),
+            TypographyRole::Meta,
+            COLORS.muted.into(),
         ));
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(
-                    file_available,
-                    egui::Button::new(text(locale, "打开日志目录", "Open log directory")),
-                )
-                .clicked()
+            if secondary_button(
+                ui,
+                text(locale, "打开日志目录", "Open log directory"),
+                file_available,
+            )
+            .clicked()
             {
                 self.open_directory();
             }
-            if ui
-                .add_enabled(
-                    file_available && self.export_rx.is_none(),
-                    egui::Button::new(text(locale, "导出本地日志", "Export local logs")),
-                )
-                .clicked()
+            if secondary_button(
+                ui,
+                text(locale, "导出本地日志", "Export local logs"),
+                file_available && self.export_rx.is_none(),
+            )
+            .clicked()
             {
                 self.choose_export();
             }
         });
         if let Some(status) = self.localized_status(locale) {
-            ui.small(status);
+            ui.label(typography(
+                status,
+                TypographyRole::Meta,
+                COLORS.muted.into(),
+            ));
         }
     }
 
@@ -146,18 +183,29 @@ impl DiagnosticsUi {
             .show(context, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(text(locale, "最低级别", "Minimum level"));
-                    egui::ComboBox::from_id_salt("diagnostics-level")
-                        .selected_text(self.minimum_level.as_str())
-                        .show_ui(ui, |ui| {
-                            for level in [
-                                LogLevel::Error,
-                                LogLevel::Warn,
-                                LogLevel::Info,
-                                LogLevel::Debug,
-                            ] {
-                                ui.selectable_value(&mut self.minimum_level, level, level.as_str());
-                            }
-                        });
+                    let levels = [
+                        LogLevel::Error,
+                        LogLevel::Warn,
+                        LogLevel::Info,
+                        LogLevel::Debug,
+                    ];
+                    let options = ["ERROR", "WARN", "INFO", "DEBUG"];
+                    let mut level_index = levels
+                        .iter()
+                        .position(|level| *level == self.minimum_level)
+                        .unwrap_or(2);
+                    select(
+                        ui,
+                        &mut level_index,
+                        SelectSpec::new(
+                            egui::Id::new("diagnostics-level"),
+                            "Minimum log level",
+                            &options,
+                        )
+                        .expect("diagnostics levels are available"),
+                    )
+                    .expect("diagnostics level is valid");
+                    self.minimum_level = levels[level_index];
                     ui.label(text(locale, "搜索", "Search"));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.search)
@@ -168,29 +216,30 @@ impl DiagnosticsUi {
                                 "Target, thread, or event",
                             )),
                     );
-                    ui.checkbox(
+                    switch(
+                        ui,
                         &mut self.pause_auto_scroll,
-                        text(locale, "暂停自动滚动", "Pause auto-scroll"),
+                        SwitchSpec::new(text(locale, "暂停自动滚动", "Pause auto-scroll")),
                     );
                 });
 
                 self.display_cache
                     .refresh(&self.snapshot, self.minimum_level, &self.search);
                 ui.horizontal(|ui| {
-                    if ui
-                        .button(text(locale, "复制当前结果", "Copy visible logs"))
+                    if secondary_button(ui, text(locale, "复制当前结果", "Copy visible logs"), true)
                         .clicked()
                     {
                         context.copy_text(self.display_cache.lines.join("\n"));
                     }
-                    ui.label(
-                        RichText::new(format!(
+                    ui.label(typography(
+                        format!(
                             "{}: {}",
                             text(locale, "已丢弃诊断项", "Dropped diagnostics"),
                             self.snapshot.dropped()
-                        ))
-                        .small(),
-                    );
+                        ),
+                        TypographyRole::Meta,
+                        COLORS.muted.into(),
+                    ));
                 });
                 ui.separator();
                 let scroll = egui::ScrollArea::both()
@@ -209,8 +258,12 @@ impl DiagnosticsUi {
                     scroll.show_rows(ui, 16.0, lines.len(), |ui, visible_rows| {
                         for row in visible_rows {
                             ui.add(
-                                egui::Label::new(RichText::new(&lines[row]).monospace().size(11.0))
-                                    .extend(),
+                                egui::Label::new(typography(
+                                    &lines[row],
+                                    TypographyRole::Mono,
+                                    COLORS.text.into(),
+                                ))
+                                .extend(),
                             );
                         }
                     });

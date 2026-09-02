@@ -78,6 +78,14 @@ impl SessionFoundation {
         server::bind(bind)
     }
 
+    pub(crate) fn receive_origin(&self) -> moq_tokio::moq_net::origin::Producer {
+        self.origins.receive.clone()
+    }
+
+    pub(crate) fn publish_origin(&self) -> moq_tokio::moq_net::origin::Producer {
+        self.origins.publish.clone()
+    }
+
     pub(crate) async fn connect(
         &mut self,
         peer: &PeerRecord,
@@ -129,6 +137,7 @@ impl SessionFoundation {
         })
     }
 
+    #[cfg(test)]
     pub(crate) async fn disconnect(&mut self, peer: &str) -> Option<TransportUpdate> {
         self.stop_outbound(peer).await;
         let state = self.states.disconnect(peer)?;

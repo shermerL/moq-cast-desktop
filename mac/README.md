@@ -31,11 +31,7 @@ cargo test --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-`app` 默认包含 `network`。`foundation` 另外编译 moq-video、moq-audio、hang 与 moq-mux。双架构和完整 feature 检查交给 macOS CI：
-
-```bash
-cargo check --locked --all-features
-```
+`app` 默认包含 `network`。当前 macOS CI 运行同一组默认 feature 测试和 Clippy，另行执行 no-default 契约测试；双架构 release build 也使用默认 feature。`foundation` 另外编译 moq-video、moq-audio、hang 与 moq-mux，留给后续媒体 milestone 按实现范围启用和验证。
 
 默认测试包含 loopback listener、credential/fingerprint 拒绝、direct-only Origin 与 generation 状态测试。同机 mDNS smoke 需要本地网络套接字，因此默认忽略并单独运行：
 

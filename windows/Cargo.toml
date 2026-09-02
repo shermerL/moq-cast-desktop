@@ -1,17 +1,22 @@
 [package]
 name = "moqcast-windows"
 description = "Native Windows desktop application for MoQCast"
-version = "0.4.1-dev.4"
+version = "0.5.0-dev.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 publish = false
+build = "build.rs"
+
+[build-dependencies]
+winresource = "=0.1.31"
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wgpu"] }
 moqcast-diagnostics = { path = "../shared/diagnostics" }
+moqcast-ui = { path = "../shared/ui" }
 moq-tokio = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["aws-lc-rs", "mdns", "quinn"] }
 rfd = "0.17.2"
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }

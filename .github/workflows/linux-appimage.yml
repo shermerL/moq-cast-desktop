@@ -4,14 +4,17 @@ on:
   push:
     branches:
       - main
+      - dev
     paths:
       - "linux/**"
       - "shared/diagnostics/**"
+      - "shared/ui/**"
       - ".github/workflows/linux-appimage.yml"
   pull_request:
     paths:
       - "linux/**"
       - "shared/diagnostics/**"
+      - "shared/ui/**"
       - ".github/workflows/linux-appimage.yml"
   workflow_dispatch:
 
@@ -102,7 +105,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             linux/target/release
-          key: linux-cargo-${{ matrix.variant }}-rust1.95.0-${{ hashFiles('linux/Cargo.lock', 'shared/diagnostics/Cargo.lock') }}
+          key: linux-cargo-${{ matrix.variant }}-rust1.95.0-${{ hashFiles('linux/Cargo.lock', 'shared/diagnostics/Cargo.lock', 'shared/ui/Cargo.lock') }}
           restore-keys: |
             linux-cargo-${{ matrix.variant }}-rust1.95.0-
 

@@ -1,4 +1,4 @@
-//! Build and dependency provenance shown by the macOS application.
+//! Internal build and dependency provenance for local verification.
 
 const MOQ_DEV_REVISION: &str = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53";
 const MOQ_BASELINE: &str = "moq-dev dev@81d39f7b";
@@ -72,7 +72,38 @@ mod tests {
         let foundation = manifest["features"]["foundation"]
             .as_array()
             .expect("foundation feature array");
-        assert_foundation_feature(foundation);
+        assert_feature(foundation, &["publish"]);
+
+        let publish = manifest["features"]["publish"]
+            .as_array()
+            .expect("publish feature array");
+        assert_feature(
+            publish,
+            &[
+                "watch",
+                "dep:objc2",
+                "dep:objc2-core-graphics",
+                "dep:objc2-foundation",
+                "dep:objc2-screen-capture-kit",
+                "moq-audio/capture",
+                "moq-video/capture",
+            ],
+        );
+
+        let watch = manifest["features"]["watch"]
+            .as_array()
+            .expect("watch feature array");
+        assert_feature(
+            watch,
+            &[
+                "network",
+                "dep:hang",
+                "dep:moq-audio",
+                "dep:moq-mux",
+                "dep:moq-video",
+                "moq-audio/playback",
+            ],
+        );
 
         let network = manifest["features"]["network"]
             .as_array()
@@ -92,6 +123,14 @@ mod tests {
         assert!(CARGO_CONFIG.contains(&format!("MACOSX_DEPLOYMENT_TARGET = \"{MINIMUM_MACOS}\"")));
         assert!(INFO_PLIST.contains(&format!("<string>{MINIMUM_MACOS}</string>")));
         assert!(PACKAGE_SCRIPT.contains(&format!("minimum_macos={MINIMUM_MACOS}")));
+    }
+
+    #[test]
+    fn bundle_icon_is_wired_into_packaging_inputs() {
+        assert!(INFO_PLIST.contains("<key>CFBundleIconFile</key>"));
+        assert!(INFO_PLIST.contains("<string>MoQCast.icns</string>"));
+        assert!(PACKAGE_SCRIPT.contains("assets/icons/MoQCast.icns"));
+        assert!(PACKAGE_SCRIPT.contains("Contents/Resources/MoQCast.icns"));
     }
 
     fn moq_dependencies(table: &Table) -> Vec<(&str, &str)> {
@@ -114,17 +153,11 @@ mod tests {
         dependencies
     }
 
-    fn assert_foundation_feature(feature: &Array) {
+    fn assert_feature(feature: &Array, expected: &[&str]) {
         let actual = feature
             .iter()
             .filter_map(|value| value.as_str())
             .collect::<Vec<_>>();
-        let mut expected = MOQ_DEPENDENCIES
-            .iter()
-            .filter(|dependency| **dependency != "moq-tokio")
-            .map(|dependency| format!("dep:{dependency}"))
-            .collect::<Vec<_>>();
-        expected.insert(0, "network".to_owned());
         assert_eq!(actual, expected);
     }
 }

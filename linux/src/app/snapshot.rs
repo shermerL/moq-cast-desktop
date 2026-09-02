@@ -34,7 +34,7 @@ impl DiscoveryState {
 pub enum PeerDiscoveryState {
     /// The peer is currently advertised.
     Found,
-    /// The advertisement was withdrawn while an exact outbound session remains active.
+    /// The advertisement was withdrawn while transport or media state may remain active.
     #[default]
     Lost,
 }
@@ -134,7 +134,7 @@ pub struct RemoteAudioSnapshot {
 /// Discovery details used to update one peer row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscoveredPeer {
-    /// Stable peer identifier from discovery.
+    /// Peer identifier for the current discovery generation.
     pub id: String,
     /// Human-readable peer label.
     pub name: String,
@@ -228,7 +228,7 @@ impl AppSnapshot {
         self.last_error = None;
     }
 
-    /// Stop discovery while retaining only exact connected peer rows.
+    /// Stop discovery while retaining rows backed by active transport or media state.
     pub fn stop_discovery(&mut self) {
         self.discovery = DiscoveryState::Idle;
         self.mark_all_peers_lost();
@@ -277,7 +277,7 @@ impl AppSnapshot {
         }
     }
 
-    /// Mark one peer absent and remove it unless an exact outbound session remains active.
+    /// Mark one peer absent without discarding active transport or screen state.
     pub fn mark_peer_lost(&mut self, peer_id: &str) {
         if let Some(peer) = self.peers.get_mut(peer_id) {
             peer.discovery = PeerDiscoveryState::Lost;
@@ -307,6 +307,7 @@ impl AppSnapshot {
     /// Update the aggregate count of authorized inbound sessions.
     pub fn set_inbound_session_count(&mut self, count: usize) {
         self.inbound_session_count = count;
+        self.prune_inactive_peers();
     }
 
     /// Apply one remote screen announcement or withdrawal.
@@ -337,8 +338,14 @@ impl AppSnapshot {
                 availability: availability.clone(),
             },
         );
-        if let Some(peer) = self.peers.get_mut(&peer_id) {
+        let peer_exists = if let Some(peer) = self.peers.get_mut(&peer_id) {
             peer.screen = availability;
+            true
+        } else {
+            false
+        };
+        if peer_exists {
+            self.prune_inactive_peer(&peer_id);
         }
         true
     }
@@ -523,7 +530,10 @@ impl AppSnapshot {
     }
 
     fn prune_inactive_peer(&mut self, peer_id: &str) {
-        let keep = self.peers.get(peer_id).is_some_and(peer_remains_visible);
+        let keep = self
+            .peers
+            .get(peer_id)
+            .is_some_and(|peer| peer_remains_visible(peer, self.inbound_session_count));
         if keep {
             return;
         }
@@ -534,15 +544,23 @@ impl AppSnapshot {
     }
 
     fn prune_inactive_peers(&mut self) {
-        self.peers.retain(|_, peer| peer_remains_visible(peer));
+        let inbound_session_count = self.inbound_session_count;
+        self.peers
+            .retain(|_, peer| peer_remains_visible(peer, inbound_session_count));
         self.remote_screens
             .retain(|_, screen| self.peers.contains_key(&screen.peer_id));
     }
 }
 
-fn peer_remains_visible(peer: &PeerSnapshot) -> bool {
+fn peer_remains_visible(peer: &PeerSnapshot, inbound_session_count: usize) -> bool {
     peer.discovery == PeerDiscoveryState::Found
-        || (peer.dial_role == DialRole::Outbound && peer.transport == TransportState::Connected)
+        || (peer.dial_role == DialRole::Outbound
+            && matches!(
+                peer.transport,
+                TransportState::Connecting | TransportState::Connected
+            ))
+        || peer.screen == ScreenAvailability::Available
+        || (peer.dial_role == DialRole::Inbound && inbound_session_count > 0)
 }
 
 #[cfg(test)]

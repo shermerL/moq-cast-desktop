@@ -52,12 +52,6 @@ pub(crate) enum PeerUpdate {
     IdentityReplaced,
 }
 
-impl PeerUpdate {
-    pub(crate) fn changed(self) -> bool {
-        self != Self::Unchanged
-    }
-}
-
 pub(crate) struct PeerRegistry {
     local_id: String,
     peers: HashMap<String, PeerRecord>,

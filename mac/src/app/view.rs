@@ -2,10 +2,13 @@
 
 use std::collections::BTreeMap;
 
-use crate::{network::PeerSession, runtime::PeerSnapshot};
+use moqcast_ui::Size;
 
-pub(super) const CONTENT_BREAKPOINT: f32 = 920.0;
-pub(super) const NAVIGATION_BREAKPOINT: f32 = 760.0;
+use crate::{
+    network::PeerSession,
+    remote::{ScreenAvailability, ScreenView as RemoteScreen},
+    runtime::PeerSnapshot,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ContentLayout {
@@ -15,7 +18,7 @@ pub(super) enum ContentLayout {
 
 impl ContentLayout {
     pub(super) fn for_width(width: f32) -> Self {
-        if width >= CONTENT_BREAKPOINT {
+        if width >= Size::SPLIT_BREAKPOINT {
             Self::ListDetail
         } else {
             Self::SingleColumn
@@ -31,7 +34,7 @@ pub(super) enum NavigationLayout {
 
 impl NavigationLayout {
     pub(super) fn for_width(width: f32) -> Self {
-        if width >= NAVIGATION_BREAKPOINT {
+        if width >= Size::SPLIT_BREAKPOINT {
             Self::OneRow
         } else {
             Self::TwoRows
@@ -91,4 +94,16 @@ pub(super) fn selected_peer(
         .filter(|id| peers.contains_key(*id))
         .map(str::to_owned)
         .or_else(|| peers.keys().next().cloned())
+}
+
+pub(super) fn screen_availability(
+    peer_id: &str,
+    screens: &BTreeMap<String, RemoteScreen>,
+) -> ScreenAvailability {
+    screens
+        .get(&crate::contract::screen_path(peer_id))
+        .filter(|screen| screen.peer_id == peer_id)
+        .map_or(ScreenAvailability::Unavailable, |screen| {
+            screen.availability
+        })
 }

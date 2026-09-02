@@ -1,0 +1,20 @@
+[package]
+name = "moqcast-ui"
+description = "Business-neutral egui visual foundation for MoQCast desktop applications"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+egui = "=0.36.1"
+
+[dev-dependencies]
+eframe = { version = "=0.36.1", default-features = false, features = ["default_fonts", "wgpu", "x11"] }
+sha2 = "0.10.9"
+toml_edit = { version = "0.25.13", default-features = false, features = ["parse"] }
+
+[[example]]
+name = "catalog"
+path = "examples/catalog.rs"

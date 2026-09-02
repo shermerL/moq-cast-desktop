@@ -146,7 +146,7 @@ fn same_identity_reappearing_preserves_a_healthy_transport() {
 }
 
 #[test]
-fn lost_peer_without_a_healthy_session_is_removed_with_its_screen() {
+fn available_screen_survives_lost_until_the_route_is_withdrawn() {
     let mut snapshot = AppSnapshot::default();
     snapshot.start_discovery();
     snapshot.upsert_peer(peer("android-living-room"));
@@ -155,8 +155,39 @@ fn lost_peer_without_a_healthy_session_is_removed_with_its_screen() {
     snapshot.mark_peer_lost("android-living-room");
 
     assert_eq!(snapshot.discovery, DiscoveryState::Empty);
+    assert_eq!(
+        snapshot.peers["android-living-room"].discovery,
+        PeerDiscoveryState::Lost
+    );
+    assert_eq!(
+        snapshot.peers["android-living-room"].screen,
+        ScreenAvailability::Available
+    );
+
+    snapshot.update_remote_screen("moqcast.screen/android-living-room".into(), false);
+
     assert!(!snapshot.peers.contains_key("android-living-room"));
     assert!(snapshot.remote_screens.is_empty());
+}
+
+#[test]
+fn passive_peer_survives_lost_while_an_inbound_session_exists() {
+    let mut snapshot = AppSnapshot::default();
+    snapshot.start_discovery();
+    let mut passive = peer("android-living-room");
+    passive.dial_role = DialRole::Inbound;
+    snapshot.upsert_peer(passive);
+    snapshot.set_inbound_session_count(1);
+
+    snapshot.mark_peer_lost("android-living-room");
+
+    assert_eq!(
+        snapshot.peers["android-living-room"].discovery,
+        PeerDiscoveryState::Lost
+    );
+
+    snapshot.set_inbound_session_count(0);
+    assert!(!snapshot.peers.contains_key("android-living-room"));
 }
 
 #[test]
@@ -173,7 +204,21 @@ fn a_lost_connected_peer_is_removed_when_its_session_ends() {
 }
 
 #[test]
-fn stop_and_failure_keep_only_exact_connected_peers() {
+fn lost_during_outbound_connect_waits_for_transport_completion() {
+    let mut snapshot = AppSnapshot::default();
+    snapshot.start_discovery();
+    snapshot.upsert_peer(peer("android-living-room"));
+    snapshot.set_transport("android-living-room", TransportState::Connecting);
+
+    snapshot.mark_peer_lost("android-living-room");
+    assert!(snapshot.peers.contains_key("android-living-room"));
+
+    snapshot.set_transport("android-living-room", TransportState::Failed);
+    assert!(!snapshot.peers.contains_key("android-living-room"));
+}
+
+#[test]
+fn stop_and_failure_keep_only_active_peer_rows() {
     let mut snapshot = connected_snapshot();
     snapshot.start_discovery();
     snapshot.upsert_peer(peer("android-idle"));

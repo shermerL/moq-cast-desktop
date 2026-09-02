@@ -8,6 +8,8 @@
     <string>moqcast-macos</string>
     <key>CFBundleIdentifier</key>
     <string>dev.moq.moqcast.macos</string>
+    <key>CFBundleIconFile</key>
+    <string>MoQCast.icns</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

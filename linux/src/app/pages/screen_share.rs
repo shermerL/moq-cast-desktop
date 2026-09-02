@@ -1,79 +1,76 @@
 //! Local publication and remote screen playback page.
 
-use eframe::egui::{self, RichText};
+use eframe::egui;
+use moqcast_ui::{
+    SettingRowSpec, StatePanelKind, StatePanelSpec, SwitchSpec, section_header, setting_row,
+    state_panel, switch,
+};
 
-use super::super::components::{self, BadgeTone, danger_button, primary_button, status_badge};
-use super::super::player::{LivePlayer, PlayerAction, PlayerMode};
-use super::super::theme::{MUTED, TEXT};
+use super::super::components::{danger_button, primary_button, stable_status_strip};
 use super::super::{AppSnapshot, Locale, MediaState, UserCommand};
 
 pub(in crate::app) fn show(
     ui: &mut egui::Ui,
     locale: Locale,
     snapshot: &AppSnapshot,
-    playback: Option<&egui::TextureHandle>,
-    player: &mut LivePlayer,
     system_audio: &mut bool,
 ) -> Option<UserCommand> {
+    section_header(
+        ui,
+        locale.share_local_screen(),
+        Some(locale.share_description()),
+    );
+    let audio_enabled = snapshot.media == MediaState::Idle;
+    setting_row(
+        ui,
+        SettingRowSpec::new(locale.system_audio()).description(locale.system_audio_hint()),
+        |ui| {
+            switch(
+                ui,
+                system_audio,
+                SwitchSpec::new(locale.system_audio()).enabled(audio_enabled),
+            );
+        },
+    );
+    ui.add_space(moqcast_ui::Spacing::XL);
+
     if !snapshot.has_mesh_session() && snapshot.media == MediaState::Idle {
-        components::empty_state(
+        state_panel(
             ui,
-            locale.not_connected(),
-            locale.connect_first(),
-            snapshot.discovery.is_active(),
+            StatePanelSpec::new(
+                StatePanelKind::Empty,
+                locale.not_connected(),
+                locale.connect_first(),
+            ),
+            |_| (),
         );
         return None;
     }
 
     let mut command = None;
     match &snapshot.media {
-        MediaState::Viewing { path } | MediaState::StoppingView { path } => {
-            let stopping = matches!(snapshot.media, MediaState::StoppingView { .. });
-            if matches!(
-                player.show(
-                    ui,
-                    locale,
-                    PlayerMode::Viewing {
-                        path,
-                        stopping,
-                        audio: &snapshot.remote_audio,
-                    },
-                    playback,
+        MediaState::Viewing { .. }
+        | MediaState::StoppingView { .. }
+        | MediaState::PreparingView { .. } => {
+            state_panel(
+                ui,
+                StatePanelSpec::new(
+                    StatePanelKind::Empty,
+                    locale.viewing_screen(),
+                    locale.open_watch_to_manage(),
                 ),
-                Some(PlayerAction::StopWatching)
-            ) {
-                command = Some(UserCommand::StopWatching);
-            }
-        }
-        MediaState::PreparingView { path } => {
-            if matches!(
-                player.show(
-                    ui,
-                    locale,
-                    PlayerMode::Preparing {
-                        path,
-                        audio: &snapshot.remote_audio,
-                    },
-                    playback,
-                ),
-                Some(PlayerAction::StopWatching)
-            ) {
-                command = Some(UserCommand::StopWatching);
-            }
+                |_| (),
+            );
         }
         MediaState::Publishing | MediaState::StoppingPublish => {
-            components::surface().show(ui, |ui| {
-                ui.set_min_height(210.0);
-                ui.vertical_centered(|ui| {
-                    ui.add_space(34.0);
-                    status_badge(ui, locale.sharing_screen(), BadgeTone::Success);
-                    ui.add_space(12.0);
-                    ui.label(
-                        RichText::new(locale.share_description())
-                            .size(14.0)
-                            .color(MUTED),
-                    );
-                    ui.add_space(18.0);
+            stable_status_strip(
+                ui,
+                StatePanelSpec::new(
+                    StatePanelKind::Pending,
+                    locale.sharing_screen(),
+                    locale.media_keeps_mesh(),
+                ),
+                |ui| {
                     let stopping = snapshot.media == MediaState::StoppingPublish;
                     if stopping {
                         ui.spinner();
@@ -81,56 +78,39 @@ pub(in crate::app) fn show(
                     } else if danger_button(ui, locale.stop_sharing(), true).clicked() {
                         command = Some(UserCommand::StopScreenShare);
                     }
-                });
-            });
+                },
+            );
         }
         MediaState::PreparingPublish => {
-            components::surface().show(ui, |ui| {
-                ui.set_min_height(210.0);
-                ui.vertical_centered(|ui| {
-                    ui.add_space(44.0);
+            stable_status_strip(
+                ui,
+                StatePanelSpec::new(
+                    StatePanelKind::Pending,
+                    locale.preparing_share(),
+                    locale.share_description(),
+                ),
+                |ui| {
                     ui.spinner();
-                    ui.label(
-                        RichText::new(locale.preparing_share())
-                            .size(17.0)
-                            .strong()
-                            .color(TEXT),
-                    );
                     primary_button(ui, locale.preparing_share(), false);
-                });
-            });
+                },
+            );
         }
         MediaState::Idle => {
-            components::surface().show(ui, |ui| {
-                ui.set_min_height(210.0);
-                ui.vertical_centered(|ui| {
-                    ui.add_space(38.0);
-                    ui.label(
-                        RichText::new(locale.media_idle())
-                            .size(19.0)
-                            .strong()
-                            .color(TEXT),
-                    );
-                    ui.label(
-                        RichText::new(locale.media_idle_hint())
-                            .size(13.0)
-                            .color(MUTED),
-                    );
-                    ui.add_space(12.0);
-                    components::selection_checkbox(ui, system_audio, locale.system_audio(), true);
-                    ui.label(
-                        RichText::new(locale.system_audio_hint())
-                            .size(12.0)
-                            .color(MUTED),
-                    );
-                    ui.add_space(18.0);
+            stable_status_strip(
+                ui,
+                StatePanelSpec::new(
+                    StatePanelKind::Empty,
+                    locale.media_idle(),
+                    locale.media_idle_hint(),
+                ),
+                |ui| {
                     if primary_button(ui, locale.choose_screen(), true).clicked() {
                         command = Some(UserCommand::StartScreenShare {
                             system_audio: *system_audio,
                         });
                     }
-                });
-            });
+                },
+            );
         }
     }
 

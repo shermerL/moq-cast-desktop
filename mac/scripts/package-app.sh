@@ -21,7 +21,7 @@ package_version=${MOQCAST_PACKAGE_VERSION:-$manifest_version}
 marketing_version=${MOQCAST_MARKETING_VERSION:-${package_version%%-*}}
 build_version=${MOQCAST_BUILD_VERSION:-1}
 source_commit=${MOQCAST_SOURCE_COMMIT:-unknown}
-archive_name="MoQCast-macOS-universal2-${package_version}.zip"
+archive_name="MoQCast-macOS-${package_version}.zip"
 app_directory="$output_directory/MoQCast.app"
 archive_path="$output_directory/$archive_name"
 
@@ -45,6 +45,7 @@ sed \
     -e "s/__MARKETING_VERSION__/$marketing_version/g" \
     -e "s/__BUILD_VERSION__/$build_version/g" \
     "$mac_directory/packaging/Info.plist.in" > "$app_directory/Contents/Info.plist"
+cp "$mac_directory/assets/icons/MoQCast.icns" "$app_directory/Contents/Resources/MoQCast.icns"
 cp "$mac_directory/packaging/entitlements.plist" "$app_directory/Contents/Resources/entitlements.plist"
 
 cat > "$app_directory/Contents/Resources/build-info.txt" <<EOF

@@ -5,10 +5,14 @@ on:
     branches: [main, dev]
     paths:
       - "mac/**"
+      - "shared/diagnostics/**"
+      - "shared/ui/**"
       - ".github/workflows/macos.yml"
   pull_request:
     paths:
       - "mac/**"
+      - "shared/diagnostics/**"
+      - "shared/ui/**"
       - ".github/workflows/macos.yml"
   workflow_dispatch:
 
@@ -24,74 +28,160 @@ defaults:
     working-directory: mac
 
 jobs:
-  verify-and-package:
+  verify:
+    name: Verify macOS app
     runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate workflow contract
+        run: bash ./scripts/check-ci-workflow.sh
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-30
         with:
           toolchain: 1.95.0
           components: clippy,rustfmt
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - name: Cache Rust dependencies and build outputs
+      - name: Cache Rust dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            mac/target
-          key: macos-cargo-${{ runner.arch }}-rust1.95.0-${{ hashFiles('mac/Cargo.lock') }}
+          key: macos-cargo-${{ runner.arch }}-rust1.95.0-${{ hashFiles('mac/Cargo.lock', 'shared/diagnostics/Cargo.lock', 'shared/ui/Cargo.lock') }}
           restore-keys: |
             macos-cargo-${{ runner.arch }}-rust1.95.0-
+      - name: Verify shared diagnostics
+        working-directory: shared/diagnostics
+        run: |
+          cargo fmt --all --check
+          cargo test --locked --all-targets
+          cargo clippy --locked --all-targets -- -D warnings
       - name: Check formatting
         run: cargo fmt --all --check
-      - name: Run foundation tests
+      # Real mDNS and LAN smoke tests require a local network and remain a Mac/device acceptance gate.
+      - name: Run default-feature tests
         run: cargo test --locked --all-targets
-      - name: Run Clippy with locked MoQ foundation
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
-      - name: Build arm64 release app
-        run: cargo build --locked --release --all-features --target aarch64-apple-darwin
+      - name: Run no-default-features contract tests
+        run: cargo test --locked --no-default-features --lib
+      - name: Run default-feature Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  build-release:
+    name: Build ${{ matrix.target }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-30
+        with:
+          toolchain: 1.95.0
+          targets: ${{ matrix.target }}
+      - name: Cache Rust dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: macos-cargo-${{ runner.arch }}-rust1.95.0-${{ hashFiles('mac/Cargo.lock', 'shared/diagnostics/Cargo.lock', 'shared/ui/Cargo.lock') }}
+          restore-keys: |
+            macos-cargo-${{ runner.arch }}-rust1.95.0-
+      - name: Build release app
+        run: cargo build --locked --release --target "${{ matrix.target }}"
         env:
           MOQCAST_BUILD_IDENTITY: macos-universal2
           MOQCAST_SOURCE_COMMIT: ${{ github.sha }}
-      - name: Build x86_64 release app
-        run: cargo build --locked --release --all-features --target x86_64-apple-darwin
-        env:
-          MOQCAST_BUILD_IDENTITY: macos-universal2
-          MOQCAST_SOURCE_COMMIT: ${{ github.sha }}
+      - name: Upload release binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: MoQCast-macOS-binary-${{ matrix.target }}
+          path: ${{ github.workspace }}/mac/target/${{ matrix.target }}/release/moqcast-macos
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  package:
+    name: Package Universal 2 app
+    needs: [verify, build-release]
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Download arm64 release binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: MoQCast-macOS-binary-aarch64-apple-darwin
+          path: ${{ runner.temp }}/moqcast-binary/aarch64-apple-darwin
+      - name: Download x86_64 release binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: MoQCast-macOS-binary-x86_64-apple-darwin
+          path: ${{ runner.temp }}/moqcast-binary/x86_64-apple-darwin
+      - name: Verify release binary artifacts
+        run: |
+          arm64="$RUNNER_TEMP/moqcast-binary/aarch64-apple-darwin/moqcast-macos"
+          x86_64="$RUNNER_TEMP/moqcast-binary/x86_64-apple-darwin/moqcast-macos"
+          test -f "$arm64"
+          test -f "$x86_64"
+          lipo "$arm64" -verify_arch arm64
+          lipo "$x86_64" -verify_arch x86_64
       - name: Package ad hoc signed Universal 2 app
         run: |
           ./scripts/package-app.sh \
-            target/aarch64-apple-darwin/release/moqcast-macos \
-            target/x86_64-apple-darwin/release/moqcast-macos \
+            "$RUNNER_TEMP/moqcast-binary/aarch64-apple-darwin/moqcast-macos" \
+            "$RUNNER_TEMP/moqcast-binary/x86_64-apple-darwin/moqcast-macos" \
             "$RUNNER_TEMP/moqcast-package"
         env:
           MOQCAST_BUILD_VERSION: ${{ github.run_number }}
           MOQCAST_SOURCE_COMMIT: ${{ github.sha }}
       - name: Verify package metadata
         run: |
-          plutil -lint "$RUNNER_TEMP/moqcast-package/MoQCast.app/Contents/Info.plist"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$RUNNER_TEMP/moqcast-package/MoQCast.app/Contents/Info.plist")" = "dev.moq.moqcast.macos"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$RUNNER_TEMP/moqcast-package/MoQCast.app/Contents/Info.plist")" = "14.2"
-          lipo -info "$RUNNER_TEMP/moqcast-package/MoQCast.app/Contents/MacOS/moqcast-macos"
-          xcrun vtool -show-build -arch arm64 "$RUNNER_TEMP/moqcast-package/MoQCast.app/Contents/MacOS/moqcast-macos" | grep -Eq "minos +14\.2"
-          xcrun vtool -show-build -arch x86_64 "$RUNNER_TEMP/moqcast-package/MoQCast.app/Contents/MacOS/moqcast-macos" | grep -Eq "minos +14\.2"
-          codesign --verify --deep --strict "$RUNNER_TEMP/moqcast-package/MoQCast.app"
-          codesign -dv --verbose=4 "$RUNNER_TEMP/moqcast-package/MoQCast.app" 2>&1 | grep -q "Signature=adhoc"
-          grep -Fxq "source_commit=${{ github.sha }}" "$RUNNER_TEMP/moqcast-package/MoQCast.app/Contents/Resources/build-info.txt"
-          grep -Fxq "minimum_macos=14.2" "$RUNNER_TEMP/moqcast-package/MoQCast.app/Contents/Resources/build-info.txt"
-          grep -Fxq "moq_dependency=moq-dev/moq@81d39f7bf04c82aae324a9ee4251b7f8aa08fb53" "$RUNNER_TEMP/moqcast-package/MoQCast.app/Contents/Resources/build-info.txt"
-          mkdir "$RUNNER_TEMP/moqcast-checksum-verification"
-          cp "$RUNNER_TEMP"/moqcast-package/MoQCast-macOS-universal2-*.zip* "$RUNNER_TEMP/moqcast-checksum-verification/"
-          cd "$RUNNER_TEMP/moqcast-checksum-verification"
-          shasum -a 256 -c MoQCast-macOS-universal2-*.zip.sha256
+          package_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          marketing_version="${package_version%%-*}"
+          app="$RUNNER_TEMP/moqcast-package/MoQCast.app"
+          plist="$app/Contents/Info.plist"
+          binary="$app/Contents/MacOS/moqcast-macos"
+          archive="$RUNNER_TEMP/moqcast-package/MoQCast-macOS-${package_version}.zip"
+          plutil -lint "$plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$plist")" = "MoQCast"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")" = "moqcast-macos"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "dev.moq.moqcast.macos"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$plist")" = "MoQCast.icns"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$plist")" = "APPL"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "$marketing_version"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")" = "${{ github.run_number }}"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist")" = "14.2"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSBonjourServices:0' "$plist")" = "_moq._udp"
+          test -n "$(/usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$plist")"
+          test -f "$app/Contents/Resources/MoQCast.icns"
+          iconutil -c iconset -o "$RUNNER_TEMP/moqcast-package/MoQCast.iconset" \
+            "$app/Contents/Resources/MoQCast.icns"
+          test -f "$RUNNER_TEMP/moqcast-package/MoQCast.iconset/icon_16x16.png"
+          test -f "$RUNNER_TEMP/moqcast-package/MoQCast.iconset/icon_512x512@2x.png"
+          lipo "$binary" -verify_arch arm64 x86_64
+          lipo -info "$binary"
+          xcrun vtool -show-build -arch arm64 "$binary" | grep -Eq "minos +14\.2"
+          xcrun vtool -show-build -arch x86_64 "$binary" | grep -Eq "minos +14\.2"
+          codesign --verify --deep --strict "$app"
+          codesign -dv --verbose=4 "$app" 2>&1 | grep -q "Signature=adhoc"
+          grep -Fxq "source_commit=${{ github.sha }}" "$app/Contents/Resources/build-info.txt"
+          grep -Fxq "minimum_macos=14.2" "$app/Contents/Resources/build-info.txt"
+          grep -Fxq "moq_dependency=moq-dev/moq@81d39f7bf04c82aae324a9ee4251b7f8aa08fb53" "$app/Contents/Resources/build-info.txt"
+          test -f "$archive"
+          test -f "$archive.sha256"
+          cd "$(dirname "$archive")"
+          shasum -a 256 -c "$(basename "$archive").sha256"
       - name: Upload ad hoc signed macOS app
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: moqcast-macos-universal2-${{ github.sha }}
+          name: MoQCast-macOS
           path: |
-            ${{ runner.temp }}/moqcast-package/MoQCast-macOS-universal2-*.zip
-            ${{ runner.temp }}/moqcast-package/MoQCast-macOS-universal2-*.zip.sha256
+            ${{ runner.temp }}/moqcast-package/MoQCast-macOS-*.zip
+            ${{ runner.temp }}/moqcast-package/MoQCast-macOS-*.zip.sha256
           if-no-files-found: error
           retention-days: 14
+          compression-level: 0

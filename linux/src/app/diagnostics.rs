@@ -59,6 +59,10 @@ impl DiagnosticsUi {
         self.visible = visible;
     }
 
+    pub(super) fn hide_window(&mut self) {
+        self.visible = false;
+    }
+
     pub(super) fn file_status(&self) -> FileStatus {
         self.handle.file_status()
     }

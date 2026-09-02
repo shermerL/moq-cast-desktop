@@ -15,6 +15,7 @@ use self::{
         SessionEvent, SessionFoundation, SessionSubject, TransportDirection, TransportPhase,
     },
 };
+use crate::remote;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DialRole {
@@ -30,6 +31,12 @@ pub(crate) enum PeerSession {
     Rejected,
     Failed,
     Disconnected,
+}
+
+impl PeerSession {
+    pub(crate) fn is_active(self) -> bool {
+        matches!(self, Self::Connecting | Self::Connected)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +55,7 @@ pub(crate) enum Event {
     PeerRemoved(String),
     InboundCount(usize),
     InboundRejected,
+    Screen(remote::Update),
     DiscoveryStopped,
     ListenerStopped,
 }
@@ -64,8 +72,10 @@ pub(crate) struct Services {
     discovery: mdns::Discovery,
     discovery_active: bool,
     sessions_active: bool,
+    remote_active: bool,
     registry: PeerRegistry,
     sessions: SessionFoundation,
+    remote: remote::Directory,
     peers: BTreeMap<String, PeerStatus>,
     inbound: BTreeSet<u64>,
     pending: VecDeque<Event>,
@@ -83,13 +93,16 @@ impl Services {
             .await?;
         let registry = PeerRegistry::new(discovery.id());
         let sessions = bound.start(discovery.credential().to_owned()).await?;
+        let remote = remote::Directory::start(sessions.receive_origin(), discovery.id().to_owned());
 
         Ok(Self {
             discovery,
             discovery_active: true,
             sessions_active: true,
+            remote_active: true,
             registry,
             sessions,
+            remote,
             peers: BTreeMap::new(),
             inbound: BTreeSet::new(),
             pending: VecDeque::new(),
@@ -103,28 +116,41 @@ impl Services {
                 return Some(event);
             }
 
-            let input = match (self.discovery_active, self.sessions_active) {
-                (true, true) => tokio::select! {
-                    event = self.discovery.recv() => Input::Discovery(event),
-                    event = self.sessions.recv() => Input::Session(event),
-                },
-                (true, false) => Input::Discovery(self.discovery.recv().await),
-                (false, true) => Input::Session(self.sessions.recv().await),
-                (false, false) => return None,
+            let input = tokio::select! {
+                event = self.discovery.recv(), if self.discovery_active => Input::Discovery(event),
+                event = self.sessions.recv(), if self.sessions_active => Input::Session(event),
+                event = self.remote.recv(), if self.remote_active => Input::Remote(event),
+                else => return None,
             };
             self.handle_input(input).await;
         }
     }
 
     pub(crate) async fn shutdown(self) {
+        self.remote.stop().await;
         self.sessions.shutdown().await;
         drop(self.discovery);
+    }
+
+    pub(crate) fn remote_broadcast(
+        &self,
+        path: &str,
+    ) -> Option<moq_tokio::moq_net::broadcast::Consumer> {
+        self.remote.broadcast(path)
+    }
+
+    pub(crate) fn local_peer_id(&self) -> &str {
+        self.discovery.id()
+    }
+
+    pub(crate) fn publish_origin(&self) -> moq_tokio::moq_net::origin::Producer {
+        self.sessions.publish_origin()
     }
 
     async fn handle_input(&mut self, input: Input) {
         match input {
             Input::Discovery(Some(mdns::Event::Found(peer))) => self.found(peer).await,
-            Input::Discovery(Some(mdns::Event::Lost(id))) => self.lost(&id).await,
+            Input::Discovery(Some(mdns::Event::Lost(id))) => self.lost(&id),
             Input::Discovery(Some(_)) => {}
             Input::Discovery(None) => {
                 self.discovery_active = false;
@@ -137,6 +163,8 @@ impl Services {
                 self.pending.push_back(Event::ListenerStopped);
             }
             Input::Session(None) => self.sessions_active = false,
+            Input::Remote(Some(update)) => self.pending.push_back(Event::Screen(update)),
+            Input::Remote(None) => self.remote_active = false,
         }
     }
 
@@ -145,13 +173,10 @@ impl Services {
         let found = PeerRecord::from_mdns(peer);
         let id = found.id.clone();
         let update = self.registry.found(found);
-        if !update.changed() {
-            return;
-        }
         let record = self
             .registry
             .get(&id)
-            .expect("a changed peer remains registered")
+            .expect("a found peer remains registered")
             .clone();
 
         let role = if should_dial {
@@ -198,7 +223,7 @@ impl Services {
         self.pending.push_back(Event::Peer(status));
     }
 
-    async fn lost(&mut self, id: &str) {
+    fn lost(&mut self, id: &str) {
         if !self.registry.lost(id) {
             return;
         }
@@ -206,11 +231,10 @@ impl Services {
             return;
         };
         status.discovered = false;
-        if retain_after_lost(&status) {
+        if retain_after_lost(&status, self.inbound.len()) {
             self.peers.insert(id.to_owned(), status.clone());
             self.pending.push_back(Event::Peer(status));
         } else {
-            let _ = self.sessions.disconnect(id).await;
             self.pending.push_back(Event::PeerRemoved(id.to_owned()));
         }
     }
@@ -228,7 +252,7 @@ impl Services {
                 status.session = map_phase(update.state.phase());
                 let status = status.clone();
                 self.pending.push_back(Event::Peer(status.clone()));
-                if !status.discovered && status.session != PeerSession::Connected {
+                if !status.discovered && !status.session.is_active() {
                     self.peers.remove(&id);
                     self.pending.push_back(Event::PeerRemoved(id));
                 }
@@ -252,8 +276,25 @@ impl Services {
                 if self.inbound.len() != previous_count {
                     self.pending
                         .push_back(Event::InboundCount(self.inbound.len()));
+                    self.prune_lost_passive_peers();
                 }
             }
+        }
+    }
+
+    fn prune_lost_passive_peers(&mut self) {
+        if !self.inbound.is_empty() {
+            return;
+        }
+        let removed = self
+            .peers
+            .iter()
+            .filter(|(_, peer)| !peer.discovered && peer.role == DialRole::Passive)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in removed {
+            self.peers.remove(&id);
+            self.pending.push_back(Event::PeerRemoved(id));
         }
     }
 }
@@ -261,24 +302,25 @@ impl Services {
 enum Input {
     Discovery(Option<mdns::Event>),
     Session(Option<SessionEvent>),
+    Remote(Option<remote::Update>),
 }
 
 fn should_connect(update: PeerUpdate, phase: PeerSession) -> bool {
     match update {
         PeerUpdate::IdentityReplaced => true,
-        PeerUpdate::Added | PeerUpdate::CandidatesMerged => matches!(
+        PeerUpdate::Added | PeerUpdate::CandidatesMerged | PeerUpdate::Unchanged => matches!(
             phase,
             PeerSession::Waiting
                 | PeerSession::Rejected
                 | PeerSession::Failed
                 | PeerSession::Disconnected
         ),
-        PeerUpdate::Unchanged => false,
     }
 }
 
-fn retain_after_lost(peer: &PeerStatus) -> bool {
-    peer.role == DialRole::Active && peer.session == PeerSession::Connected
+fn retain_after_lost(peer: &PeerStatus, inbound_sessions: usize) -> bool {
+    peer.role == DialRole::Active && peer.session.is_active()
+        || peer.role == DialRole::Passive && inbound_sessions > 0
 }
 
 fn map_phase(phase: TransportPhase) -> PeerSession {
@@ -310,19 +352,23 @@ mod tests {
     }
 
     #[test]
-    fn lost_keeps_only_a_healthy_precise_outbound_session() {
-        assert!(retain_after_lost(&status(
-            DialRole::Active,
-            PeerSession::Connected
-        )));
-        assert!(!retain_after_lost(&status(
-            DialRole::Active,
-            PeerSession::Connecting
-        )));
-        assert!(!retain_after_lost(&status(
-            DialRole::Passive,
-            PeerSession::Connected
-        )));
+    fn lost_keeps_a_healthy_outbound_or_an_active_passive_session() {
+        assert!(retain_after_lost(
+            &status(DialRole::Active, PeerSession::Connected),
+            0
+        ));
+        assert!(retain_after_lost(
+            &status(DialRole::Active, PeerSession::Connecting),
+            0
+        ));
+        assert!(retain_after_lost(
+            &status(DialRole::Passive, PeerSession::Connected),
+            1
+        ));
+        assert!(!retain_after_lost(
+            &status(DialRole::Passive, PeerSession::Connected),
+            0
+        ));
     }
 
     #[test]
@@ -340,6 +386,11 @@ mod tests {
             PeerSession::Connected
         ));
         assert!(!should_connect(PeerUpdate::Added, PeerSession::Connected));
+        assert!(should_connect(PeerUpdate::Unchanged, PeerSession::Failed));
+        assert!(!should_connect(
+            PeerUpdate::Unchanged,
+            PeerSession::Connected
+        ));
     }
 
     #[tokio::test]
