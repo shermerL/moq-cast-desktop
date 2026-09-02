@@ -28,16 +28,18 @@ defaults:
     working-directory: mac
 
 jobs:
-  verify-and-package:
+  verify:
+    name: Verify macOS app
     runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate workflow contract
+        run: bash ./scripts/check-ci-workflow.sh
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-30
         with:
           toolchain: 1.95.0
           components: clippy,rustfmt
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
       - name: Cache Rust dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -62,21 +64,76 @@ jobs:
         run: cargo test --locked --no-default-features --lib
       - name: Run default-feature Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Build arm64 release app
-        run: cargo build --locked --release --target aarch64-apple-darwin
+
+  build-release:
+    name: Build ${{ matrix.target }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-30
+        with:
+          toolchain: 1.95.0
+          targets: ${{ matrix.target }}
+      - name: Cache Rust dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: macos-cargo-${{ runner.arch }}-rust1.95.0-${{ hashFiles('mac/Cargo.lock', 'shared/diagnostics/Cargo.lock', 'shared/ui/Cargo.lock') }}
+          restore-keys: |
+            macos-cargo-${{ runner.arch }}-rust1.95.0-
+      - name: Build release app
+        run: cargo build --locked --release --target "${{ matrix.target }}"
         env:
           MOQCAST_BUILD_IDENTITY: macos-universal2
           MOQCAST_SOURCE_COMMIT: ${{ github.sha }}
-      - name: Build x86_64 release app
-        run: cargo build --locked --release --target x86_64-apple-darwin
-        env:
-          MOQCAST_BUILD_IDENTITY: macos-universal2
-          MOQCAST_SOURCE_COMMIT: ${{ github.sha }}
+      - name: Upload release binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: MoQCast-macOS-binary-${{ matrix.target }}
+          path: ${{ github.workspace }}/mac/target/${{ matrix.target }}/release/moqcast-macos
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  package:
+    name: Package Universal 2 app
+    needs: [verify, build-release]
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Download arm64 release binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: MoQCast-macOS-binary-aarch64-apple-darwin
+          path: ${{ runner.temp }}/moqcast-binary/aarch64-apple-darwin
+      - name: Download x86_64 release binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: MoQCast-macOS-binary-x86_64-apple-darwin
+          path: ${{ runner.temp }}/moqcast-binary/x86_64-apple-darwin
+      - name: Verify release binary artifacts
+        run: |
+          arm64="$RUNNER_TEMP/moqcast-binary/aarch64-apple-darwin/moqcast-macos"
+          x86_64="$RUNNER_TEMP/moqcast-binary/x86_64-apple-darwin/moqcast-macos"
+          test -f "$arm64"
+          test -f "$x86_64"
+          lipo "$arm64" -verify_arch arm64
+          lipo "$x86_64" -verify_arch x86_64
       - name: Package ad hoc signed Universal 2 app
         run: |
           ./scripts/package-app.sh \
-            target/aarch64-apple-darwin/release/moqcast-macos \
-            target/x86_64-apple-darwin/release/moqcast-macos \
+            "$RUNNER_TEMP/moqcast-binary/aarch64-apple-darwin/moqcast-macos" \
+            "$RUNNER_TEMP/moqcast-binary/x86_64-apple-darwin/moqcast-macos" \
             "$RUNNER_TEMP/moqcast-package"
         env:
           MOQCAST_BUILD_VERSION: ${{ github.run_number }}
@@ -127,3 +184,4 @@ jobs:
             ${{ runner.temp }}/moqcast-package/MoQCast-macOS-*.zip.sha256
           if-no-files-found: error
           retention-days: 14
+          compression-level: 0
