@@ -656,17 +656,12 @@ impl Supervisor {
                     return LoopAction::Unchanged;
                 };
                 let update = peers.found(record);
-                if !update.changed() {
-                    return LoopAction::Unchanged;
-                }
                 self.project_peer(&peer_id, should_dial);
                 if should_dial {
-                    let connected = self
-                        .mesh
-                        .outbound
-                        .get(&peer_id)
-                        .is_some_and(|resources| resources.session.is_some());
-                    self.ensure_outbound(&peer_id, reset_outbound_for(update, connected));
+                    let active = self.mesh.outbound.get(&peer_id).is_some_and(|resources| {
+                        resources.session.is_some() || resources.pending.is_some()
+                    });
+                    self.ensure_outbound(&peer_id, reset_outbound_for(update, active));
                 } else {
                     self.accept_inbound_role(&peer_id);
                 }
@@ -677,15 +672,6 @@ impl Supervisor {
                     return LoopAction::Unchanged;
                 };
                 if peers.lost(&id) {
-                    if self
-                        .mesh
-                        .outbound
-                        .get(&id)
-                        .is_some_and(|resources| resources.session.is_none())
-                        && let Some(mut resources) = self.mesh.outbound.remove(&id)
-                    {
-                        resources.close();
-                    }
                     self.state.mark_peer_lost(&id);
                     LoopAction::Changed
                 } else {
@@ -1141,8 +1127,8 @@ impl Supervisor {
     }
 }
 
-fn reset_outbound_for(update: PeerUpdate, connected: bool) -> bool {
-    update == PeerUpdate::IdentityReplaced || (update == PeerUpdate::Added && !connected)
+fn reset_outbound_for(update: PeerUpdate, active: bool) -> bool {
+    update == PeerUpdate::IdentityReplaced || !active
 }
 
 pub(super) async fn run(
@@ -1490,6 +1476,14 @@ mod tests {
         ));
         assert!(reset_outbound_for(
             crate::network::discovery::PeerUpdate::IdentityReplaced,
+            true
+        ));
+        assert!(reset_outbound_for(
+            crate::network::discovery::PeerUpdate::Unchanged,
+            false
+        ));
+        assert!(!reset_outbound_for(
+            crate::network::discovery::PeerUpdate::Unchanged,
             true
         ));
     }

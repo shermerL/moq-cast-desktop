@@ -175,16 +175,11 @@ impl RuntimeSnapshot {
         match change {
             RegistryChange::Added(peer) | RegistryChange::Updated(peer) => self.upsert(peer),
             RegistryChange::Removed { id } => {
-                if self.has_exact_outbound_connection(&id) {
-                    let peer = self
-                        .peers
-                        .get_mut(&id)
-                        .expect("connected peer remains in the snapshot");
+                if let Some(peer) = self.peers.get_mut(&id) {
                     peer.present = false;
                     peer.candidates.clear();
-                } else {
-                    self.remove_peer(&id);
                 }
+                self.prune_inactive_peer(&id);
             }
             RegistryChange::Unchanged | RegistryChange::IgnoredSelf => return,
         }
@@ -199,11 +194,35 @@ impl RuntimeSnapshot {
         self.peers.values().filter(|peer| peer.present).count()
     }
 
-    fn has_exact_outbound_connection(&self, peer: &str) -> bool {
+    fn peer_remains_visible(&self, peer: &str) -> bool {
         self.peers.get(peer).is_some_and(|peer| {
-            peer.transport.direction == Some(TransportDirectionView::Outbound)
-                && peer.transport.phase == TransportPhaseView::Connected
+            peer.present
+                || peer.transport.direction == Some(TransportDirectionView::Outbound)
+                    && matches!(
+                        peer.transport.phase,
+                        TransportPhaseView::Connecting | TransportPhaseView::Connected
+                    )
+                || peer.screen == ScreenAvailability::Available
+                || !peer.should_dial && self.inbound_sessions > 0
         })
+    }
+
+    fn prune_inactive_peer(&mut self, peer: &str) {
+        if !self.peer_remains_visible(peer) {
+            self.remove_peer(peer);
+        }
+    }
+
+    fn prune_inactive_peers(&mut self) {
+        let peers = self.peers.keys().cloned().collect::<Vec<_>>();
+        for peer in peers {
+            self.prune_inactive_peer(&peer);
+        }
+    }
+
+    fn set_inbound_session_count(&mut self, count: usize) {
+        self.inbound_sessions = count;
+        self.prune_inactive_peers();
     }
 
     fn remove_peer(&mut self, peer: &str) {
@@ -253,8 +272,14 @@ impl RuntimeSnapshot {
             return false;
         }
         self.remote_screens.insert(path, update.view);
-        if let Some(peer) = self.peers.get_mut(&peer_id) {
+        let peer_exists = if let Some(peer) = self.peers.get_mut(&peer_id) {
             peer.screen = availability;
+            true
+        } else {
+            false
+        };
+        if peer_exists {
+            self.prune_inactive_peer(&peer_id);
         }
         true
     }
@@ -302,12 +327,7 @@ impl RuntimeSnapshot {
             return;
         }
         current.transport = update;
-        if !(current.present
-            || current.transport.direction == Some(TransportDirectionView::Outbound)
-                && current.transport.phase == TransportPhaseView::Connected)
-        {
-            self.remove_peer(peer);
-        }
+        self.prune_inactive_peer(peer);
     }
 
     fn shutdown(&mut self) {
@@ -709,14 +729,8 @@ async fn run(
                     }
                     mdns::Event::Lost(raw_id) => {
                         let key = sanitize_identity(&raw_id);
-                        let keep_session = snapshot.has_exact_outbound_connection(&key);
                         services.raw_peers.remove(&key);
                         snapshot.apply_registry(services.registry.lost(&raw_id));
-                        if !keep_session
-                            && let Some(update) = services.sessions.disconnect(&raw_id).await
-                        {
-                            apply_session_update(&mut snapshot, update);
-                        }
                     }
                     _ => {}
                 }
@@ -1198,13 +1212,14 @@ fn apply_session_update(snapshot: &mut RuntimeSnapshot, update: TransportUpdate)
             );
         }
         SessionSubject::Inbound(_) => {
-            snapshot.inbound_sessions = match update.state.phase() {
+            let count = match update.state.phase() {
                 TransportPhase::Connected => snapshot.inbound_sessions.saturating_add(1),
                 TransportPhase::Disconnected => snapshot.inbound_sessions.saturating_sub(1),
                 TransportPhase::Connecting | TransportPhase::Rejected | TransportPhase::Failed => {
                     snapshot.inbound_sessions
                 }
             };
+            snapshot.set_inbound_session_count(count);
         }
     }
 }
@@ -1244,12 +1259,22 @@ mod tests {
         snapshot.apply_registry(RegistryChange::Removed {
             id: "peer".to_owned(),
         });
-        assert!(!snapshot.peers.contains_key("peer"));
+        assert!(snapshot.peers.contains_key("peer"));
         assert_eq!(snapshot.discovery, DiscoveryState::Empty);
+
+        snapshot.apply_transport(
+            "peer",
+            TransportView {
+                generation: 1,
+                direction: Some(TransportDirectionView::Outbound),
+                phase: TransportPhaseView::Failed,
+            },
+        );
+        assert!(!snapshot.peers.contains_key("peer"));
     }
 
     #[test]
-    fn lost_keeps_only_an_exact_outbound_connected_peer_until_disconnect() {
+    fn lost_keeps_a_peer_until_transport_and_screen_are_inactive() {
         let mut snapshot = RuntimeSnapshot::default();
         snapshot.apply_registry(RegistryChange::Added(peer("peer", "moqt://one:4443")));
         let generation = snapshot.begin_auto_connect("peer").expect("connect");
@@ -1283,8 +1308,76 @@ mod tests {
                 phase: TransportPhaseView::Disconnected,
             },
         );
+        assert!(snapshot.peers.contains_key("peer"));
+        assert!(snapshot.update_remote_screen(crate::remote::Update {
+            path: "moqcast.screen/peer".to_owned(),
+            view: RemoteScreenView {
+                peer_id: "peer".to_owned(),
+                availability: ScreenAvailability::Withdrawn,
+            },
+        }));
         assert!(!snapshot.peers.contains_key("peer"));
         assert!(!snapshot.remote_screens.contains_key("moqcast.screen/peer"));
+    }
+
+    #[test]
+    fn passive_peer_survives_lost_while_an_inbound_session_exists() {
+        let mut snapshot = RuntimeSnapshot::default();
+        let mut passive = peer("peer", "moqt://one:4443");
+        passive.should_dial = false;
+        snapshot.apply_registry(RegistryChange::Added(passive));
+        snapshot.set_inbound_session_count(1);
+
+        snapshot.apply_registry(RegistryChange::Removed {
+            id: "peer".to_owned(),
+        });
+
+        assert!(!snapshot.peers["peer"].present);
+        snapshot.set_inbound_session_count(0);
+        assert!(!snapshot.peers.contains_key("peer"));
+    }
+
+    #[test]
+    fn available_screen_survives_lost_until_the_route_is_withdrawn() {
+        let mut snapshot = RuntimeSnapshot::default();
+        snapshot.apply_registry(RegistryChange::Added(peer("peer", "moqt://one:4443")));
+        assert!(snapshot.update_remote_screen(crate::remote::Update {
+            path: "moqcast.screen/peer".to_owned(),
+            view: RemoteScreenView {
+                peer_id: "peer".to_owned(),
+                availability: ScreenAvailability::Available,
+            },
+        }));
+
+        snapshot.apply_registry(RegistryChange::Removed {
+            id: "peer".to_owned(),
+        });
+        assert!(snapshot.peers.contains_key("peer"));
+
+        assert!(snapshot.update_remote_screen(crate::remote::Update {
+            path: "moqcast.screen/peer".to_owned(),
+            view: RemoteScreenView {
+                peer_id: "peer".to_owned(),
+                availability: ScreenAvailability::Withdrawn,
+            },
+        }));
+        assert!(!snapshot.peers.contains_key("peer"));
+    }
+
+    #[test]
+    fn announcement_before_discovery_is_projected_when_peer_arrives() {
+        let mut snapshot = RuntimeSnapshot::default();
+        assert!(snapshot.update_remote_screen(crate::remote::Update {
+            path: "moqcast.screen/peer".to_owned(),
+            view: RemoteScreenView {
+                peer_id: "peer".to_owned(),
+                availability: ScreenAvailability::Available,
+            },
+        }));
+
+        snapshot.apply_registry(RegistryChange::Added(peer("peer", "moqt://one:4443")));
+
+        assert_eq!(snapshot.peers["peer"].screen, ScreenAvailability::Available);
     }
 
     #[test]
