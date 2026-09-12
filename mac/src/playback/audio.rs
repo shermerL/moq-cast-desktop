@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 use super::sync::{self, AudioLease, MediaClock};
 use super::{AudioPhase, AudioSnapshot};
 
-pub(super) const LIVE_EDGE_BUDGET: Duration = Duration::from_millis(100);
+pub(super) const LIVE_EDGE_BUDGET: Duration = Duration::from_millis(80);
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Identity {
@@ -568,7 +568,7 @@ mod tests {
         let config = decode_config();
 
         assert_eq!(config.format, moq_audio::Format::F32);
-        assert_eq!(config.max_age, Duration::from_millis(100));
+        assert_eq!(config.max_age, Duration::from_millis(80));
     }
 
     #[test]

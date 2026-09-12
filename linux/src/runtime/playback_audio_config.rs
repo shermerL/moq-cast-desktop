@@ -2,7 +2,15 @@
 
 use std::time::Duration;
 
-pub(super) const REMOTE_AUDIO_LIVE_EDGE_BUDGET: Duration = Duration::from_millis(100);
+pub(super) const REMOTE_AUDIO_LIVE_EDGE_BUDGET: Duration = Duration::from_millis(80);
+
+pub(super) fn remote_video_max_age(has_playable_audio: bool) -> Duration {
+    if has_playable_audio {
+        REMOTE_AUDIO_LIVE_EDGE_BUDGET
+    } else {
+        Duration::ZERO
+    }
+}
 
 #[cfg(target_os = "linux")]
 pub(super) fn remote_audio_decode_config() -> moq_audio::decode::Config {
@@ -17,8 +25,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_audio_live_edge_budget_is_100ms() {
-        assert_eq!(REMOTE_AUDIO_LIVE_EDGE_BUDGET, Duration::from_millis(100));
+    fn audio_video_share_80ms_and_video_only_skips_stale_groups() {
+        assert_eq!(REMOTE_AUDIO_LIVE_EDGE_BUDGET, Duration::from_millis(80));
+        assert_eq!(remote_video_max_age(true), REMOTE_AUDIO_LIVE_EDGE_BUDGET);
+        assert_eq!(remote_video_max_age(false), Duration::ZERO);
     }
 
     #[cfg(target_os = "linux")]

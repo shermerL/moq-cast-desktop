@@ -9,13 +9,12 @@ use super::{
     output_diagnostics, pcm_duration_us, pcm_has_nonzero_f32,
 };
 
-const REMOTE_AUDIO_LIVE_EDGE_BUDGET: Duration = Duration::from_millis(80);
 const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 
 fn remote_audio_decode_config() -> moq_audio::decode::Config {
     let mut config = moq_audio::decode::Config::new();
     config.format = moq_audio::Format::F32;
-    config.max_age = REMOTE_AUDIO_LIVE_EDGE_BUDGET;
+    config.max_age = super::AV_LIVE_EDGE_BUDGET;
     config
 }
 
@@ -216,7 +215,7 @@ async fn run(
         codec = %codec,
         decoded_sample_rate = playback.consumer.sample_rate(),
         decoded_channels = playback.consumer.channels(),
-        live_edge_budget_ms = REMOTE_AUDIO_LIVE_EDGE_BUDGET.as_millis() as u64,
+        live_edge_budget_ms = super::AV_LIVE_EDGE_BUDGET.as_millis() as u64,
         elapsed_ms = elapsed_ms(started_at),
         output_device = "system-default",
         "remote audio pipeline opened; output callback has not been observed"

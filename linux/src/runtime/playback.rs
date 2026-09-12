@@ -3,7 +3,7 @@
 mod audio;
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use moq_mux::catalog::Stream;
 use moq_tokio::moq_net;
@@ -86,15 +86,13 @@ impl VideoSelection {
     async fn decoder(
         &self,
         broadcast: &moq_net::broadcast::Consumer,
+        max_age: Duration,
     ) -> anyhow::Result<moq_video::decode::Consumer> {
-        moq_video::decode::Consumer::new(
-            broadcast,
-            &self.config,
-            self.name.clone(),
-            moq_video::decode::Config::new(),
-        )
-        .await
-        .map_err(Into::into)
+        let mut config = moq_video::decode::Config::new();
+        config.max_age = max_age;
+        moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), config)
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -109,6 +107,13 @@ struct Selection {
 }
 
 impl Selection {
+    fn video_max_age(&self) -> Duration {
+        super::playback_audio_config::remote_video_max_age(matches!(
+            self.audio,
+            audio::Selection::Playable { .. }
+        ))
+    }
+
     fn from_catalog(catalog: moq_mux::catalog::hang::Catalog<()>, current: Option<&Self>) -> Self {
         Self {
             video: VideoSelection::from_catalog(
@@ -303,6 +308,7 @@ pub(super) async fn run(
             .ok_or_else(|| anyhow::anyhow!("remote screen catalog ended"))?,
     };
     let mut selection = Selection::from_catalog(first, None);
+    let video_max_age = selection.video_max_age();
     let mut frames_sequence = FrameSequence::new(view_generation);
     let mut video_scheduler = sync::VideoScheduler::default();
     let (video_updates_tx, mut video_updates_rx) = mpsc::channel(VIDEO_EVENT_CAPACITY);
@@ -312,7 +318,7 @@ pub(super) async fn run(
         let decoder = tokio::select! {
             biased;
             _ = wait_for_cancel(&mut cancel) => return Ok(()),
-            result = video.decoder(&broadcast) => result?,
+            result = video.decoder(&broadcast, video_max_age) => result?,
         };
         tracing::info!(
             view_generation,
@@ -433,7 +439,7 @@ pub(super) async fn run(
                             let decoder = tokio::select! {
                                 biased;
                                 _ = wait_for_cancel(&mut cancel) => break Ok(()),
-                                result = video.decoder(&broadcast) => result?,
+                                result = video.decoder(&broadcast, video_max_age) => result?,
                             };
                             tracing::info!(
                                 view_generation,
@@ -601,6 +607,8 @@ mod tests {
                 audio: true,
             }
         );
+        assert_eq!(current.video_max_age(), Duration::ZERO);
+        assert_eq!(next.video_max_age(), Duration::from_millis(80));
     }
 
     #[test]
