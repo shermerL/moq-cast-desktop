@@ -12,7 +12,20 @@ Windows 屏幕发布使用 Desktop Duplication 与 H.264。默认兼容模式保
 
 远端播放会从 Hang catalog 选择同一 broadcast 中受支持的 Opus 或 PCM rendition，复用 pinned `moq-audio` 的 decoder 与 CPAL/WASAPI 默认输出设备。音频订阅和设备生命周期运行在独立任务中，因此设备打开、track 结束或输出失败不会阻塞视频首帧，也不会结束视频播放。当前只提供 bounded jitter/resample 播放，不宣称已经完成严格的音画时钟同步。
 
-Desktop Duplication 尚未合成硬件 overlay 鼠标指针。根因与修复边界位于上游 `moq-video::capture::desktopduplication`，桌面端不维护第二套 capture workaround；上游完成 cursor shape 缓存与合成后再更新 pinned revision。
+默认 Desktop Duplication 尚未合成硬件 overlay 鼠标指针。实验性的 Windows Graphics Capture 后端由 `moq-video` 负责捕获，应用只提供后端选择，不在 Desktop 内实现第二套原生捕获。
+
+### 本地 WGC 实验
+
+`wgc` feature 默认关闭，需要配合基于当前固定 SHA 的本地 `moq-video` 修改，不能直接使用未修改的远端 pin。生成仓库外的独立依赖快照和 Cargo 配置：
+
+```powershell
+python scripts/prepare-wgc-overlay.py --moq C:\src\moq --output C:\temp\moq-wgc-overlay
+cargo check --config C:\temp\moq-wgc-overlay\config.toml --features wgc --all-targets
+```
+
+生成器要求 Python 3.11+，输出目录必须不存在。它只替换 `moq-video`，其 MoQ 依赖仍引用原固定 SHA，避免引入 workspace path 来源的另一份网络/媒体类型。普通构建继续使用原有锁文件和 Legacy 后端；实验配置首次解析会改变实验构建使用的锁文件，不应把该本地 overlay 锁文件提交为产品默认依赖。
+
+实验构建在设置的屏幕共享分组中提供捕获后端选择，默认 Legacy。WGC 仅支持整屏、Windows 10 2004+、CPU I420/SDR；要求捕获时包含鼠标。共享期间不能切换后端，不提供静默降级。显示器关闭或尺寸变化会结束当前共享，需重新开始。动态尺寸重新协商、窗口捕获和 HDR 不在本轮范围内。
 
 ## 启动桌面端
 

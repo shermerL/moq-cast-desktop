@@ -55,6 +55,30 @@ impl VideoEncodingPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum CaptureBackend {
+    #[default]
+    Legacy,
+    Wgc,
+}
+
+impl CaptureBackend {
+    pub(crate) fn from_stored(value: Option<&str>) -> Self {
+        if cfg!(feature = "wgc") && value == Some("wgc") {
+            Self::Wgc
+        } else {
+            Self::Legacy
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Wgc => "wgc",
+        }
+    }
+}
+
 #[cfg(any(target_os = "windows", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EncoderRequirement {
@@ -91,6 +115,11 @@ struct VideoEncodingPlan {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PublicationFailure {
+    WgcUnavailable,
+    #[cfg(any(all(target_os = "windows", feature = "wgc"), test))]
+    CapturePermissionDenied,
+    #[cfg(any(all(target_os = "windows", feature = "wgc"), test))]
+    CaptureSourceEnded,
     CaptureUnavailable,
     #[cfg(any(target_os = "windows", test))]
     CompatibleDisplayTooLarge,
@@ -104,6 +133,17 @@ pub(crate) enum PublicationFailure {
 impl PublicationFailure {
     pub(crate) fn message(self) -> &'static str {
         match self {
+            Self::WgcUnavailable => {
+                "Windows Graphics Capture is unavailable. Select Legacy capture or use Windows 10 2004 or later."
+            }
+            #[cfg(any(all(target_os = "windows", feature = "wgc"), test))]
+            Self::CapturePermissionDenied => {
+                "Windows denied screen capture. Check screen capture permissions and try again."
+            }
+            #[cfg(any(all(target_os = "windows", feature = "wgc"), test))]
+            Self::CaptureSourceEnded => {
+                "The display closed or changed size. Restart screen sharing."
+            }
             Self::CaptureUnavailable => "Windows could not open a capturable display.",
             #[cfg(any(target_os = "windows", test))]
             Self::CompatibleDisplayTooLarge => {
@@ -149,6 +189,7 @@ pub(crate) struct MediaSnapshot {
     pub(crate) phase: MediaPhase,
     pub(crate) audio: AudioSnapshot,
     pub(crate) video_encoding: VideoEncodingPolicy,
+    pub(crate) capture_backend: CaptureBackend,
     pub(crate) path: Option<String>,
     pub(crate) width: Option<u32>,
     pub(crate) height: Option<u32>,
@@ -162,6 +203,7 @@ impl Default for MediaSnapshot {
             phase: MediaPhase::Idle,
             audio: AudioSnapshot::default(),
             video_encoding: VideoEncodingPolicy::default(),
+            capture_backend: CaptureBackend::default(),
             path: None,
             width: None,
             height: None,
@@ -171,6 +213,16 @@ impl Default for MediaSnapshot {
 }
 
 impl MediaSnapshot {
+    pub(crate) fn set_capture_backend(&mut self, backend: CaptureBackend) -> bool {
+        if !matches!(self.phase, MediaPhase::Idle | MediaPhase::Failed)
+            || (backend == CaptureBackend::Wgc && !cfg!(feature = "wgc"))
+        {
+            return false;
+        }
+        self.capture_backend = backend;
+        true
+    }
+
     pub(crate) fn set_video_encoding_policy(&mut self, policy: VideoEncodingPolicy) -> bool {
         if !matches!(self.phase, MediaPhase::Idle | MediaPhase::Failed) {
             return false;
@@ -270,6 +322,8 @@ pub(crate) struct Publication {
 
 pub(crate) struct ReadyPublication {
     #[cfg(target_os = "windows")]
+    backend: CaptureBackend,
+    #[cfg(target_os = "windows")]
     publication: Publication,
     #[cfg(target_os = "windows")]
     source: moq_video::capture::Source,
@@ -301,6 +355,17 @@ impl ReadyPublication {
             let mut capture = moq_video::capture::Config::default();
             capture.source = self.source;
             capture.framerate = Some(30);
+            #[cfg(feature = "wgc")]
+            {
+                capture.windows_backend = match self.backend {
+                    CaptureBackend::Legacy => moq_video::capture::WindowsBackend::Legacy,
+                    CaptureBackend::Wgc => moq_video::capture::WindowsBackend::Wgc,
+                };
+                if self.backend == CaptureBackend::Wgc {
+                    capture.width = Some(self.plan.info.width);
+                    capture.height = Some(self.plan.info.height);
+                }
+            }
 
             let mut encode = moq_video::encode::Options::default();
             encode.codec = moq_video::encode::Codec::H264;
@@ -308,6 +373,7 @@ impl ReadyPublication {
 
             tracing::info!(
                 video_policy = self.plan.policy.name(),
+                capture_backend = self.backend.name(),
                 source_width = self.plan.info.width,
                 source_height = self.plan.info.height,
                 encoder_kind = self.plan.encoder.name(),
@@ -340,12 +406,26 @@ impl ReadyPublication {
             result.map_err(|error| {
                 tracing::warn!(
                     video_policy = self.plan.policy.name(),
+                    capture_backend = self.backend.name(),
                     source_width = self.plan.info.width,
                     source_height = self.plan.info.height,
                     encoder_kind = self.plan.encoder.name(),
                     %error,
                     "screen publication failed"
                 );
+                #[cfg(feature = "wgc")]
+                match &error {
+                    moq_video::Error::PermissionDenied(_) => {
+                        return PublicationFailure::CapturePermissionDenied;
+                    }
+                    moq_video::Error::SourceUnavailable(_) => {
+                        return PublicationFailure::CaptureSourceEnded;
+                    }
+                    moq_video::Error::Unsupported(_) if self.backend == CaptureBackend::Wgc => {
+                        return PublicationFailure::WgcUnavailable;
+                    }
+                    _ => {}
+                }
                 classify_publication_failure(
                     self.plan.policy,
                     matches!(error, moq_video::Error::NoEncoder(_)),
@@ -385,7 +465,11 @@ impl Publication {
     pub(crate) async fn configure(
         self,
         policy: VideoEncodingPolicy,
+        backend: CaptureBackend,
     ) -> Result<ReadyPublication, PublicationFailure> {
+        if backend == CaptureBackend::Wgc && !cfg!(feature = "wgc") {
+            return Err(PublicationFailure::WgcUnavailable);
+        }
         #[cfg(target_os = "windows")]
         {
             let displays = moq_video::capture::displays().await.map_err(|error| {
@@ -411,6 +495,7 @@ impl Publication {
             })?;
             Ok(ReadyPublication {
                 publication: self,
+                backend,
                 source: display.source(),
                 plan,
             })
@@ -435,6 +520,50 @@ impl Drop for Publication {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_backend_defaults_and_unknown_preferences_remain_legacy() {
+        assert_eq!(CaptureBackend::default(), CaptureBackend::Legacy);
+        assert_eq!(CaptureBackend::from_stored(None), CaptureBackend::Legacy);
+        assert_eq!(
+            CaptureBackend::from_stored(Some("unknown")),
+            CaptureBackend::Legacy
+        );
+        assert_eq!(
+            CaptureBackend::from_stored(Some("wgc")),
+            if cfg!(feature = "wgc") {
+                CaptureBackend::Wgc
+            } else {
+                CaptureBackend::Legacy
+            }
+        );
+    }
+
+    #[test]
+    fn capture_backend_is_locked_until_media_has_stopped() {
+        let mut media = MediaSnapshot::default();
+        let enabled = media.set_capture_backend(CaptureBackend::Wgc);
+        assert_eq!(enabled, cfg!(feature = "wgc"));
+        let expected = media.capture_backend;
+        let generation = media.begin("peer-a").unwrap();
+        for phase in [
+            MediaPhase::Preparing,
+            MediaPhase::Sharing,
+            MediaPhase::Stopping,
+        ] {
+            media.phase = phase;
+            assert!(!media.set_capture_backend(CaptureBackend::Legacy));
+            assert_eq!(media.capture_backend, expected);
+        }
+        assert!(media.stopped(generation));
+        assert!(media.set_capture_backend(CaptureBackend::Legacy));
+        assert!(
+            !PublicationFailure::CapturePermissionDenied
+                .message()
+                .is_empty()
+        );
+        assert!(!PublicationFailure::CaptureSourceEnded.message().is_empty());
+    }
 
     #[test]
     fn media_lifecycle_is_single_generation_and_stop_is_explicit() {

@@ -13,7 +13,7 @@ use moqcast_ui::{
 use crate::{
     audio::AudioPhase,
     diagnostics::DiagnosticsUi,
-    media::{MediaPhase, VideoEncodingPolicy},
+    media::{CaptureBackend, MediaPhase, VideoEncodingPolicy},
     playback::{PlaybackFrameIdentity, ViewPhase},
     player::{LivePlayer, PlayerAction, TOOLBAR_HEIGHT},
     remote::ScreenAvailability,
@@ -30,6 +30,7 @@ const DESKTOP_NAVIGATION_HEIGHT: f32 = Size::APP_BAR;
 const STORAGE_DETAILED_DIAGNOSTICS: &str = "moqcast.detailed-diagnostics";
 const STORAGE_DEVELOPER_MODE: &str = "moqcast.developer-mode";
 const STORAGE_LOCALE: &str = "moqcast.locale";
+const STORAGE_CAPTURE_BACKEND: &str = "moqcast.capture-backend";
 
 fn parse_stored_bool(value: Option<String>) -> bool {
     value.as_deref() == Some("true")
@@ -159,7 +160,13 @@ impl MoqCastApp {
                 .and_then(|storage| storage.get_string(STORAGE_LOCALE)),
         );
         let snapshot = runtime.snapshot();
-        Self {
+        let backend = CaptureBackend::from_stored(
+            context
+                .storage
+                .and_then(|storage| storage.get_string(STORAGE_CAPTURE_BACKEND))
+                .as_deref(),
+        );
+        let mut app = Self {
             page: Page::Nearby,
             locale,
             developer_mode,
@@ -177,7 +184,9 @@ impl MoqCastApp {
             playback_high_water_timestamp_us: None,
             viewport_fullscreen: false,
             player: LivePlayer::default(),
-        }
+        };
+        app.send(RuntimeCommand::SetCaptureBackend(backend));
+        app
     }
 
     fn send(&mut self, command: RuntimeCommand) -> bool {
@@ -1079,6 +1088,47 @@ impl MoqCastApp {
             None,
         );
         let current_video_encoding = self.snapshot.media.video_encoding;
+        if cfg!(feature = "wgc") {
+            let current = self.snapshot.media.capture_backend;
+            let mut index = usize::from(current == CaptureBackend::Wgc);
+            let options = match self.locale {
+                Locale::Chinese => ["传统捕获（DXGI）", "Windows Graphics Capture（实验）"],
+                Locale::English => ["Legacy (DXGI)", "Windows Graphics Capture (experimental)"],
+            };
+            setting_row(
+                ui,
+                SettingRowSpec::new(match self.locale {
+                    Locale::Chinese => "屏幕捕获",
+                    Locale::English => "Screen capture",
+                }),
+                |ui| {
+                    select(
+                        ui,
+                        &mut index,
+                        SelectSpec::new(
+                            egui::Id::new("capture-backend"),
+                            "Screen capture",
+                            &options,
+                        )
+                        .expect("capture backend options")
+                        .enabled(matches!(
+                            self.snapshot.media.phase,
+                            MediaPhase::Idle | MediaPhase::Failed
+                        )),
+                    )
+                    .expect("valid capture backend selection");
+                },
+            );
+            let selected = if index == 0 {
+                CaptureBackend::Legacy
+            } else {
+                CaptureBackend::Wgc
+            };
+            if selected != current {
+                self.send(RuntimeCommand::SetCaptureBackend(selected));
+            }
+            ui.separator();
+        }
         let video_options = [
             video_encoding_label(self.locale, VideoEncodingPolicy::Compatible),
             video_encoding_label(self.locale, VideoEncodingPolicy::NativeQhdHardware),
@@ -1330,6 +1380,10 @@ impl eframe::App for MoqCastApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(
+            STORAGE_CAPTURE_BACKEND,
+            self.snapshot.media.capture_backend.name().to_owned(),
+        );
         storage.set_string(
             STORAGE_LOCALE,
             match self.locale {

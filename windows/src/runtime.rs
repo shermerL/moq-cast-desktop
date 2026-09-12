@@ -15,7 +15,7 @@ use url::Url;
 
 use crate::{
     audio::StatusUpdate as AudioStatusUpdate,
-    media::{MediaSnapshot, Publication, PublicationFailure, VideoEncodingPolicy},
+    media::{CaptureBackend, MediaSnapshot, Publication, PublicationFailure, VideoEncodingPolicy},
     playback::{PlaybackFrame, ViewEvent, ViewPhase, ViewSnapshot},
     registry::{PeerRegistry, PeerSummary, RegistryChange, sanitize_identity},
     remote::{Directory as RemoteDirectory, RemoteScreenView, ScreenAvailability},
@@ -341,6 +341,7 @@ pub(crate) enum RuntimeCommand {
     StartScan,
     StopScan,
     SetVideoEncodingPolicy(VideoEncodingPolicy),
+    SetCaptureBackend(CaptureBackend),
     ShareScreen,
     StopSharing,
     WatchScreen { path: String },
@@ -982,6 +983,10 @@ async fn handle_command(command: RuntimeCommand, context: RuntimeContext<'_>) ->
             snapshot.media.set_video_encoding_policy(policy);
             false
         }
+        RuntimeCommand::SetCaptureBackend(backend) => {
+            snapshot.media.set_capture_backend(backend);
+            false
+        }
         RuntimeCommand::ShareScreen => {
             if let Some(active) = services.services.as_ref() {
                 start_publication(
@@ -1067,6 +1072,7 @@ async fn start_publication(
         return;
     };
     let policy = snapshot.media.video_encoding;
+    let backend = snapshot.media.capture_backend;
     let prepared = match Publication::prepare(sessions.publish_origin(), &local_id) {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -1077,7 +1083,7 @@ async fn start_publication(
             return;
         }
     };
-    let ready = match prepared.configure(policy).await {
+    let ready = match prepared.configure(policy, backend).await {
         Ok(ready) => ready,
         Err(error) => {
             snapshot.media.ended(generation, Err(error));
@@ -1089,6 +1095,7 @@ async fn start_publication(
         tracing::info!(
             generation,
             video_policy = ?policy,
+            capture_backend = backend.name(),
             source_width = info.width,
             source_height = info.height,
             "screen publication configured"
