@@ -3,8 +3,10 @@
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 def load(name):
@@ -16,6 +18,15 @@ def load(name):
 
 ci = load("ci-wgc")
 overlay = load("prepare-wgc-overlay")
+
+
+class CommandEncodingTests(unittest.TestCase):
+    def test_utf8_metadata_ignores_windows_legacy_locale(self):
+        payload = json.dumps({"description": "\u4e0d"}, ensure_ascii=False).encode("utf-8")
+        command = f"import sys; sys.stdout.buffer.write(bytes.fromhex('{payload.hex()}'))"
+        with patch("subprocess._text_encoding", return_value="cp1252"):
+            output = ci.run(sys.executable, "-c", command)
+        self.assertEqual(json.loads(output), {"description": "\u4e0d"})
 
 
 class DependencyBoundaryTests(unittest.TestCase):

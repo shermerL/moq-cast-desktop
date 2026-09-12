@@ -21,7 +21,7 @@ TARGET = "x86_64-pc-windows-msvc"
 
 
 def run(*args, cwd=None):
-    return subprocess.check_output(args, cwd=cwd, text=True).strip()
+    return subprocess.check_output(args, cwd=cwd, encoding="utf-8").strip()
 
 
 def digest(path):
@@ -186,4 +186,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

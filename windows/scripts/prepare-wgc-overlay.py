@@ -69,11 +69,11 @@ def main():
     desktop = Path(__file__).resolve().parents[2]
     if output.is_relative_to(moq) or output.is_relative_to(desktop):
         parser.error("output must be outside the MoQ and Desktop repositories")
-    head = subprocess.check_output(["git", "-C", str(moq), "rev-parse", "HEAD"], text=True).strip()
+    head = subprocess.check_output(["git", "-C", str(moq), "rev-parse", "HEAD"], encoding="utf-8").strip()
     if subprocess.run(["git", "-C", str(moq), "merge-base", "--is-ancestor", BASE, head]).returncode:
         parser.error("overlay source must descend from the pinned baseline")
     # No modified workspace dependency or sibling source may sneak into the overlay.
-    changed = subprocess.check_output(["git", "-C", str(moq), "diff", "--name-only", BASE], text=True).splitlines()
+    changed = subprocess.check_output(["git", "-C", str(moq), "diff", "--name-only", BASE], encoding="utf-8").splitlines()
     if any(not path.startswith("rs/moq-video/") for path in changed):
         parser.error("only moq-video changes are allowed against the pinned baseline")
     source = moq / "rs/moq-video"
