@@ -27,6 +27,16 @@ cargo check --config C:\temp\moq-wgc-overlay\config.toml --features wgc --all-ta
 
 实验构建在设置的屏幕共享分组中提供捕获后端选择，默认 Legacy。WGC 仅支持整屏、Windows 10 2004+、CPU I420/SDR；要求捕获时包含鼠标。共享期间不能切换后端，不提供静默降级。显示器关闭或尺寸变化会结束当前共享，需重新开始。动态尺寸重新协商、窗口捕获和 HDR 不在本轮范围内。
 
+### WGC 测试包 CI
+
+在包含实验 workflow 的功能分支上手动运行 `Windows`，将 `wgc_moq_sha` 设为用户 fork `shermerL/moq` 中完整的 40 位提交 SHA。空值只运行普通 Legacy CI；指定 SHA 时还会运行独立 WGC job，不会把普通产物误标为 WGC。
+
+WGC job 从当前已提交的 Windows 锁文件复制起步，在仓库外 Desktop 副本解析 overlay 并冻结实验锁。检查会拒绝删除或升级原有依赖（除 `moq-video` 改为同版本 overlay），并验证完整 Desktop 图中的核心 MoQ 包仍是唯一的原 git 身份。随后以 `--locked` 执行 check、test、Clippy 和 release build；产品默认锁不改变。
+
+成功产物名为 `moqcast-windows-wgc-<Desktop SHA>`，包含实验 zip 及其 SHA256；zip 内另有 exe 校验、两仓源码 SHA、实验 `Cargo.lock` 和依赖来源摘要。另有 `moqcast-windows-wgc-evidence-<Desktop SHA>` 可供复核。复现时 checkout 两个精确 SHA，重新生成 overlay，在独立 Desktop 副本中使用产物里的实验锁后 `--locked` 构建，不能用漂移分支代替来源 SHA。
+
+解压后运行 `moqcast-windows-wgc.exe`，在设置的“屏幕捕获”中显式选择 Windows Graphics Capture（实验），再开始共享。最小真机检查包括鼠标、动态和静止画面、反复启停、应用退出、远端播放、显示器关闭/尺寸变化及系统音频同步；CI 通过不代表这些已经真机验证。可在停止共享后选回 Legacy 作对照。
+
 ## 启动桌面端
 
 ```powershell
