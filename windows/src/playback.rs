@@ -9,6 +9,18 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
 
+#[cfg(any(target_os = "windows", test))]
+const AV_LIVE_EDGE_BUDGET: std::time::Duration = std::time::Duration::from_millis(80);
+
+#[cfg(any(target_os = "windows", test))]
+fn video_max_age(has_playable_audio: bool) -> std::time::Duration {
+    if has_playable_audio {
+        AV_LIVE_EDGE_BUDGET
+    } else {
+        std::time::Duration::ZERO
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ViewPhase {
     #[default]
@@ -336,15 +348,13 @@ impl Selection {
     async fn decoder(
         &self,
         broadcast: &moq_tokio::moq_net::broadcast::Consumer,
+        max_age: std::time::Duration,
     ) -> anyhow::Result<moq_video::decode::Consumer> {
-        moq_video::decode::Consumer::new(
-            broadcast,
-            &self.config,
-            self.name.clone(),
-            moq_video::decode::Config::new(),
-        )
-        .await
-        .map_err(Into::into)
+        let mut config = moq_video::decode::Config::new();
+        config.max_age = max_age;
+        moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), config)
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -369,7 +379,11 @@ pub(crate) async fn run(
             .await?
             .ok_or_else(|| anyhow::anyhow!("remote screen catalog ended"))?;
         let mut selection = Selection::from_catalog(first)?;
-        let mut decoder = selection.decoder(&broadcast).await?;
+        let video_max_age = video_max_age(matches!(
+            selection.audio,
+            audio::Selection::Playable { .. }
+        ));
+        let mut decoder = selection.decoder(&broadcast, video_max_age).await?;
         let mut audio_task =
             audio::Task::spawn(generation, &path, &broadcast, &selection.audio, &events);
         let mut decoder_generation = 1_u64;
@@ -431,7 +445,7 @@ pub(crate) async fn run(
                         selection = next;
                         continue;
                     }
-                    let next_decoder = next.decoder(&broadcast).await?;
+                    let next_decoder = next.decoder(&broadcast, video_max_age).await?;
                     selection = next;
                     decoder = next_decoder;
                     decoder_generation = decoder_generation.saturating_add(1);
@@ -650,6 +664,12 @@ fn orient_rgba(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_video_share_80ms_and_video_only_skips_stale_groups() {
+        assert_eq!(video_max_age(true), std::time::Duration::from_millis(80));
+        assert_eq!(video_max_age(false), std::time::Duration::ZERO);
+    }
 
     #[test]
     fn view_becomes_active_only_after_a_current_decoder_frame() {

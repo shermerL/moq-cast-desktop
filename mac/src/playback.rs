@@ -212,15 +212,13 @@ impl VideoSelection {
     async fn decoder(
         &self,
         broadcast: &moq_tokio::moq_net::broadcast::Consumer,
+        max_age: Duration,
     ) -> anyhow::Result<moq_video::decode::Consumer> {
-        moq_video::decode::Consumer::new(
-            broadcast,
-            &self.config,
-            self.name.clone(),
-            moq_video::decode::Config::new(),
-        )
-        .await
-        .map_err(Into::into)
+        let mut config = moq_video::decode::Config::new();
+        config.max_age = max_age;
+        moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), config)
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -231,6 +229,14 @@ struct Selection {
 }
 
 impl Selection {
+    fn video_max_age(&self) -> Duration {
+        if matches!(self.audio, audio::Selection::Playable { .. }) {
+            audio::LIVE_EDGE_BUDGET
+        } else {
+            Duration::ZERO
+        }
+    }
+
     fn from_catalog(
         catalog: moq_mux::catalog::hang::Catalog<()>,
         current: Option<&Self>,
@@ -446,6 +452,7 @@ async fn run_inner(
             .ok_or_else(|| anyhow::anyhow!("remote screen catalog ended"))?,
     };
     let mut selection = Selection::from_catalog(first, None)?;
+    let video_max_age = selection.video_max_age();
     let mut sequence = FrameSequence::new(generation);
     let (video_tx, mut video_rx) = mpsc::channel(1);
     let mut decoder_name = None;
@@ -463,7 +470,7 @@ async fn run_inner(
         let decoder = tokio::select! {
             biased;
             _ = wait_for_cancel(&mut cancel) => return Ok(()),
-            result = video.decoder(&broadcast) => result?,
+            result = video.decoder(&broadcast, video_max_age) => result?,
         };
         decoder_name = Some(decoder.name().to_owned());
         tracing::info!(
@@ -633,7 +640,7 @@ async fn run_inner(
                             let decoder = tokio::select! {
                                 biased;
                                 _ = wait_for_cancel(&mut cancel) => break Ok(()),
-                                result = video.decoder(&broadcast) => result?,
+                                result = video.decoder(&broadcast, video_max_age) => result?,
                             };
                             decoder_name = Some(decoder.name().to_owned());
                             tracing::info!(
@@ -964,6 +971,8 @@ mod tests {
                 audio: true,
             }
         );
+        assert_eq!(current.video_max_age(), Duration::ZERO);
+        assert_eq!(next.video_max_age(), Duration::from_millis(80));
     }
 
     #[test]
