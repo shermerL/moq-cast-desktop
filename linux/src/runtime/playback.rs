@@ -292,6 +292,7 @@ pub(super) async fn run(
     mut cancel: watch::Receiver<bool>,
     events: mpsc::Sender<Event>,
     frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
+    volume: watch::Receiver<u8>,
 ) -> anyhow::Result<()> {
     let mut catalog = tokio::select! {
         biased;
@@ -350,6 +351,7 @@ pub(super) async fn run(
         &audio_updates_tx,
         &audio_engine,
         &media_clock,
+        volume.clone(),
     );
 
     let result = async {
@@ -425,6 +427,7 @@ pub(super) async fn run(
                             &audio_updates_tx,
                             &audio_engine,
                             &media_clock,
+                            volume.clone(),
                         );
                     }
                     if changes.video {

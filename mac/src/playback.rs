@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use moq_mux::catalog::Stream;
+use moqcast_ui::DEFAULT_PLAYER_VOLUME_PERCENT;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -94,6 +95,19 @@ impl AudioSnapshot {
 pub(crate) struct Owner {
     task: Option<JoinHandle<()>>,
     cancel: Option<watch::Sender<bool>>,
+    volume: Option<watch::Sender<u8>>,
+    generation: u64,
+}
+
+struct PlaybackRun {
+    generation: u64,
+    path: String,
+    broadcast: moq_tokio::moq_net::broadcast::Consumer,
+    cancel: watch::Receiver<bool>,
+    events: mpsc::Sender<Event>,
+    frames: watch::Sender<Option<Arc<Frame>>>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    volume: watch::Receiver<u8>,
 }
 
 impl Owner {
@@ -107,14 +121,36 @@ impl Owner {
         wake: Arc<dyn Fn() + Send + Sync>,
     ) {
         debug_assert!(self.task.is_none());
+        self.generation = generation;
         let (cancel, cancelled) = watch::channel(false);
+        let (volume, volume_rx) = watch::channel(DEFAULT_PLAYER_VOLUME_PERCENT);
         self.cancel = Some(cancel);
-        self.task = Some(tokio::spawn(run(
-            generation, path, broadcast, cancelled, events, frames, wake,
-        )));
+        self.volume = Some(volume);
+        self.task = Some(tokio::spawn(run(PlaybackRun {
+            generation,
+            path,
+            broadcast,
+            cancel: cancelled,
+            events,
+            frames,
+            wake,
+            volume: volume_rx,
+        })));
+    }
+
+    pub(crate) fn set_volume(&self, generation: u64, percent: u8) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        let Some(volume) = &self.volume else {
+            return false;
+        };
+        volume.send_replace(percent.min(100));
+        true
     }
 
     pub(crate) async fn stop(&mut self) {
+        self.volume = None;
         if let Some(cancel) = self.cancel.take() {
             cancel.send_replace(true);
         }
@@ -405,21 +441,11 @@ async fn wait_for_deadline(deadline: Option<Instant>) {
     }
 }
 
-async fn run(
-    generation: u64,
-    path: String,
-    broadcast: moq_tokio::moq_net::broadcast::Consumer,
-    cancel: watch::Receiver<bool>,
-    events: mpsc::Sender<Event>,
-    frames: watch::Sender<Option<Arc<Frame>>>,
-    wake: Arc<dyn Fn() + Send + Sync>,
-) {
-    let stopped = cancel.clone();
-    let result = run_inner(
-        generation, &path, broadcast, cancel, &events, &frames, &wake,
-    )
-    .await
-    .map_err(|error| error.to_string());
+async fn run(playback: PlaybackRun) {
+    let stopped = playback.cancel.clone();
+    let generation = playback.generation;
+    let events = playback.events.clone();
+    let result = run_inner(playback).await.map_err(|error| error.to_string());
     let event = Event::Ended { generation, result };
     if *stopped.borrow() {
         let _ = events.try_send(event);
@@ -428,15 +454,17 @@ async fn run(
     }
 }
 
-async fn run_inner(
-    generation: u64,
-    path: &str,
-    broadcast: moq_tokio::moq_net::broadcast::Consumer,
-    mut cancel: watch::Receiver<bool>,
-    events: &mpsc::Sender<Event>,
-    frames: &watch::Sender<Option<Arc<Frame>>>,
-    wake: &Arc<dyn Fn() + Send + Sync>,
-) -> anyhow::Result<()> {
+async fn run_inner(playback: PlaybackRun) -> anyhow::Result<()> {
+    let PlaybackRun {
+        generation,
+        path,
+        broadcast,
+        mut cancel,
+        events,
+        frames,
+        wake,
+        volume,
+    } = playback;
     let mut catalog = tokio::select! {
         biased;
         _ = wait_for_cancel(&mut cancel) => return Ok(()),
@@ -496,15 +524,16 @@ async fn run_inner(
     let (audio_tx, mut audio_rx) = mpsc::channel(8);
     let audio_engine = Arc::new(tokio::sync::OnceCell::new());
     let mut audio_generation = 1_u64;
-    let mut audio_task = audio::Task::spawn(
-        audio_generation,
-        path,
-        &broadcast,
-        &selection.audio,
-        &audio_tx,
-        &audio_engine,
-        &media_clock,
-    );
+    let mut audio_task = audio::Task::spawn(audio::TaskConfig {
+        generation: audio_generation,
+        path: &path,
+        broadcast: &broadcast,
+        selection: &selection.audio,
+        updates: &audio_tx,
+        engine: &audio_engine,
+        clock: &media_clock,
+        volume: volume.clone(),
+    });
 
     let result = async {
         loop {
@@ -604,15 +633,16 @@ async fn run_inner(
                         video_scheduler.reset_fallback();
                         audio_task.stop(reason).await;
                         audio_generation = audio_generation.wrapping_add(1);
-                        audio_task = audio::Task::spawn(
-                            audio_generation,
-                            path,
-                            &broadcast,
-                            &next.audio,
-                            &audio_tx,
-                            &audio_engine,
-                            &media_clock,
-                        );
+                        audio_task = audio::Task::spawn(audio::TaskConfig {
+                            generation: audio_generation,
+                            path: &path,
+                            broadcast: &broadcast,
+                            selection: &next.audio,
+                            updates: &audio_tx,
+                            engine: &audio_engine,
+                            clock: &media_clock,
+                            volume: volume.clone(),
+                        });
                     }
                     if changes.video {
                         if let Some(mut task) = video_task.take() {
@@ -907,6 +937,22 @@ mod tests {
         assert_eq!(replacement.sequence, 1);
         assert!(first_view_frame);
         assert!(!replacement_first_view_frame);
+    }
+
+    #[test]
+    fn stale_view_generation_cannot_change_current_playback_volume() {
+        let (volume, mut current) = watch::channel(DEFAULT_PLAYER_VOLUME_PERCENT);
+        let owner = Owner {
+            task: None,
+            cancel: None,
+            volume: Some(volume),
+            generation: 7,
+        };
+
+        assert!(!owner.set_volume(6, 25));
+        assert_eq!(*current.borrow_and_update(), DEFAULT_PLAYER_VOLUME_PERCENT);
+        assert!(owner.set_volume(7, 25));
+        assert_eq!(*current.borrow_and_update(), 25);
     }
 
     #[test]

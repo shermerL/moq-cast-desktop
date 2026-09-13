@@ -15,6 +15,8 @@ pub enum UserCommand {
     StopScreenShare,
     /// Begin viewing one announced remote screen.
     StartWatching { path: String },
+    /// Set the volume of the matching active remote playback session.
+    SetPlaybackVolume { generation: u64, percent: u8 },
     /// Stop the current remote screen playback while keeping the mesh connected.
     StopWatching,
     /// Stop every runtime-owned task and exit.

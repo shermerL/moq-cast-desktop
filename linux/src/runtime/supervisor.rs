@@ -5,10 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use moq_tokio::moq_net;
+use moqcast_ui::DEFAULT_PLAYER_VOLUME_PERCENT;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-#[cfg(target_os = "linux")]
 use crate::app::MediaState;
 use crate::app::{
     AppSnapshot, DialRole, DiscoveredPeer, RemoteAudioSnapshot, TransportState, UserCommand,
@@ -349,6 +349,7 @@ impl PublishCompletion {
 struct ViewResources {
     task: Option<JoinHandle<()>>,
     cancel: Option<watch::Sender<bool>>,
+    volume: Option<watch::Sender<u8>>,
     generation: u64,
 }
 
@@ -358,8 +359,20 @@ impl ViewResources {
         self.generation
     }
 
+    fn set_volume(&self, generation: u64, percent: u8) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        let Some(volume) = &self.volume else {
+            return false;
+        };
+        volume.send_replace(percent.min(100));
+        true
+    }
+
     async fn stop(&mut self) {
         self.advance();
+        self.volume = None;
         if let Some(cancel) = self.cancel.take() {
             cancel.send_replace(true);
         }
@@ -501,6 +514,25 @@ impl Supervisor {
             UserCommand::StartScreenShare { system_audio } => self.start_publish(system_audio),
             UserCommand::StopScreenShare => self.stop_publish().await,
             UserCommand::StartWatching { path } => self.start_view(path),
+            UserCommand::SetPlaybackVolume {
+                generation,
+                percent,
+            } => {
+                if self.view.set_volume(generation, percent) {
+                    tracing::debug!(
+                        view_generation = generation,
+                        volume_percent = percent.min(100),
+                        "remote playback volume changed"
+                    );
+                } else {
+                    tracing::debug!(
+                        view_generation = generation,
+                        volume_percent = percent.min(100),
+                        "ignored stale remote playback volume change"
+                    );
+                }
+                LoopAction::Unchanged
+            }
             UserCommand::StopWatching => self.stop_view().await,
             UserCommand::Shutdown => LoopAction::Shutdown,
         }
@@ -677,12 +709,15 @@ impl Supervisor {
         };
 
         let generation = self.view.advance();
+        self.state.view_generation = generation;
         let events = self.operation_tx.clone();
         let frames = self.playback_tx.clone();
         let (cancel, cancelled) = watch::channel(false);
+        let (volume, volume_rx) = watch::channel(DEFAULT_PLAYER_VOLUME_PERCENT);
         self.view.cancel = Some(cancel);
+        self.view.volume = Some(volume);
         self.view.task = Some(tokio::spawn(run_view(
-            generation, path, broadcast, cancelled, events, frames,
+            generation, path, broadcast, cancelled, events, frames, volume_rx,
         )));
         LoopAction::Changed
     }
@@ -1243,6 +1278,7 @@ async fn run_view(
     mut cancelled: watch::Receiver<bool>,
     events: mpsc::Sender<OperationEvent>,
     frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
+    volume: watch::Receiver<u8>,
 ) {
     let (playback_tx, mut playback_rx) = mpsc::channel(8);
     let playback = super::playback::run(
@@ -1252,6 +1288,7 @@ async fn run_view(
         cancelled.clone(),
         playback_tx,
         frames,
+        volume,
     );
     tokio::pin!(playback);
     let mut cancelling = *cancelled.borrow_and_update();
@@ -1336,6 +1373,7 @@ async fn run_view(
     _cancelled: watch::Receiver<bool>,
     events: mpsc::Sender<OperationEvent>,
     _frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
+    _volume: watch::Receiver<u8>,
 ) {
     let _ = events
         .send(OperationEvent::ViewEnded {
@@ -1491,6 +1529,7 @@ mod tests {
         let mut resources = ViewResources {
             task: Some(task),
             cancel: Some(cancel),
+            volume: None,
             generation: 4,
         };
 
@@ -1500,6 +1539,24 @@ mod tests {
         assert!(resources.task.is_none());
         assert!(resources.cancel.is_none());
         assert!(stopped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn stale_volume_generation_cannot_update_a_new_view() {
+        let (volume, mut current) = watch::channel(super::DEFAULT_PLAYER_VOLUME_PERCENT);
+        let resources = ViewResources {
+            volume: Some(volume),
+            generation: 8,
+            ..ViewResources::default()
+        };
+
+        assert!(!resources.set_volume(7, 25));
+        assert_eq!(
+            *current.borrow_and_update(),
+            super::DEFAULT_PLAYER_VOLUME_PERCENT
+        );
+        assert!(resources.set_volume(8, 25));
+        assert_eq!(*current.borrow_and_update(), 25);
     }
 
     #[tokio::test]

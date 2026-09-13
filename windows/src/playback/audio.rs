@@ -2,7 +2,10 @@
 
 use std::time::{Duration, Instant};
 
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinHandle,
+};
 
 use super::sync::{self, AudioAnchor, AudioClockReader, AudioClockWriter};
 use super::{
@@ -56,6 +59,32 @@ struct Playback {
     sink: moq_audio::playback::Sink,
 }
 
+struct VolumeListener {
+    task: JoinHandle<()>,
+}
+
+impl VolumeListener {
+    fn spawn(control: moq_audio::playback::Control, mut volume: watch::Receiver<u8>) -> Self {
+        control.set_volume(volume_scalar(*volume.borrow_and_update()));
+        let task = tokio::spawn(async move {
+            while volume.changed().await.is_ok() {
+                control.set_volume(volume_scalar(*volume.borrow_and_update()));
+            }
+        });
+        Self { task }
+    }
+}
+
+impl Drop for VolumeListener {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+fn volume_scalar(percent: u8) -> f32 {
+    f32::from(percent.min(100)) / 100.0
+}
+
 impl Playback {
     async fn open(
         broadcast: &moq_tokio::moq_net::broadcast::Consumer,
@@ -98,12 +127,13 @@ impl Task {
         broadcast: &moq_tokio::moq_net::broadcast::Consumer,
         selection: &Selection,
         events: Events,
+        volume: watch::Receiver<u8>,
     ) -> Self {
         let broadcast = broadcast.clone();
         let selection = selection.clone();
         let (writer, clock) = sync::audio_clock();
         let task = tokio::spawn(async move {
-            run(broadcast, selection, events, writer).await;
+            run(broadcast, selection, events, writer, volume).await;
         });
         Self { task, clock }
     }
@@ -120,6 +150,7 @@ async fn run(
     selection: Selection,
     events: Events,
     clock: AudioClockWriter,
+    volume: watch::Receiver<u8>,
 ) {
     let started_at = Instant::now();
     events
@@ -208,6 +239,7 @@ async fn run(
             return;
         }
     };
+    let _volume_listener = VolumeListener::spawn(playback.sink.control(), volume);
     tracing::info!(
         broadcast = ?events.path,
         view_generation = events.generation,
@@ -448,6 +480,14 @@ impl Events {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_volume_percent_maps_to_the_sink_gain_range() {
+        assert_eq!(volume_scalar(0), 0.0);
+        assert_eq!(volume_scalar(40), 0.4);
+        assert_eq!(volume_scalar(100), 1.0);
+        assert_eq!(volume_scalar(u8::MAX), 1.0);
+    }
 
     #[test]
     fn remote_audio_decode_config_uses_f32_and_80ms_live_edge_budget() {
