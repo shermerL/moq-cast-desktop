@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 LINUX_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 REPO_DIR=$(CDPATH= cd -- "$LINUX_DIR/.." && pwd)
+source "$SCRIPT_DIR/build-info.sh"
 OUTPUT_ROOT=${MOQCAST_PACKAGE_DIR:-"$LINUX_DIR/target/package"}
 LINUXDEPLOY=${LINUXDEPLOY:-linuxdeploy}
 PACKAGE_VARIANT=${MOQCAST_PACKAGE_VARIANT:-linux-x86_64}
@@ -48,27 +49,45 @@ fi
 SOURCE_COMMIT=${SOURCE_COMMIT:0:12}
 MOQ_REVISION=$(sed -n 's/.*moq-tokio.*rev = "\([^"]*\)".*/\1/p' "$LINUX_DIR/Cargo.toml")
 MOQ_VIDEO_REVISION=$(sed -n 's/^source_revision = `\([^`]*\)`/\1/p' "$LINUX_DIR/vendor/moq-video/VENDORED.md")
+if [[ ! $MOQ_REVISION =~ ^[0-9a-fA-F]{7,64}$ ]]; then
+    echo "Invalid MoQ revision: $MOQ_REVISION" >&2
+    exit 1
+fi
+if [[ ! $MOQ_VIDEO_REVISION =~ ^[0-9a-fA-F]{7,64}$ ]]; then
+    echo "Invalid vendored moq-video revision: $MOQ_VIDEO_REVISION" >&2
+    exit 1
+fi
+for revision in $(sed -n 's/.*git = "https:\/\/github.com\/moq-dev\/moq.git".*rev = "\([^"]*\)".*/\1/p' "$LINUX_DIR/Cargo.toml"); do
+    if [[ $revision != "$MOQ_REVISION" ]]; then
+        echo "MoQ dependencies do not share one revision: $revision != $MOQ_REVISION" >&2
+        exit 1
+    fi
+done
+DEPENDENCY_IDENTITY="moq-dev/moq@$MOQ_REVISION;vendored/moq-video@$MOQ_VIDEO_REVISION"
 BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 BUILD_DISTRO_ID=$(sed -n 's/^ID="\{0,1\}\([^" ]*\)"\{0,1\}$/\1/p' /etc/os-release | head -n 1)
 BUILD_DISTRO_VERSION=$(sed -n 's/^VERSION_ID="\{0,1\}\([^" ]*\)"\{0,1\}$/\1/p' /etc/os-release | head -n 1)
 GLIBC_VERSION=$(ldd --version | sed -n '1s/.* \([0-9][0-9.]*\)$/\1/p')
 PIPEWIRE_VERSION=$(pkg-config --modversion libpipewire-0.3)
 ALSA_VERSION=$(pkg-config --modversion alsa)
+mkdir -p "$OUTPUT_ROOT"
+OUTPUT_ROOT=$(CDPATH= cd -- "$OUTPUT_ROOT" && pwd)
 PACKAGE_ID="MoQCast-${VERSION}-${PACKAGE_VARIANT}"
 APPDIR="$OUTPUT_ROOT/${PACKAGE_ID}.AppDir"
 APPIMAGE="$OUTPUT_ROOT/${PACKAGE_ID}.AppImage"
+BUILD_INFO_FILE="$APPDIR/usr/share/doc/moqcast/build-info.txt"
 
-mkdir -p "$OUTPUT_ROOT"
 if [[ -e "$APPDIR" || -e "$APPIMAGE" ]]; then
     echo "Package output already exists: $PACKAGE_ID" >&2
     echo "Choose an empty MOQCAST_PACKAGE_DIR instead of deleting existing artifacts." >&2
     exit 1
 fi
 mkdir "$APPDIR"
+mkdir -p "$(dirname -- "$BUILD_INFO_FILE")"
+write_build_info "$BUILD_INFO_FILE"
 
 cd "$LINUX_DIR"
-MOQCAST_SOURCE_COMMIT="$SOURCE_COMMIT" \
-MOQCAST_BUILD_IDENTITY="$PACKAGE_VARIANT" \
+MOQCAST_PROVENANCE_FILE="$BUILD_INFO_FILE" \
 cargo build --locked --release
 
 install -Dm755 target/release/moq-cast-desktop "$APPDIR/usr/bin/moq-cast-desktop"
@@ -89,26 +108,6 @@ install -Dm644 vendor/moq-video/LICENSE-MIT \
     "$APPDIR/usr/share/licenses/moqcast/moq-video-LICENSE-MIT.txt"
 install -Dm644 vendor/libspa/LICENSE \
     "$APPDIR/usr/share/licenses/moqcast/libspa-LICENSE.txt"
-
-mkdir -p "$APPDIR/usr/share/doc/moqcast"
-{
-    echo "source_commit=$SOURCE_COMMIT"
-    echo "moq_revision=$MOQ_REVISION"
-    echo "moq_video_source=vendored"
-    echo "moq_video_revision=$MOQ_VIDEO_REVISION"
-    echo "libspa_source=vendored-0.10.0"
-    echo "cargo_features=moq-tokio:aws-lc-rs,mdns,quinn;moq-audio:playback;moq-video:capture,nvidia,pipewire"
-    echo "system_audio=pipewire"
-    echo "remote_audio_output=cpal-alsa"
-    echo "build_date=$BUILD_DATE"
-    echo "target=x86_64-unknown-linux-gnu"
-    echo "package_variant=$PACKAGE_VARIANT"
-    echo "build_distribution=$BUILD_DISTRO_ID-$BUILD_DISTRO_VERSION"
-    echo "glibc_version=$GLIBC_VERSION"
-    echo "pipewire_build_version=$PIPEWIRE_VERSION"
-    echo "alsa_build_version=$ALSA_VERSION"
-    echo "intended_targets=$INTENDED_TARGETS"
-} >"$APPDIR/usr/share/doc/moqcast/build-info.txt"
 
 ldd "$APPDIR/usr/bin/moq-cast-desktop" >"$APPDIR/usr/share/doc/moqcast/linked-libraries.txt"
 ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 LDAI_OUTPUT="$APPIMAGE" "$LINUXDEPLOY" \

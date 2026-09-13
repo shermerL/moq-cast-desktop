@@ -15,8 +15,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     let build = BuildInfo::new(env!("CARGO_PKG_VERSION"))
-        .with_build_identity(option_env!("MOQCAST_BUILD_IDENTITY").unwrap_or("local"))
-        .with_source_identity(option_env!("MOQCAST_SOURCE_COMMIT").unwrap_or("unknown"));
+        .with_build_identity(env!("MOQCAST_EMBEDDED_BUILD_IDENTITY"))
+        .with_source_identity(env!("MOQCAST_EMBEDDED_SOURCE_IDENTITY"))
+        .with_dependency_identity(env!("MOQCAST_EMBEDDED_DEPENDENCY_IDENTITY"));
     let diagnostics_config = match Paths::discover() {
         Ok(paths) => Config::new(paths, build),
         Err(error) => {

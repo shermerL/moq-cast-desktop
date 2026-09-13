@@ -244,63 +244,78 @@ impl std::fmt::Debug for Options {
 pub async fn publish_capture<E: CatalogExt>(
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer<E>,
-	capture: capture::Config,
+	mut capture: capture::Config,
 	encode: Options,
 	clock: moq_mux::Clock,
 ) -> Result<(), Error> {
-	// A caller asking for exactly zero is an error; omitting it (None) is
-	// fine and resolves to the camera's reported rate once it's open.
-	if capture.framerate == Some(0) {
-		return Err(Error::InvalidFramerate(0));
-	}
-	if let Some(max_size) = encode.max_size {
-		max_size.validate("maximum output size")?;
-	}
-
-	// Open the camera once to find out what it actually negotiated, since a requested size is only a
-	// hint (macOS ignores it outright) and the encoder is built from the mode, not the request. It
-	// closes again immediately: this costs one camera open at startup and buys a rendition that says
-	// exactly what the stream will carry, rather than one every consumer has to treat as provisional.
-	let rendition = {
-		let camera = capture::open(&capture).await?;
-		let capture_size = Size::new(camera.width(), camera.height());
-		let output_size = encode
-			.max_size
-			.map_or(capture_size, |maximum| fit_size(capture_size, maximum));
-		let mut probe_config = encoder::Config::new(
-			output_size.width,
-			output_size.height,
-			capture
-				.framerate
-				.or_else(|| camera.framerate())
-				.unwrap_or(DEFAULT_FRAMERATE),
-		);
-		probe_config.bitrate = encode.bitrate;
-		probe_config.codec = encode.codec;
-		probe_config.kind = encode.kind.clone();
-		probe_config.color = camera.color();
-		probe_config.probe().await?
-	};
-
-	let mut producer = Producer::new(broadcast, catalog, rendition)?;
-	let demand = producer.demand();
-
-	let result = capture_loop(&mut producer, &demand, &capture, &encode, &clock).await;
-
-	// This runs only when the loop ends on its own (the track is usually already
-	// going away by then); a Ctrl+C cancels the future before this point, since
-	// async `Drop` can't finalize the track.
-	match &result {
-		// Clean end (the track was dropped): best-effort finish.
-		Ok(()) => {
-			if let Err(err) = producer.finish() {
-				tracing::debug!(error = %err, "video track finish after capture ended");
-			}
+	let cleanup = capture.cleanup.get_or_insert_with(Default::default).clone();
+	let result = async {
+		// A caller asking for exactly zero is an error; omitting it (None) is
+		// fine and resolves to the camera's reported rate once it's open.
+		if capture.framerate == Some(0) {
+			return Err(Error::InvalidFramerate(0));
 		}
-		// The capture loop failed: abort with the real cause so subscribers see it.
-		Err(err) => producer.abort(moq_net::Error::Transport(err.to_string())),
+		if let Some(max_size) = encode.max_size {
+			max_size.validate("maximum output size")?;
+		}
+
+		// Open the camera once to find out what it actually negotiated, since a requested size is only a
+		// hint (macOS ignores it outright) and the encoder is built from the mode, not the request. It
+		// closes again immediately: this costs one camera open at startup and buys a rendition that says
+		// exactly what the stream will carry, rather than one every consumer has to treat as provisional.
+		let rendition = {
+			let camera = capture::open(&capture).await?;
+			let capture_size = Size::new(camera.width(), camera.height());
+			let output_size = encode
+				.max_size
+				.map_or(capture_size, |maximum| fit_size(capture_size, maximum));
+			let mut probe_config = encoder::Config::new(
+				output_size.width,
+				output_size.height,
+				capture
+					.framerate
+					.or_else(|| camera.framerate())
+					.unwrap_or(DEFAULT_FRAMERATE),
+			);
+			probe_config.bitrate = encode.bitrate;
+			probe_config.codec = encode.codec;
+			probe_config.kind = encode.kind.clone();
+			probe_config.color = camera.color();
+			probe_config.probe().await?
+		};
+		cleanup
+			.wait()
+			.await
+			.map_err(|error| Error::Codec(anyhow::anyhow!(error)))?;
+
+		let mut producer = Producer::new(broadcast, catalog, rendition)?;
+		let demand = producer.demand();
+
+		let result = capture_loop(&mut producer, &demand, &capture, &encode, &clock).await;
+
+		// This runs only when the loop ends on its own (the track is usually already
+		// going away by then); a Ctrl+C cancels the future before this point, since
+		// async `Drop` can't finalize the track.
+		match &result {
+			// Clean end (the track was dropped): best-effort finish.
+			Ok(()) => {
+				if let Err(err) = producer.finish() {
+					tracing::debug!(error = %err, "video track finish after capture ended");
+				}
+			}
+			// The capture loop failed: abort with the real cause so subscribers see it.
+			Err(err) => producer.abort(moq_net::Error::Transport(err.to_string())),
+		}
+		result
 	}
-	result
+	.await;
+	let closed = cleanup.wait().await;
+	match (result, closed) {
+		(Err(error), Err(close)) => Err(Error::Codec(anyhow::anyhow!("{error}; cleanup: {close}"))),
+		(Err(error), Ok(())) => Err(error),
+		(Ok(()), Err(close)) => Err(Error::Codec(anyhow::anyhow!(close))),
+		(Ok(()), Ok(())) => Ok(()),
+	}
 }
 
 /// Off macOS, [`publish_capture`]'s future must stay `Send` so a server can
@@ -483,7 +498,7 @@ async fn capture_loop<E: CatalogExt>(
 			.clone()
 			.map(|bandwidth| (bandwidth, Control::new(Policy::new(encoder_config.resolved_bitrate()))));
 
-		loop {
+		let end = loop {
 			// Race the next frame against the last viewer leaving so we release the
 			// camera promptly when demand drops. `biased` checks demand first so an
 			// unwatched track stops before reading another frame.
@@ -494,7 +509,7 @@ async fn capture_loop<E: CatalogExt>(
 						log_track_ended(err);
 						return Ok(());
 					}
-					break; // no viewers: release the camera, then wait for one
+					break capture::cleanup::CaptureEnd::Unused;
 				}
 				// Retune between frames rather than mid-encode, and only when
 				// the policy says the target actually moved.
@@ -505,7 +520,9 @@ async fn capture_loop<E: CatalogExt>(
 				frame = camera.read() => frame,
 			};
 
-			let Some(surface) = frame else { break }; // device stopped producing frames
+			let Some(surface) = frame else {
+				break capture::cleanup::CaptureEnd::SourceClosed;
+			};
 
 			// Stamp at capture, so a backend that buffers still publishes each
 			// access unit at the time the picture was grabbed.
@@ -520,10 +537,18 @@ async fn capture_loop<E: CatalogExt>(
 				force_keyframe = false;
 			}
 			producer.publish(&encoder.encode(frame).await?)?;
-		}
+		};
 
 		// Drop the camera (LED off) and encoder before waiting for the next viewer.
 		drop(camera);
+		drop(encoder);
+		if let Some(cleanup) = &capture.cleanup {
+			cleanup
+				.wait()
+				.await
+				.map_err(|error| Error::Codec(anyhow::anyhow!(error)))?;
+		}
+		end.resume().map_err(|error| Error::Codec(anyhow::anyhow!(error)))?;
 		tracing::info!("no viewers: released camera");
 	}
 }

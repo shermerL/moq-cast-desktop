@@ -315,9 +315,34 @@ impl MeshResources {
 }
 
 #[derive(Default)]
-struct TaskResources {
-    task: Option<JoinHandle<()>>,
+struct PublishResources {
+    task: Option<JoinHandle<Result<(), String>>>,
+    cancel: Option<watch::Sender<bool>>,
     generation: u64,
+}
+
+struct PublishCompletion {
+    generation: u64,
+    events: mpsc::Sender<OperationEvent>,
+    cancelled: watch::Receiver<bool>,
+}
+
+impl PublishCompletion {
+    async fn report(mut self, result: Result<(), String>) -> Result<(), String> {
+        // Stop joins this task while the operation queue is not being drained.
+        let stopping = *self.cancelled.borrow();
+        if !stopping {
+            tokio::select! {
+                biased;
+                _ = self.cancelled.changed() => {},
+                _ = self.events.send(OperationEvent::PublishEnded {
+                    generation: self.generation,
+                    result: result.clone(),
+                }) => {},
+            }
+        }
+        result
+    }
 }
 
 #[derive(Default)]
@@ -344,18 +369,23 @@ impl ViewResources {
     }
 }
 
-impl TaskResources {
+impl PublishResources {
     fn advance(&mut self) -> u64 {
         self.generation = self.generation.wrapping_add(1);
         self.generation
     }
 
-    async fn stop(&mut self) {
+    async fn stop(&mut self) -> Result<(), String> {
         self.advance();
-        if let Some(task) = self.task.take() {
-            task.abort();
-            let _ = task.await;
+        if let Some(cancel) = self.cancel.take() {
+            cancel.send_replace(true);
         }
+        if let Some(task) = self.task.take() {
+            return task
+                .await
+                .map_err(|error| format!("publication shutdown task failed: {error}"))?;
+        }
+        Ok(())
     }
 }
 
@@ -368,7 +398,7 @@ struct Supervisor {
     discovery: DiscoveryResources,
     mesh: MeshResources,
     remote_screens: HashMap<String, moq_net::broadcast::Consumer>,
-    publish: TaskResources,
+    publish: PublishResources,
     view: ViewResources,
     announcements: JoinHandle<()>,
     playback_tx: watch::Sender<Option<Arc<PlaybackFrame>>>,
@@ -398,7 +428,7 @@ impl Supervisor {
             discovery: DiscoveryResources::default(),
             mesh: MeshResources::default(),
             remote_screens: HashMap::new(),
-            publish: TaskResources::default(),
+            publish: PublishResources::default(),
             view: ViewResources::default(),
             announcements,
             playback_tx,
@@ -438,7 +468,13 @@ impl Supervisor {
         }
 
         self.view.stop().await;
-        self.publish.stop().await;
+        if let Err(error) = self.publish.stop().await {
+            tracing::warn!(
+                stage = "publish",
+                error,
+                "screen sharing ended with an error"
+            );
+        }
         self.mesh.close_all();
         self.discovery.stop();
         self.announcements.abort();
@@ -584,11 +620,20 @@ impl Supervisor {
 
         let generation = self.publish.advance();
         let events = self.operation_tx.clone();
+        let (cancel, cancelled) = watch::channel(false);
+        self.publish.cancel = Some(cancel);
         self.publish.task = Some(tokio::spawn(async move {
-            let result = publication.run().await.map_err(|error| error.to_string());
-            let _ = events
-                .send(OperationEvent::PublishEnded { generation, result })
-                .await;
+            let result = publication
+                .run(cancelled.clone())
+                .await
+                .map_err(|error| error.to_string());
+            PublishCompletion {
+                generation,
+                events,
+                cancelled,
+            }
+            .report(result)
+            .await
         }));
         self.state
             .finish_publish()
@@ -597,14 +642,25 @@ impl Supervisor {
     }
 
     async fn stop_publish(&mut self) -> LoopAction {
+        if self.publish.task.is_none() && self.state.media == MediaState::Idle {
+            return LoopAction::Unchanged;
+        }
         if let Err(error) = self.state.begin_stop_publish() {
             self.state.last_error = Some(error.to_string());
             return LoopAction::Changed;
         }
-        self.publish.stop().await;
+        let result = self.publish.stop().await;
         self.state
             .finish_stop_publish()
             .expect("publication was stopping");
+        if let Err(error) = result {
+            tracing::warn!(
+                stage = "publish",
+                error,
+                "screen sharing ended with an error"
+            );
+            self.state.last_error = Some(format!("Screen sharing stopped with an error: {error}"));
+        }
         LoopAction::Changed
     }
 
@@ -827,6 +883,7 @@ impl Supervisor {
                     return LoopAction::Unchanged;
                 }
                 self.publish.task = None;
+                self.publish.cancel = None;
                 match result {
                     Ok(()) => {
                         self.state.end_publish().expect("current publication ended");
@@ -1304,7 +1361,8 @@ mod tests {
 
     use super::{
         DISCOVERY_RETRY_LIMIT, DiscoveryRetryBudget, OperationEvent, PEER_RETRY_LIMIT,
-        PeerRetryBudget, SessionKey, Supervisor, ViewResources, reset_outbound_for,
+        PeerRetryBudget, PublishCompletion, PublishResources, SessionKey, Supervisor,
+        ViewResources, reset_outbound_for,
     };
 
     fn supervisor() -> Supervisor {
@@ -1328,6 +1386,86 @@ mod tests {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 4443),
             "proof",
         )
+    }
+
+    #[tokio::test]
+    async fn stopping_publish_waits_for_cleanup_and_returns_its_failure() {
+        let (cancel, mut cancelled) = watch::channel(false);
+        let (ack, acknowledged) = tokio::sync::oneshot::channel();
+        let (started, stopping) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            cancelled.changed().await.unwrap();
+            started.send(()).unwrap();
+            acknowledged.await.unwrap();
+            Err("portal close failed".to_owned())
+        });
+        let mut resources = PublishResources {
+            task: Some(task),
+            cancel: Some(cancel),
+            generation: 4,
+        };
+        let stop = tokio::spawn(async move {
+            let result = resources.stop().await;
+            (resources, result)
+        });
+        stopping.await.unwrap();
+        assert!(!stop.is_finished());
+        ack.send(()).unwrap();
+        let (mut resources, result) = stop.await.unwrap();
+        assert_eq!(result.unwrap_err(), "portal close failed");
+        assert_eq!(resources.generation, 5);
+        assert!(resources.task.is_none());
+        assert!(resources.cancel.is_none());
+        resources.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn publish_completion_cannot_block_stop_on_a_full_event_queue() {
+        let (events, _receiver) = tokio::sync::mpsc::channel(1);
+        events
+            .send(OperationEvent::PublishEnded {
+                generation: 1,
+                result: Ok(()),
+            })
+            .await
+            .unwrap();
+        let (cancel, cancelled) = watch::channel(false);
+        let task = tokio::spawn(
+            PublishCompletion {
+                generation: 2,
+                events,
+                cancelled,
+            }
+            .report(Err("close failed".to_owned())),
+        );
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        cancel.send_replace(true);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.unwrap_err(), "close failed");
+    }
+
+    #[tokio::test]
+    async fn failed_publish_stop_is_visible_and_old_completion_is_ignored() {
+        let mut supervisor = supervisor();
+        supervisor.state.media = MediaState::Publishing;
+        supervisor.publish.generation = 7;
+        supervisor.publish.task = Some(tokio::spawn(async { Err("close failed".to_owned()) }));
+        supervisor.stop_publish().await;
+        assert_eq!(supervisor.state.media, MediaState::Idle);
+        let error = supervisor.state.last_error.clone().unwrap();
+        assert!(error.contains("Screen sharing stopped with an error"));
+        supervisor
+            .handle_operation_event(OperationEvent::PublishEnded {
+                generation: 7,
+                result: Ok(()),
+            })
+            .await;
+        supervisor.stop_publish().await;
+        assert_eq!(supervisor.state.last_error.as_deref(), Some(error.as_str()));
     }
 
     #[tokio::test]

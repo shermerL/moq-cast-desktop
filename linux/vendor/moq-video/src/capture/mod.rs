@@ -18,6 +18,8 @@ use crate::frame::Surface;
 mod channel;
 use channel::FrameChannel;
 
+pub mod cleanup;
+
 /// Type-erased keep-alive for a capture backend, dropped to release the device.
 ///
 /// `Send` off macOS (the backend is a pump-thread guard: an `Arc` stop flag plus
@@ -212,6 +214,8 @@ pub struct Config {
 	/// Draw the mouse cursor into captured frames. Screen/window/app sources
 	/// only; ignored by cameras. Defaults to `true`.
 	pub cursor: bool,
+	/// Parent-owned completion scope for asynchronous portal cleanup.
+	pub cleanup: Option<cleanup::Handle>,
 }
 
 impl Default for Config {
@@ -222,6 +226,7 @@ impl Default for Config {
 			height: None,
 			framerate: None,
 			cursor: true,
+			cleanup: None,
 		}
 	}
 }

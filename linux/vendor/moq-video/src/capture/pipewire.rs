@@ -36,6 +36,7 @@ use spa::buffer::DataType;
 use spa::param::video::{VideoFormat, VideoInfoRaw};
 
 use super::channel::FrameChannel;
+use super::cleanup;
 use super::pump::Geometry;
 use super::{Config, FrameStream};
 use crate::frame::{DmaBuf, DmaBufFrame, DmaBufPlane, DrmFormat, I420, Surface, wait_dma_buf_readable};
@@ -52,6 +53,8 @@ const FORMAT_TIMEOUT: Duration = Duration::from_secs(10);
 /// rather than hand the encoder a stream that will never produce (same
 /// first-frame wait as the macOS ScreenCaptureKit backend).
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+/// A missing D-Bus acknowledgement is an explicit cleanup failure, not success.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The portal restore token from the last grant, replayed on the next [`open`]
 /// so a demand-driven reopen skips the picker dialog. Process-wide because the
@@ -68,7 +71,8 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 		tracing::debug!(%device, "portal screen capture ignores the device selector; the picker owns selection");
 	}
 
-	let (node_id, fd, session) = portal_negotiate(config.cursor).await?;
+	let cleanup = config.cleanup.clone().unwrap_or_default();
+	let (node_id, fd, session) = portal_negotiate(config.cursor, &cleanup).await?;
 
 	let chan = FrameChannel::new();
 	let framerate = config.framerate.unwrap_or(DEFAULT_FRAMERATE).max(1);
@@ -78,8 +82,10 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 
 	let handle = std::thread::spawn({
 		let chan = chan.clone();
+		let cleanup = cleanup.clone();
 		move || {
 			let state = Rc::new(RefCell::new(State {
+				cleanup,
 				format: VideoInfoRaw::default(),
 				geometry: None,
 				color: None,
@@ -100,7 +106,12 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 				return_tx,
 			}) {
 				// Surface a setup failure through the awaiting `open`; a mid-stream
-				// failure just ends the stream (the encode loop reopens on demand).
+				// failure ends this publication rather than opening another picker.
+				*RESTORE_TOKEN.lock().unwrap() = None;
+				state
+					.borrow()
+					.cleanup
+					.fail(format!("screen capture stream failed: {e}"));
 				match state.borrow_mut().geo_tx.take() {
 					Some(tx) => drop(tx.send(Err(e))),
 					None => tracing::warn!(error = %e, "screen capture stream failed"),
@@ -119,6 +130,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 		quit: quit_tx,
 		handle: Some(handle),
 		_session: session,
+		cleanup,
 	};
 
 	let geo = match tokio::time::timeout(FORMAT_TIMEOUT, geo_rx).await {
@@ -165,11 +177,38 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 /// Ask the ScreenCast portal for a monitor: create a session, (re)select the
 /// source, and start it, returning the PipeWire node to stream, the fd of the
 /// portal's PipeWire remote, and a guard that closes the session on drop.
-async fn portal_negotiate(cursor: bool) -> Result<(u32, OwnedFd, SessionGuard), Error> {
-	let proxy = Screencast::new().await.map_err(|e| err("screencast portal", e))?;
-	let session = proxy
-		.create_session(Default::default())
+async fn portal_negotiate(cursor: bool, cleanup: &cleanup::Handle) -> Result<(u32, OwnedFd, cleanup::Release), Error> {
+	let proxy = Arc::new(Screencast::new().await.map_err(|e| err("screencast portal", e))?);
+	let (release, released) = cleanup::Release::new();
+	let (created, result) = tokio::sync::oneshot::channel();
+	// The parent also owns an in-flight CreateSession when the caller cancels.
+	cleanup.run({
+		let proxy = proxy.clone();
+		async move {
+			let session = match proxy.create_session(Default::default()).await {
+				Ok(session) => Arc::new(session),
+				Err(error) => {
+					let _ = created.send(Err(error.to_string()));
+					return Ok(());
+				}
+			};
+			let _ = created.send(Ok(session.clone()));
+			let _ = released.await;
+			match tokio::time::timeout(CLOSE_TIMEOUT, session.close()).await {
+				Ok(Ok(())) => {
+					tracing::debug!("portal session close acknowledged");
+					Ok(())
+				}
+				Ok(Err(error)) => Err(format!("portal session close failed: {error}")),
+				Err(_) => Err(format!(
+					"portal session close not acknowledged within {CLOSE_TIMEOUT:?}"
+				)),
+			}
+		}
+	});
+	let session = result
 		.await
+		.map_err(|e| err("portal session task", e))?
 		.map_err(|e| err("portal session", e))?;
 
 	let restore = RESTORE_TOKEN.lock().unwrap().clone();
@@ -210,29 +249,7 @@ async fn portal_negotiate(cursor: bool) -> Result<(u32, OwnedFd, SessionGuard), 
 		.open_pipe_wire_remote(&session, Default::default())
 		.await
 		.map_err(|e| err("portal pipewire remote", e))?;
-	Ok((node_id, fd, SessionGuard::new(session)))
-}
-
-/// Closes the portal session when dropped, so the compositor's "screen is being
-/// shared" indicator turns off and sessions don't pile up across demand-driven
-/// reopens. The close call is async and `Drop` is not, so a task spawned here
-/// waits for the guard to drop. Closing does not invalidate the restore token.
-struct SessionGuard {
-	_close: tokio::sync::oneshot::Sender<()>,
-}
-
-impl SessionGuard {
-	fn new(session: ashpd::desktop::Session<Screencast>) -> Self {
-		let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-		tokio::spawn(async move {
-			// Resolves with `Err` once the guard (the sender) drops.
-			let _ = rx.await;
-			if let Err(e) = session.close().await {
-				tracing::debug!(error = %e, "failed to close portal session");
-			}
-		});
-		Self { _close: tx }
-	}
+	Ok((node_id, fd, release))
 }
 
 /// Stops the PipeWire loop and joins its thread on drop, then (via the
@@ -243,20 +260,25 @@ struct LoopGuard {
 	handle: Option<JoinHandle<()>>,
 	/// Held so the portal session outlives the loop; dropping it closes the
 	/// session only after the loop thread has been joined above.
-	_session: SessionGuard,
+	_session: cleanup::Release,
+	cleanup: cleanup::Handle,
 }
 
 impl Drop for LoopGuard {
 	fn drop(&mut self) {
 		let _ = self.quit.send(());
 		if let Some(handle) = self.handle.take() {
-			let _ = handle.join();
+			if handle.join().is_err() {
+				self.cleanup
+					.fail("PipeWire capture thread panicked during shutdown".to_owned());
+			}
 		}
 	}
 }
 
 /// Shared by the stream callbacks and the pacing timer, all on the loop thread.
 struct State {
+	cleanup: cleanup::Handle,
 	format: VideoInfoRaw,
 	/// The even-clamped size sent to `open`.
 	geometry: Option<(u32, u32)>,
@@ -735,6 +757,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 		.add_local_listener::<()>()
 		.state_changed({
 			let mainloop = mainloop.downgrade();
+			let state = state.clone();
 			move |_, _, _, new| {
 				// Error is fatal; Unconnected after setup means the user stopped
 				// sharing from the compositor. Either way the stream is over.
@@ -750,6 +773,11 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					// teardown quits the loop before anything disconnects, so it
 					// never reaches this path.
 					*RESTORE_TOKEN.lock().unwrap() = None;
+					// Keep source loss terminal even when demand-idle wins the select.
+					state
+						.borrow()
+						.cleanup
+						.fail(format!("screen capture source closed: {new:?}"));
 					tracing::debug!(state = ?new, "screen capture stream ended");
 					if let Some(mainloop) = mainloop.upgrade() {
 						mainloop.quit();
