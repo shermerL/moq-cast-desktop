@@ -6,8 +6,9 @@ use eframe::egui::{
     self, Align, Color32, Event, Layout, Rect, Sense, TextureHandle, ViewportCommand,
 };
 use moqcast_ui::{
-    ButtonSpec, COLORS, ControlRole, IconButtonSpec, Size, TypographyRole, control_button,
-    player_icon_button, player_rects, player_stage_at, player_toolbar_at, typography,
+    ButtonSpec, COLORS, ControlRole, IconButtonSpec, PLAYER_VOLUME_CONTROL_WIDTH,
+    PlayerVolumeState, Size, TypographyRole, control_button, player_icon_button, player_rects,
+    player_stage_at, player_toolbar_at, player_volume_control, typography,
 };
 
 use super::{Locale, RemoteAudioPhase, RemoteAudioSnapshot};
@@ -49,26 +50,22 @@ struct ControlLayout {
     button_width: f32,
 }
 
-fn control_layout(available_width: f32, action_count: usize) -> ControlLayout {
+fn control_layout(available_width: f32, show_fullscreen: bool) -> ControlLayout {
     let available_width = valid_extent(available_width);
     let button_width = if available_width < 520.0 {
         COMPACT_CONTROL_BUTTON_WIDTH
     } else {
         CONTROL_BUTTON_WIDTH
     };
-    let actions_width = if action_count == 0 {
-        0.0
-    } else {
-        button_width * action_count as f32 + CONTROL_GAP * action_count.saturating_sub(1) as f32
-    };
-    let group_gap = if actions_width > 0.0 {
-        CONTROL_GAP
+    let fullscreen_width = if show_fullscreen {
+        CONTROL_GAP + Size::CONTROL
     } else {
         0.0
     };
+    let actions_width = button_width + fullscreen_width + CONTROL_GAP + PLAYER_VOLUME_CONTROL_WIDTH;
 
     ControlLayout {
-        info_width: (available_width - actions_width - group_gap).max(0.0),
+        info_width: (available_width - actions_width - CONTROL_GAP).max(0.0),
         actions_width: actions_width.min(available_width),
         button_width,
     }
@@ -141,11 +138,13 @@ impl PlayerMode<'_> {
 
 pub(super) enum PlayerAction {
     StopWatching,
+    SetVolume { generation: u64, percent: u8 },
 }
 
 pub(super) struct LivePlayer {
     fullscreen: FullscreenState,
     controls_last_active: f64,
+    volume: PlayerVolumeState,
 }
 
 impl Default for LivePlayer {
@@ -153,6 +152,7 @@ impl Default for LivePlayer {
         Self {
             fullscreen: FullscreenState::default(),
             controls_last_active: f64::NEG_INFINITY,
+            volume: PlayerVolumeState::default(),
         }
     }
 }
@@ -175,9 +175,11 @@ impl LivePlayer {
         &mut self,
         ui: &mut egui::Ui,
         locale: Locale,
+        view_generation: u64,
         mode: PlayerMode<'_>,
         texture: Option<&TextureHandle>,
     ) -> Option<PlayerAction> {
+        self.volume.sync_generation(view_generation);
         let fullscreen = self.fullscreen.active();
         let available = ui.available_rect_before_wrap();
         let rects = player_rects(available, fullscreen);
@@ -232,7 +234,16 @@ impl LivePlayer {
         }
         if controls_visible {
             player_toolbar_at(ui, rects.toolbar, |ui| {
-                show_controls(ui, locale, &mode, texture, fullscreen, &mut action);
+                show_controls(
+                    ui,
+                    locale,
+                    view_generation,
+                    &mode,
+                    texture,
+                    fullscreen,
+                    &mut self.volume,
+                    &mut action,
+                );
             });
         }
 
@@ -243,13 +254,14 @@ impl LivePlayer {
 fn show_controls(
     ui: &mut egui::Ui,
     locale: Locale,
+    view_generation: u64,
     mode: &PlayerMode<'_>,
     texture: Option<&TextureHandle>,
     fullscreen: bool,
+    volume: &mut PlayerVolumeState,
     action: &mut Option<PlayerAction>,
 ) {
-    let action_count = 1 + usize::from(mode.viewing());
-    let row_layout = control_layout(ui.available_width(), action_count);
+    let row_layout = control_layout(ui.available_width(), mode.viewing());
     let (row, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), Size::CONTROL),
         Sense::hover(),
@@ -332,8 +344,31 @@ fn show_controls(
                 }
                 *action = Some(PlayerAction::StopWatching);
             }
+            if let Some(percent) = player_volume_control(
+                ui,
+                volume,
+                audio_playable(mode.audio().phase) && enabled,
+                locale.mute(),
+                locale.unmute(),
+                locale.playback_volume(),
+                locale.playback_audio_unavailable(),
+            ) {
+                *action = Some(PlayerAction::SetVolume {
+                    generation: view_generation,
+                    percent,
+                });
+            }
         });
     });
+}
+
+fn audio_playable(phase: RemoteAudioPhase) -> bool {
+    matches!(
+        phase,
+        RemoteAudioPhase::TrackSelected
+            | RemoteAudioPhase::PcmDecoded
+            | RemoteAudioPhase::PcmSubmitted
+    )
 }
 
 fn is_control_activity(event: &Event) -> bool {
@@ -437,15 +472,24 @@ mod tests {
 
     #[test]
     fn narrow_controls_reserve_compact_actions_without_overflow() {
-        let layout = control_layout(360.0, 2);
+        let layout = control_layout(360.0, true);
 
         assert_eq!(layout.button_width, COMPACT_CONTROL_BUTTON_WIDTH);
-        assert_eq!(layout.actions_width, 192.0);
-        assert_eq!(layout.info_width, 160.0);
+        assert_eq!(layout.actions_width, 280.0);
+        assert_eq!(layout.info_width, 72.0);
         assert_eq!(
             layout.info_width + CONTROL_GAP + layout.actions_width,
             360.0
         );
+    }
+
+    #[test]
+    fn volume_is_enabled_only_after_a_playable_audio_track_is_selected() {
+        assert!(!audio_playable(RemoteAudioPhase::Pending));
+        assert!(audio_playable(RemoteAudioPhase::TrackSelected));
+        assert!(audio_playable(RemoteAudioPhase::PcmSubmitted));
+        assert!(!audio_playable(RemoteAudioPhase::NoAudio));
+        assert!(!audio_playable(RemoteAudioPhase::Failed));
     }
 
     #[test]

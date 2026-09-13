@@ -9,6 +9,7 @@ use std::{
 };
 
 use moq_tokio::{mdns, moq_net};
+use moqcast_ui::DEFAULT_PLAYER_VOLUME_PERCENT;
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 use url::Url;
@@ -344,6 +345,7 @@ pub(crate) enum RuntimeCommand {
     ShareScreen,
     StopSharing,
     WatchScreen { path: String },
+    SetPlaybackVolume { generation: u64, percent: u8 },
     StopWatching,
     Shutdown,
 }
@@ -365,6 +367,7 @@ struct PublicationOwner {
 struct ViewOwner {
     generation: u64,
     task: Option<tokio::task::JoinHandle<()>>,
+    volume: Option<watch::Sender<u8>>,
 }
 
 impl ViewOwner {
@@ -377,18 +380,33 @@ impl ViewOwner {
         frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
     ) {
         self.generation = generation;
+        let (volume, volume_rx) = watch::channel(DEFAULT_PLAYER_VOLUME_PERCENT);
+        self.volume = Some(volume);
         self.task = Some(tokio::spawn(crate::playback::run(
-            generation, path, broadcast, events, frames,
+            generation, path, broadcast, events, frames, volume_rx,
         )));
+    }
+
+    fn set_volume(&self, generation: u64, percent: u8) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        let Some(volume) = &self.volume else {
+            return false;
+        };
+        volume.send_replace(percent.min(100));
+        true
     }
 
     fn finished(&mut self, generation: u64) {
         if self.generation == generation {
             self.task = None;
+            self.volume = None;
         }
     }
 
     async fn stop(&mut self) {
+        self.volume = None;
         if let Some(task) = self.task.take() {
             task.abort();
             let _ = task.await;
@@ -1010,6 +1028,25 @@ async fn handle_command(command: RuntimeCommand, context: RuntimeContext<'_>) ->
                 start_view(path, snapshot, &active.remote, view, view_events, playback);
             } else {
                 snapshot.last_error = Some("Start LAN discovery before watching.");
+            }
+            false
+        }
+        RuntimeCommand::SetPlaybackVolume {
+            generation,
+            percent,
+        } => {
+            if view.set_volume(generation, percent) {
+                tracing::debug!(
+                    view_generation = generation,
+                    volume_percent = percent.min(100),
+                    "remote playback volume changed"
+                );
+            } else {
+                tracing::debug!(
+                    view_generation = generation,
+                    volume_percent = percent.min(100),
+                    "ignored stale remote playback volume change"
+                );
             }
             false
         }
@@ -1685,6 +1722,21 @@ mod tests {
         )));
         assert_eq!(snapshot.peers["peer"].screen, ScreenAvailability::Withdrawn);
         assert_eq!(snapshot.view.phase, ViewPhase::Idle);
+    }
+
+    #[test]
+    fn stale_view_generation_cannot_change_current_playback_volume() {
+        let (volume, mut current) = watch::channel(DEFAULT_PLAYER_VOLUME_PERCENT);
+        let owner = ViewOwner {
+            generation: 7,
+            task: None,
+            volume: Some(volume),
+        };
+
+        assert!(!owner.set_volume(6, 25));
+        assert_eq!(*current.borrow_and_update(), DEFAULT_PLAYER_VOLUME_PERCENT);
+        assert!(owner.set_volume(7, 25));
+        assert_eq!(*current.borrow_and_update(), 25);
     }
 
     #[test]

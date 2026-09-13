@@ -6,8 +6,9 @@ use eframe::egui::{
     self, Align, Color32, Event, Layout, Rect, Sense, TextureHandle, ViewportCommand,
 };
 use moqcast_ui::{
-    ButtonSpec, COLORS, ControlRole, IconButtonSpec, Size, TypographyRole, control_button,
-    player_icon_button, player_stage, player_toolbar, typography,
+    ButtonSpec, COLORS, ControlRole, IconButtonSpec, PLAYER_VOLUME_CONTROL_WIDTH,
+    PlayerVolumeState, Size, TypographyRole, control_button, player_icon_button, player_stage,
+    player_toolbar, player_volume_control, typography,
 };
 
 use crate::{
@@ -73,25 +74,21 @@ struct ControlLayout {
     button_width: f32,
 }
 
-fn control_layout(available_width: f32, action_count: usize) -> ControlLayout {
+fn control_layout(available_width: f32, show_fullscreen: bool) -> ControlLayout {
     let available_width = valid_extent(available_width);
     let button_width = if available_width < 520.0 {
         COMPACT_CONTROL_BUTTON_WIDTH
     } else {
         CONTROL_BUTTON_WIDTH
     };
-    let actions_width = if action_count == 0 {
-        0.0
-    } else {
-        button_width * action_count as f32 + CONTROL_GAP * action_count.saturating_sub(1) as f32
-    };
-    let group_gap = if actions_width > 0.0 {
-        CONTROL_GAP
+    let fullscreen_width = if show_fullscreen {
+        CONTROL_GAP + Size::CONTROL
     } else {
         0.0
     };
+    let actions_width = button_width + fullscreen_width + CONTROL_GAP + PLAYER_VOLUME_CONTROL_WIDTH;
     ControlLayout {
-        info_width: (available_width - actions_width - group_gap).max(0.0),
+        info_width: (available_width - actions_width - CONTROL_GAP).max(0.0),
         actions_width: actions_width.min(available_width),
         button_width,
     }
@@ -112,6 +109,7 @@ fn valid_size(size: egui::Vec2) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PlayerAction {
     Stop,
+    SetVolume { generation: u64, percent: u8 },
 }
 
 #[derive(Default)]
@@ -137,6 +135,7 @@ pub(crate) struct LivePlayer {
     fullscreen: FullscreenState,
     controls_last_active: f64,
     layout_signature: Option<PlayerLayoutSignature>,
+    volume: PlayerVolumeState,
 }
 
 impl Default for LivePlayer {
@@ -145,6 +144,7 @@ impl Default for LivePlayer {
             fullscreen: FullscreenState::default(),
             controls_last_active: f64::NEG_INFINITY,
             layout_signature: None,
+            volume: PlayerVolumeState::default(),
         }
     }
 }
@@ -180,6 +180,7 @@ impl LivePlayer {
         view: &ViewSnapshot,
         texture: Option<&TextureHandle>,
     ) -> Option<PlayerAction> {
+        self.volume.sync_generation(view.generation);
         let fullscreen = self.fullscreen.active();
         let available = ui.available_size();
         let source = view
@@ -263,10 +264,26 @@ impl LivePlayer {
                         surface.right_bottom(),
                     );
                     ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
-                        show_toolbar(ui, locale, view, texture.is_some(), true, &mut action);
+                        show_toolbar(
+                            ui,
+                            locale,
+                            view,
+                            texture.is_some(),
+                            true,
+                            &mut self.volume,
+                            &mut action,
+                        );
                     });
                 } else {
-                    show_toolbar(ui, locale, view, texture.is_some(), false, &mut action);
+                    show_toolbar(
+                        ui,
+                        locale,
+                        view,
+                        texture.is_some(),
+                        false,
+                        &mut self.volume,
+                        &mut action,
+                    );
                 }
             }
         });
@@ -280,10 +297,11 @@ fn show_toolbar(
     view: &ViewSnapshot,
     texture_ready: bool,
     fullscreen: bool,
+    volume: &mut PlayerVolumeState,
     action: &mut Option<PlayerAction>,
 ) {
     player_toolbar(ui, |ui| {
-        show_controls(ui, locale, view, texture_ready, fullscreen, action);
+        show_controls(ui, locale, view, texture_ready, fullscreen, volume, action);
     });
 }
 
@@ -311,11 +329,12 @@ fn show_controls(
     view: &ViewSnapshot,
     texture_ready: bool,
     fullscreen: bool,
+    volume: &mut PlayerVolumeState,
     action: &mut Option<PlayerAction>,
 ) {
     let presentation = presentation(view.phase, texture_ready);
-    let action_count = 1 + usize::from(presentation == PlayerPresentation::Live);
-    let row_layout = control_layout(ui.available_width(), action_count);
+    let show_fullscreen = presentation == PlayerPresentation::Live;
+    let row_layout = control_layout(ui.available_width(), show_fullscreen);
     let (row, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), Size::CONTROL),
         Sense::hover(),
@@ -367,7 +386,7 @@ fn show_controls(
     ui.scope_builder(egui::UiBuilder::new().max_rect(actions), |ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let enabled = view.phase != ViewPhase::Stopping;
-            if presentation == PlayerPresentation::Live
+            if show_fullscreen
                 && player_icon_button(
                     ui,
                     IconButtonSpec::player(
@@ -399,8 +418,32 @@ fn show_controls(
                 }
                 *action = Some(PlayerAction::Stop);
             }
+            if let Some(percent) = player_volume_control(
+                ui,
+                volume,
+                audio_playable(view.audio.phase) && enabled,
+                mute(locale),
+                unmute(locale),
+                playback_volume(locale),
+                audio_unavailable(locale),
+            ) {
+                *action = Some(PlayerAction::SetVolume {
+                    generation: view.generation,
+                    percent,
+                });
+            }
         });
     });
+}
+
+fn audio_playable(phase: ViewAudioPhase) -> bool {
+    matches!(
+        phase,
+        ViewAudioPhase::TrackSelected
+            | ViewAudioPhase::Decoded
+            | ViewAudioPhase::Writing
+            | ViewAudioPhase::CallbackConsumed
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -493,6 +536,34 @@ fn stop_watching(locale: Locale) -> &'static str {
     match locale {
         Locale::Chinese => "停止观看",
         Locale::English => "Stop watching",
+    }
+}
+
+fn mute(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Chinese => "静音",
+        Locale::English => "Mute",
+    }
+}
+
+fn unmute(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Chinese => "取消静音",
+        Locale::English => "Unmute",
+    }
+}
+
+fn playback_volume(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Chinese => "播放音量",
+        Locale::English => "Playback volume",
+    }
+}
+
+fn audio_unavailable(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Chinese => "当前屏幕没有可播放音频",
+        Locale::English => "No playable audio is available for this screen",
     }
 }
 
@@ -635,11 +706,20 @@ mod tests {
 
     #[test]
     fn narrow_controls_keep_fixed_actions_inside_the_toolbar() {
-        let layout = control_layout(360.0, 2);
+        let layout = control_layout(360.0, true);
         assert_eq!(layout.button_width, COMPACT_CONTROL_BUTTON_WIDTH);
-        assert_eq!(layout.actions_width, 192.0);
-        assert_eq!(layout.info_width, 160.0);
+        assert_eq!(layout.actions_width, 280.0);
+        assert_eq!(layout.info_width, 72.0);
         assert!(layout.info_width + CONTROL_GAP + layout.actions_width <= 360.0);
+    }
+
+    #[test]
+    fn volume_is_enabled_only_after_a_playable_audio_track_is_selected() {
+        assert!(!audio_playable(ViewAudioPhase::Pending));
+        assert!(audio_playable(ViewAudioPhase::TrackSelected));
+        assert!(audio_playable(ViewAudioPhase::CallbackConsumed));
+        assert!(!audio_playable(ViewAudioPhase::NotPublished));
+        assert!(!audio_playable(ViewAudioPhase::Failed));
     }
 
     #[test]

@@ -196,6 +196,24 @@ impl MoqCastApp {
         }
     }
 
+    fn handle_player_action(&mut self, action: Option<PlayerAction>) {
+        match action {
+            Some(PlayerAction::Stop) => {
+                self.send(RuntimeCommand::StopWatching);
+            }
+            Some(PlayerAction::SetVolume {
+                generation,
+                percent,
+            }) => {
+                self.send(RuntimeCommand::SetPlaybackVolume {
+                    generation,
+                    percent,
+                });
+            }
+            None => {}
+        }
+    }
+
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let compact =
             navigation_height(ui.ctx().content_rect().width()) == COMPACT_NAVIGATION_HEIGHT;
@@ -811,17 +829,13 @@ impl MoqCastApp {
             WatchProjection::Player => {
                 let stage = watch_player_size(ui.available_size());
                 ui.allocate_ui_with_layout(stage, Layout::top_down(Align::Center), |ui| {
-                    if matches!(
-                        self.player.show(
-                            ui,
-                            self.locale,
-                            &self.snapshot.view,
-                            self.playback_texture.as_ref(),
-                        ),
-                        Some(PlayerAction::Stop)
-                    ) {
-                        self.send(RuntimeCommand::StopWatching);
-                    }
+                    let action = self.player.show(
+                        ui,
+                        self.locale,
+                        &self.snapshot.view,
+                        self.playback_texture.as_ref(),
+                    );
+                    self.handle_player_action(action);
                 });
             }
             projection => {
@@ -1273,17 +1287,13 @@ impl eframe::App for MoqCastApp {
             egui::CentralPanel::default()
                 .frame(Frame::new().fill(Color32::BLACK))
                 .show(ui, |ui| {
-                    if matches!(
-                        self.player.show(
-                            ui,
-                            self.locale,
-                            &self.snapshot.view,
-                            self.playback_texture.as_ref(),
-                        ),
-                        Some(PlayerAction::Stop)
-                    ) {
-                        self.send(RuntimeCommand::StopWatching);
-                    }
+                    let action = self.player.show(
+                        ui,
+                        self.locale,
+                        &self.snapshot.view,
+                        self.playback_texture.as_ref(),
+                    );
+                    self.handle_player_action(action);
                 });
             self.diagnostics.show_window(&context, self.locale);
             context.request_repaint_after(std::time::Duration::from_millis(33));

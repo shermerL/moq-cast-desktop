@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::{
-    sync::{OnceCell, mpsc},
+    sync::{OnceCell, mpsc, watch},
     task::JoinHandle,
 };
 
@@ -133,6 +133,32 @@ struct Playback {
     sink: moq_audio::playback::Sink,
 }
 
+struct VolumeListener {
+    task: JoinHandle<()>,
+}
+
+impl VolumeListener {
+    fn spawn(control: moq_audio::playback::Control, mut volume: watch::Receiver<u8>) -> Self {
+        control.set_volume(volume_scalar(*volume.borrow_and_update()));
+        let task = tokio::spawn(async move {
+            while volume.changed().await.is_ok() {
+                control.set_volume(volume_scalar(*volume.borrow_and_update()));
+            }
+        });
+        Self { task }
+    }
+}
+
+impl Drop for VolumeListener {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+fn volume_scalar(percent: u8) -> f32 {
+    f32::from(percent.min(100)) / 100.0
+}
+
 impl Playback {
     async fn open(
         broadcast: &moq_tokio::moq_net::broadcast::Consumer,
@@ -182,6 +208,7 @@ impl Task {
         updates: &mpsc::Sender<Update>,
         engine: &Arc<OnceCell<moq_audio::playback::Engine>>,
         clock: &Arc<MediaClock>,
+        volume: watch::Receiver<u8>,
     ) -> Self {
         let broadcast = broadcast.clone();
         let selection = selection.clone();
@@ -196,7 +223,16 @@ impl Task {
         let teardown = Arc::new(TeardownControl::default());
         let task_teardown = teardown.clone();
         let handle = tokio::spawn(async move {
-            run(broadcast, selection, events, engine, clock, task_teardown).await;
+            run(
+                broadcast,
+                selection,
+                events,
+                engine,
+                clock,
+                task_teardown,
+                volume,
+            )
+            .await;
         });
         Self {
             handle: Some(handle),
@@ -241,6 +277,7 @@ async fn run(
     engine: Arc<OnceCell<moq_audio::playback::Engine>>,
     clock: AudioLease,
     teardown: Arc<TeardownControl>,
+    volume: watch::Receiver<u8>,
 ) {
     events
         .send(RemoteAudioSnapshot {
@@ -331,6 +368,7 @@ async fn run(
             return;
         }
     };
+    let _volume_listener = VolumeListener::spawn(playback.sink.control(), volume);
 
     tracing::info!(
         broadcast = %events.path,
@@ -486,6 +524,14 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
+
+    #[test]
+    fn playback_volume_percent_maps_to_the_sink_gain_range() {
+        assert_eq!(volume_scalar(0), 0.0);
+        assert_eq!(volume_scalar(40), 0.4);
+        assert_eq!(volume_scalar(100), 1.0);
+        assert_eq!(volume_scalar(u8::MAX), 1.0);
+    }
 
     #[test]
     fn empty_catalog_reports_no_audio() {

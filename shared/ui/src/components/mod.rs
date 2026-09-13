@@ -21,8 +21,9 @@ pub use layout::{
 };
 pub use navigation::{NavItemSpec, nav_item};
 pub use player::{
-    PlayerRects, PlayerSurfaceResponse, player_rects, player_stage, player_stage_at,
-    player_surface, player_toolbar, player_toolbar_at,
+    DEFAULT_PLAYER_VOLUME_PERCENT, PLAYER_VOLUME_CONTROL_WIDTH, PlayerRects, PlayerSurfaceResponse,
+    PlayerVolumeState, player_rects, player_stage, player_stage_at, player_surface, player_toolbar,
+    player_toolbar_at, player_volume_control,
 };
 pub use row::{
     DetailRowSpec, DeviceBadgeSpec, DeviceListItemSpec, DeviceListSpec, DeviceRowSpec,

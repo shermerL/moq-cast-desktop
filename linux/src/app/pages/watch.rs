@@ -23,17 +23,19 @@ pub(in crate::app) fn show(
             .show(
                 ui,
                 locale,
+                snapshot.view_generation,
                 PlayerMode::Preparing {
                     device: device_name(snapshot, path, locale),
                     audio: &snapshot.remote_audio,
                 },
                 playback,
             )
-            .map(|PlayerAction::StopWatching| WatchAction::Command(UserCommand::StopWatching)),
+            .map(player_action),
         MediaState::Viewing { path } | MediaState::StoppingView { path } => player
             .show(
                 ui,
                 locale,
+                snapshot.view_generation,
                 PlayerMode::Viewing {
                     device: device_name(snapshot, path, locale),
                     stopping: matches!(snapshot.media, MediaState::StoppingView { .. }),
@@ -41,7 +43,7 @@ pub(in crate::app) fn show(
                 },
                 playback,
             )
-            .map(|PlayerAction::StopWatching| WatchAction::Command(UserCommand::StopWatching)),
+            .map(player_action),
         _ => {
             let mut open_nearby = false;
             state_panel(
@@ -58,6 +60,19 @@ pub(in crate::app) fn show(
             open_nearby.then_some(WatchAction::OpenNearby)
         }
     }
+}
+
+fn player_action(action: PlayerAction) -> WatchAction {
+    WatchAction::Command(match action {
+        PlayerAction::StopWatching => UserCommand::StopWatching,
+        PlayerAction::SetVolume {
+            generation,
+            percent,
+        } => UserCommand::SetPlaybackVolume {
+            generation,
+            percent,
+        },
+    })
 }
 
 fn device_name<'a>(snapshot: &'a AppSnapshot, path: &str, locale: Locale) -> &'a str {

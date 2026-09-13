@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{OnceCell, mpsc};
+use tokio::sync::{OnceCell, mpsc, watch};
 use tokio::task::JoinHandle;
 
 use super::sync::{self, AudioLease, MediaClock};
@@ -145,6 +145,32 @@ struct Playback {
     sink: moq_audio::playback::Sink,
 }
 
+struct VolumeListener {
+    task: JoinHandle<()>,
+}
+
+impl VolumeListener {
+    fn spawn(control: moq_audio::playback::Control, mut volume: watch::Receiver<u8>) -> Self {
+        control.set_volume(volume_scalar(*volume.borrow_and_update()));
+        let task = tokio::spawn(async move {
+            while volume.changed().await.is_ok() {
+                control.set_volume(volume_scalar(*volume.borrow_and_update()));
+            }
+        });
+        Self { task }
+    }
+}
+
+impl Drop for VolumeListener {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+fn volume_scalar(percent: u8) -> f32 {
+    f32::from(percent.min(100)) / 100.0
+}
+
 impl Playback {
     fn snapshot(&self, phase: AudioPhase, track: &str, codec: &str) -> AudioSnapshot {
         AudioSnapshot {
@@ -174,6 +200,7 @@ impl Task {
         updates: &mpsc::Sender<Update>,
         engine: &Arc<OnceCell<moq_audio::playback::Engine>>,
         clock: &Arc<MediaClock>,
+        volume: watch::Receiver<u8>,
     ) -> Self {
         let broadcast = broadcast.clone();
         let selection = selection.clone();
@@ -186,7 +213,7 @@ impl Task {
         let engine = engine.clone();
         let clock = clock.audio(generation);
         let handle = tokio::spawn(async move {
-            run(broadcast, selection, events, engine, clock).await;
+            run(broadcast, selection, events, engine, clock, volume).await;
         });
         Self {
             handle: Some(handle),
@@ -228,6 +255,7 @@ async fn run(
     events: Events,
     engine: Arc<OnceCell<moq_audio::playback::Engine>>,
     clock: AudioLease,
+    volume: watch::Receiver<u8>,
 ) {
     events.send(AudioSnapshot::pending()).await;
 
@@ -351,6 +379,7 @@ async fn run(
         }
     };
     let mut playback = Playback { consumer, sink };
+    let _volume_listener = VolumeListener::spawn(playback.sink.control(), volume);
 
     tracing::info!(
         broadcast = %events.path,
@@ -534,6 +563,14 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
+
+    #[test]
+    fn playback_volume_percent_maps_to_the_sink_gain_range() {
+        assert_eq!(volume_scalar(0), 0.0);
+        assert_eq!(volume_scalar(40), 0.4);
+        assert_eq!(volume_scalar(100), 1.0);
+        assert_eq!(volume_scalar(u8::MAX), 1.0);
+    }
 
     #[test]
     fn empty_catalog_reports_no_audio() {

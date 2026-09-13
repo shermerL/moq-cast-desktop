@@ -1,6 +1,143 @@
-use egui::{Align, CornerRadius, Layout, Rect, Response, Sense, Ui, UiBuilder, pos2, vec2};
+use egui::{
+    Align, CornerRadius, Layout, Rect, Response, Sense, Slider, Ui, UiBuilder, WidgetInfo,
+    WidgetType, pos2, vec2,
+};
 
-use crate::{COLORS, Radius, Size, Spacing};
+use crate::{COLORS, IconButtonSpec, Radius, Size, Spacing, player_icon_button};
+
+/// Default volume for every new remote playback session.
+pub const DEFAULT_PLAYER_VOLUME_PERCENT: u8 = 100;
+
+/// Stable width of the mute button and volume slider in a player toolbar.
+pub const PLAYER_VOLUME_CONTROL_WIDTH: f32 = 132.0;
+
+/// Session-scoped player volume, including the value restored after unmuting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlayerVolumeState {
+    generation: Option<u64>,
+    percent: u8,
+    last_nonzero_percent: u8,
+}
+
+impl Default for PlayerVolumeState {
+    fn default() -> Self {
+        Self {
+            generation: None,
+            percent: DEFAULT_PLAYER_VOLUME_PERCENT,
+            last_nonzero_percent: DEFAULT_PLAYER_VOLUME_PERCENT,
+        }
+    }
+}
+
+impl PlayerVolumeState {
+    /// Resets volume to 100 percent when a different playback session appears.
+    pub fn sync_generation(&mut self, generation: u64) -> bool {
+        if self.generation == Some(generation) {
+            return false;
+        }
+        self.generation = Some(generation);
+        self.percent = DEFAULT_PLAYER_VOLUME_PERCENT;
+        self.last_nonzero_percent = DEFAULT_PLAYER_VOLUME_PERCENT;
+        true
+    }
+
+    /// Returns the current volume from zero through one hundred percent.
+    pub fn percent(self) -> u8 {
+        self.percent
+    }
+
+    /// Returns whether playback is currently muted.
+    pub fn muted(self) -> bool {
+        self.percent == 0
+    }
+
+    /// Sets and clamps the current volume, preserving the last nonzero value.
+    pub fn set_percent(&mut self, percent: u8) -> bool {
+        let percent = percent.min(100);
+        if self.percent == percent {
+            return false;
+        }
+        self.percent = percent;
+        if percent > 0 {
+            self.last_nonzero_percent = percent;
+        }
+        true
+    }
+
+    /// Toggles mute and returns the resulting volume percentage.
+    pub fn toggle_mute(&mut self) -> u8 {
+        if self.muted() {
+            self.percent = self.last_nonzero_percent.max(1);
+        } else {
+            self.percent = 0;
+        }
+        self.percent
+    }
+}
+
+/// Renders a fixed-width mute button and volume slider for a player toolbar.
+pub fn player_volume_control(
+    ui: &mut Ui,
+    state: &mut PlayerVolumeState,
+    enabled: bool,
+    mute_label: &str,
+    unmute_label: &str,
+    volume_label: &str,
+    unavailable_label: &str,
+) -> Option<u8> {
+    let (rect, _) = ui.allocate_exact_size(
+        vec2(PLAYER_VOLUME_CONTROL_WIDTH, Size::CONTROL),
+        Sense::hover(),
+    );
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    child.spacing_mut().item_spacing.x = Size::PLAYER_TOOLBAR_ITEM_SPACING;
+    child.spacing_mut().slider_width =
+        PLAYER_VOLUME_CONTROL_WIDTH - Size::CONTROL - Size::PLAYER_TOOLBAR_ITEM_SPACING;
+    child.visuals_mut().selection.bg_fill = COLORS.brand.into();
+
+    let mut changed = None;
+    let muted = state.muted();
+    let mute_accessible_label = if enabled {
+        if muted { unmute_label } else { mute_label }
+    } else {
+        unavailable_label
+    };
+    let mute = player_icon_button(
+        &mut child,
+        IconButtonSpec::player(if muted { "🔇" } else { "🔊" }, mute_accessible_label)
+            .enabled(enabled)
+            .selected(muted),
+    );
+    let mute_clicked = mute.clicked();
+    mute.on_hover_text(mute_accessible_label);
+    if mute_clicked {
+        changed = Some(state.toggle_mute());
+    }
+
+    let mut percent = state.percent();
+    let slider = Slider::new(&mut percent, 0..=100)
+        .show_value(false)
+        .step_by(1.0)
+        .trailing_fill(true);
+    let slider = child.add_enabled(enabled, slider);
+    slider.widget_info(|| WidgetInfo::labeled(WidgetType::Slider, enabled, volume_label));
+    let slider_changed = slider.changed();
+    let slider_hint = if enabled {
+        format!("{volume_label}: {percent}%")
+    } else {
+        unavailable_label.to_owned()
+    };
+    slider.on_hover_text(slider_hint);
+    if slider_changed && state.set_percent(percent) {
+        changed = Some(state.percent());
+    }
+
+    changed
+}
 
 /// Stable stage and bottom-toolbar rectangles for one player surface.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -152,6 +289,38 @@ pub fn player_toolbar_at<R>(ui: &mut Ui, rect: Rect, content: impl FnOnce(&mut U
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_volume_restores_the_last_nonzero_value_after_unmuting() {
+        let mut volume = PlayerVolumeState::default();
+        volume.sync_generation(1);
+        assert!(volume.set_percent(37));
+        assert_eq!(volume.toggle_mute(), 0);
+        assert!(volume.muted());
+        assert_eq!(volume.toggle_mute(), 37);
+        assert!(!volume.muted());
+    }
+
+    #[test]
+    fn slider_zero_preserves_the_value_used_by_unmute() {
+        let mut volume = PlayerVolumeState::default();
+        volume.sync_generation(1);
+        volume.set_percent(62);
+        volume.set_percent(0);
+        assert_eq!(volume.toggle_mute(), 62);
+    }
+
+    #[test]
+    fn a_new_playback_generation_resets_volume_to_full() {
+        let mut volume = PlayerVolumeState::default();
+        assert!(volume.sync_generation(4));
+        volume.set_percent(28);
+        assert!(!volume.sync_generation(4));
+        assert_eq!(volume.percent(), 28);
+        assert!(volume.sync_generation(5));
+        assert_eq!(volume.percent(), DEFAULT_PLAYER_VOLUME_PERCENT);
+        assert!(!volume.muted());
+    }
 
     #[test]
     fn player_toolbar_has_exact_outer_height() {

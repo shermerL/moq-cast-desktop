@@ -503,6 +503,7 @@ struct ShareStart {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RuntimeCommand {
     WatchScreen { peer: String, path: String },
+    SetPlaybackVolume { generation: u64, percent: u8 },
     StopWatching,
     SelectShareSource(ShareSelection),
     SetShareSystemAudio(bool),
@@ -630,6 +631,15 @@ impl RuntimeOwner {
 
     pub(crate) fn stop_watching(&self) -> bool {
         self.commands.try_send(RuntimeCommand::StopWatching).is_ok()
+    }
+
+    pub(crate) fn set_playback_volume(&self, generation: u64, percent: u8) -> bool {
+        self.commands
+            .try_send(RuntimeCommand::SetPlaybackVolume {
+                generation,
+                percent,
+            })
+            .is_ok()
     }
 
     pub(crate) fn select_share_source(&self, selection: ShareSelection) -> bool {
@@ -1093,6 +1103,25 @@ impl ServiceRun<'_> {
                             path,
                         },
                     );
+                    None
+                }
+                RuntimeInput::Command(Some(RuntimeCommand::SetPlaybackVolume {
+                    generation,
+                    percent,
+                })) => {
+                    if self.playback.set_volume(generation, percent) {
+                        tracing::debug!(
+                            view_generation = generation,
+                            volume_percent = percent.min(100),
+                            "remote playback volume changed"
+                        );
+                    } else {
+                        tracing::debug!(
+                            view_generation = generation,
+                            volume_percent = percent.min(100),
+                            "ignored stale remote playback volume change"
+                        );
+                    }
                     None
                 }
                 RuntimeInput::Command(Some(RuntimeCommand::StopWatching)) => {

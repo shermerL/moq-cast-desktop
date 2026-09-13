@@ -2,19 +2,47 @@
 
 use eframe::egui::{self, Align, Color32, Layout, Rect, Sense, TextureHandle, ViewportCommand};
 use moqcast_ui::{
-    ButtonSpec, COLORS, ControlRole, IconButtonSpec, Size, TypographyRole, control_button,
-    player_icon_button, player_rects, player_stage_at, player_toolbar_at, typography,
+    ButtonSpec, COLORS, ControlRole, IconButtonSpec, PLAYER_VOLUME_CONTROL_WIDTH,
+    PlayerVolumeState, Size, TypographyRole, control_button, player_icon_button, player_rects,
+    player_stage_at, player_toolbar_at, player_volume_control, typography,
 };
 
 use super::Locale;
+use crate::playback::AudioPhase;
 use crate::runtime::MediaPhase;
 
 const FALLBACK_ASPECT: egui::Vec2 = egui::vec2(16.0, 9.0);
+const CONTROL_BUTTON_WIDTH: f32 = 108.0;
+const COMPACT_CONTROL_BUTTON_WIDTH: f32 = 92.0;
+const CONTROL_GAP: f32 = Size::PLAYER_TOOLBAR_ITEM_SPACING;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PlayerLayout {
     surface: egui::Vec2,
     image: egui::Vec2,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ControlLayout {
+    info_width: f32,
+    actions_width: f32,
+    button_width: f32,
+}
+
+fn control_layout(available_width: f32) -> ControlLayout {
+    let available_width = valid_extent(available_width);
+    let button_width = if available_width < 520.0 {
+        COMPACT_CONTROL_BUTTON_WIDTH
+    } else {
+        CONTROL_BUTTON_WIDTH
+    };
+    let actions_width =
+        button_width + CONTROL_GAP + Size::CONTROL + CONTROL_GAP + PLAYER_VOLUME_CONTROL_WIDTH;
+    ControlLayout {
+        info_width: (available_width - actions_width - CONTROL_GAP).max(0.0),
+        actions_width: actions_width.min(available_width),
+        button_width,
+    }
 }
 
 fn player_layout(
@@ -50,11 +78,21 @@ fn valid_size(size: egui::Vec2) -> bool {
 
 pub(super) enum PlayerAction {
     Stop,
+    SetVolume { generation: u64, percent: u8 },
 }
 
-#[derive(Default)]
 pub(super) struct Player {
     fullscreen: bool,
+    volume: PlayerVolumeState,
+}
+
+impl Default for Player {
+    fn default() -> Self {
+        Self {
+            fullscreen: false,
+            volume: PlayerVolumeState::default(),
+        }
+    }
 }
 
 impl Player {
@@ -71,10 +109,13 @@ impl Player {
         &mut self,
         ui: &mut egui::Ui,
         locale: Locale,
+        generation: u64,
         phase: MediaPhase,
+        audio_phase: AudioPhase,
         device_name: &str,
         texture: Option<(&TextureHandle, (u32, u32))>,
     ) -> Option<PlayerAction> {
+        self.volume.sync_generation(generation);
         if self.fullscreen && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
             ui.ctx()
                 .send_viewport_cmd(ViewportCommand::Fullscreen(false));
@@ -105,9 +146,12 @@ impl Player {
             ui,
             rects.toolbar,
             locale,
+            generation,
             phase,
+            audio_phase,
             device_name,
             self.fullscreen,
+            &mut self.volume,
             &mut action,
         );
         action
@@ -168,22 +212,25 @@ fn show_toolbar(
     ui: &mut egui::Ui,
     toolbar: Rect,
     locale: Locale,
+    generation: u64,
     phase: MediaPhase,
+    audio_phase: AudioPhase,
     device_name: &str,
     fullscreen: bool,
+    volume: &mut PlayerVolumeState,
     action: &mut Option<PlayerAction>,
 ) {
     player_toolbar_at(ui, toolbar, |ui| {
+        let row_layout = control_layout(ui.available_width());
         let (row, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), Size::CONTROL),
             Sense::hover(),
         );
-        let actions_width = 108.0 + Size::CONTROL + Size::PLAYER_TOOLBAR_ITEM_SPACING;
-        let info = Rect::from_min_max(
-            row.min,
-            egui::pos2((row.right() - actions_width).max(row.left()), row.bottom()),
+        let info = Rect::from_min_size(row.min, egui::vec2(row_layout.info_width, row.height()));
+        let actions = Rect::from_min_size(
+            egui::pos2(row.right() - row_layout.actions_width, row.top()),
+            egui::vec2(row_layout.actions_width, row.height()),
         );
-        let actions = Rect::from_min_max(egui::pos2(info.right(), row.top()), row.right_bottom());
         let mut info_ui = ui.new_child(egui::UiBuilder::new().max_rect(info));
         info_ui.horizontal(|ui| {
             if phase == MediaPhase::Watching {
@@ -247,7 +294,7 @@ fn show_toolbar(
                     ControlRole::PlayerIcon,
                 )
                 .enabled(enabled)
-                .min_width(108.0),
+                .min_width(row_layout.button_width),
             )
             .clicked()
             {
@@ -257,8 +304,41 @@ fn show_toolbar(
                 }
                 *action = Some(PlayerAction::Stop);
             }
+            if let Some(percent) = player_volume_control(
+                ui,
+                volume,
+                audio_playable(audio_phase) && enabled,
+                match locale {
+                    Locale::Chinese => "静音",
+                    Locale::English => "Mute",
+                },
+                match locale {
+                    Locale::Chinese => "取消静音",
+                    Locale::English => "Unmute",
+                },
+                match locale {
+                    Locale::Chinese => "播放音量",
+                    Locale::English => "Playback volume",
+                },
+                match locale {
+                    Locale::Chinese => "当前没有可播放音频",
+                    Locale::English => "No playable audio",
+                },
+            ) {
+                *action = Some(PlayerAction::SetVolume {
+                    generation,
+                    percent,
+                });
+            }
         });
     });
+}
+
+fn audio_playable(phase: AudioPhase) -> bool {
+    matches!(
+        phase,
+        AudioPhase::TrackSelected | AudioPhase::PcmDecoded | AudioPhase::PcmSubmitted
+    )
 }
 
 fn live_badge(ui: &mut egui::Ui) {
@@ -323,5 +403,24 @@ mod tests {
     fn fullscreen_surface_fills_the_available_viewport() {
         let layout = player_layout(None, egui::vec2(1440.0, 900.0), true);
         assert_size(layout.surface, egui::vec2(1440.0, 900.0));
+    }
+
+    #[test]
+    fn compact_toolbar_reserves_volume_and_actions() {
+        let layout = control_layout(360.0);
+        assert_eq!(layout.actions_width, 280.0);
+        assert_eq!(layout.info_width, 72.0);
+        assert_eq!(layout.button_width, COMPACT_CONTROL_BUTTON_WIDTH);
+    }
+
+    #[test]
+    fn volume_is_available_only_after_selecting_a_playable_audio_track() {
+        assert!(!audio_playable(AudioPhase::Idle));
+        assert!(!audio_playable(AudioPhase::Pending));
+        assert!(!audio_playable(AudioPhase::NoAudio));
+        assert!(audio_playable(AudioPhase::TrackSelected));
+        assert!(audio_playable(AudioPhase::PcmDecoded));
+        assert!(audio_playable(AudioPhase::PcmSubmitted));
+        assert!(!audio_playable(AudioPhase::Failed));
     }
 }

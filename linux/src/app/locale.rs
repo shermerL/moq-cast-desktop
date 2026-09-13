@@ -315,6 +315,34 @@ impl Locale {
         }
     }
 
+    pub(super) fn mute(self) -> &'static str {
+        match self {
+            Self::Chinese => "静音",
+            Self::English => "Mute",
+        }
+    }
+
+    pub(super) fn unmute(self) -> &'static str {
+        match self {
+            Self::Chinese => "取消静音",
+            Self::English => "Unmute",
+        }
+    }
+
+    pub(super) fn playback_volume(self) -> &'static str {
+        match self {
+            Self::Chinese => "播放音量",
+            Self::English => "Playback volume",
+        }
+    }
+
+    pub(super) fn playback_audio_unavailable(self) -> &'static str {
+        match self {
+            Self::Chinese => "当前屏幕没有可播放音频",
+            Self::English => "No playable audio is available for this screen",
+        }
+    }
+
     pub(super) fn choose_watch_screen(self) -> &'static str {
         match self {
             Self::Chinese => "选择一个可观看屏幕",

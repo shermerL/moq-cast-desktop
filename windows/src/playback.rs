@@ -376,6 +376,7 @@ pub(crate) async fn run(
     broadcast: moq_tokio::moq_net::broadcast::Consumer,
     events: mpsc::Sender<ViewEvent>,
     frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
+    volume: watch::Receiver<u8>,
 ) {
     use moq_mux::catalog::Stream;
 
@@ -394,7 +395,12 @@ pub(crate) async fn run(
         let video_max_age = video_max_age(initial_audio);
         let mut decoder = selection.decoder(&broadcast, video_max_age).await?;
         let audio_events = audio::Events::new(generation, &path, &events);
-        let mut audio_task = audio::Task::spawn(&broadcast, &selection.audio, audio_events.clone());
+        let mut audio_task = audio::Task::spawn(
+            &broadcast,
+            &selection.audio,
+            audio_events.clone(),
+            volume.clone(),
+        );
         let mut scheduler = sync::VideoScheduler::<PendingFrame>::default();
         let mut audio_sync_allowed = initial_audio;
         let mut clock_source = None;
@@ -523,6 +529,7 @@ pub(crate) async fn run(
                                 &broadcast,
                                 &next.audio,
                                 audio_events.clone(),
+                                volume.clone(),
                             ),
                         ));
                     }
@@ -633,6 +640,7 @@ pub(crate) async fn run(
     _broadcast: moq_tokio::moq_net::broadcast::Consumer,
     events: mpsc::Sender<ViewEvent>,
     _frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
+    _volume: watch::Receiver<u8>,
 ) {
     let _ = events
         .send(ViewEvent::Ended {

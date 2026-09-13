@@ -289,17 +289,25 @@ impl MoqCastApp {
     fn watch_player(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
         let device_name = self.player_device_name(snapshot);
         let texture = self.playback_texture.as_ref().zip(self.playback_display);
-        if matches!(
-            self.player.show(
-                ui,
-                self.locale,
-                snapshot.media.phase(),
-                &device_name,
-                texture
-            ),
-            Some(player::PlayerAction::Stop)
+        match self.player.show(
+            ui,
+            self.locale,
+            snapshot.media.generation().value(),
+            snapshot.media.phase(),
+            snapshot.watch_audio.phase,
+            &device_name,
+            texture,
         ) {
-            self.runtime.stop_watching();
+            Some(player::PlayerAction::Stop) => {
+                self.runtime.stop_watching();
+            }
+            Some(player::PlayerAction::SetVolume {
+                generation,
+                percent,
+            }) => {
+                self.runtime.set_playback_volume(generation, percent);
+            }
+            None => {}
         }
     }
 

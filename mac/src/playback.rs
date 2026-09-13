@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use moq_mux::catalog::Stream;
+use moqcast_ui::DEFAULT_PLAYER_VOLUME_PERCENT;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -94,6 +95,8 @@ impl AudioSnapshot {
 pub(crate) struct Owner {
     task: Option<JoinHandle<()>>,
     cancel: Option<watch::Sender<bool>>,
+    volume: Option<watch::Sender<u8>>,
+    generation: u64,
 }
 
 impl Owner {
@@ -107,14 +110,29 @@ impl Owner {
         wake: Arc<dyn Fn() + Send + Sync>,
     ) {
         debug_assert!(self.task.is_none());
+        self.generation = generation;
         let (cancel, cancelled) = watch::channel(false);
+        let (volume, volume_rx) = watch::channel(DEFAULT_PLAYER_VOLUME_PERCENT);
         self.cancel = Some(cancel);
+        self.volume = Some(volume);
         self.task = Some(tokio::spawn(run(
-            generation, path, broadcast, cancelled, events, frames, wake,
+            generation, path, broadcast, cancelled, events, frames, wake, volume_rx,
         )));
     }
 
+    pub(crate) fn set_volume(&self, generation: u64, percent: u8) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        let Some(volume) = &self.volume else {
+            return false;
+        };
+        volume.send_replace(percent.min(100));
+        true
+    }
+
     pub(crate) async fn stop(&mut self) {
+        self.volume = None;
         if let Some(cancel) = self.cancel.take() {
             cancel.send_replace(true);
         }
@@ -413,10 +431,11 @@ async fn run(
     events: mpsc::Sender<Event>,
     frames: watch::Sender<Option<Arc<Frame>>>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    volume: watch::Receiver<u8>,
 ) {
     let stopped = cancel.clone();
     let result = run_inner(
-        generation, &path, broadcast, cancel, &events, &frames, &wake,
+        generation, &path, broadcast, cancel, &events, &frames, &wake, volume,
     )
     .await
     .map_err(|error| error.to_string());
@@ -436,6 +455,7 @@ async fn run_inner(
     events: &mpsc::Sender<Event>,
     frames: &watch::Sender<Option<Arc<Frame>>>,
     wake: &Arc<dyn Fn() + Send + Sync>,
+    volume: watch::Receiver<u8>,
 ) -> anyhow::Result<()> {
     let mut catalog = tokio::select! {
         biased;
@@ -504,6 +524,7 @@ async fn run_inner(
         &audio_tx,
         &audio_engine,
         &media_clock,
+        volume.clone(),
     );
 
     let result = async {
@@ -612,6 +633,7 @@ async fn run_inner(
                             &audio_tx,
                             &audio_engine,
                             &media_clock,
+                            volume.clone(),
                         );
                     }
                     if changes.video {
@@ -907,6 +929,22 @@ mod tests {
         assert_eq!(replacement.sequence, 1);
         assert!(first_view_frame);
         assert!(!replacement_first_view_frame);
+    }
+
+    #[test]
+    fn stale_view_generation_cannot_change_current_playback_volume() {
+        let (volume, mut current) = watch::channel(DEFAULT_PLAYER_VOLUME_PERCENT);
+        let owner = Owner {
+            task: None,
+            cancel: None,
+            volume: Some(volume),
+            generation: 7,
+        };
+
+        assert!(!owner.set_volume(6, 25));
+        assert_eq!(*current.borrow_and_update(), DEFAULT_PLAYER_VOLUME_PERCENT);
+        assert!(owner.set_volume(7, 25));
+        assert_eq!(*current.borrow_and_update(), 25);
     }
 
     #[test]
