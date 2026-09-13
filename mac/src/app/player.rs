@@ -81,18 +81,19 @@ pub(super) enum PlayerAction {
     SetVolume { generation: u64, percent: u8 },
 }
 
+pub(super) struct PlayerView<'a> {
+    pub(super) locale: Locale,
+    pub(super) generation: u64,
+    pub(super) phase: MediaPhase,
+    pub(super) audio_phase: AudioPhase,
+    pub(super) device_name: &'a str,
+    pub(super) texture: Option<(&'a TextureHandle, (u32, u32))>,
+}
+
+#[derive(Default)]
 pub(super) struct Player {
     fullscreen: bool,
     volume: PlayerVolumeState,
-}
-
-impl Default for Player {
-    fn default() -> Self {
-        Self {
-            fullscreen: false,
-            volume: PlayerVolumeState::default(),
-        }
-    }
 }
 
 impl Player {
@@ -105,23 +106,16 @@ impl Player {
         self.fullscreen
     }
 
-    pub(super) fn show(
-        &mut self,
-        ui: &mut egui::Ui,
-        locale: Locale,
-        generation: u64,
-        phase: MediaPhase,
-        audio_phase: AudioPhase,
-        device_name: &str,
-        texture: Option<(&TextureHandle, (u32, u32))>,
-    ) -> Option<PlayerAction> {
-        self.volume.sync_generation(generation);
+    pub(super) fn show(&mut self, ui: &mut egui::Ui, view: PlayerView<'_>) -> Option<PlayerAction> {
+        self.volume.sync_generation(view.generation);
         if self.fullscreen && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
             ui.ctx()
                 .send_viewport_cmd(ViewportCommand::Fullscreen(false));
             self.fullscreen = false;
         }
-        let source = texture.map(|(_, (width, height))| egui::vec2(width as f32, height as f32));
+        let source = view
+            .texture
+            .map(|(_, (width, height))| egui::vec2(width as f32, height as f32));
         let available = ui.available_rect_before_wrap();
         let available = Rect::from_min_size(
             available.min,
@@ -132,7 +126,6 @@ impl Player {
         );
         let rects = player_rects(available, self.fullscreen);
         let layout = player_layout(source, available.size(), self.fullscreen);
-        let mut action = None;
         let occupied = if self.fullscreen {
             rects.stage
         } else {
@@ -140,21 +133,9 @@ impl Player {
         };
         ui.allocate_rect(occupied, Sense::hover());
         player_stage_at(ui, rects.stage, |_| ());
-        paint_surface(ui, rects.stage, layout.image, texture);
-        paint_status(ui, rects.stage, locale, phase);
-        show_toolbar(
-            ui,
-            rects.toolbar,
-            locale,
-            generation,
-            phase,
-            audio_phase,
-            device_name,
-            self.fullscreen,
-            &mut self.volume,
-            &mut action,
-        );
-        action
+        paint_surface(ui, rects.stage, layout.image, view.texture);
+        paint_status(ui, rects.stage, view.locale, view.phase);
+        show_toolbar(ui, rects.toolbar, &view, self.fullscreen, &mut self.volume)
     }
 }
 
@@ -211,15 +192,11 @@ fn paint_status(ui: &mut egui::Ui, surface: Rect, locale: Locale, phase: MediaPh
 fn show_toolbar(
     ui: &mut egui::Ui,
     toolbar: Rect,
-    locale: Locale,
-    generation: u64,
-    phase: MediaPhase,
-    audio_phase: AudioPhase,
-    device_name: &str,
+    view: &PlayerView<'_>,
     fullscreen: bool,
     volume: &mut PlayerVolumeState,
-    action: &mut Option<PlayerAction>,
-) {
+) -> Option<PlayerAction> {
+    let mut action = None;
     player_toolbar_at(ui, toolbar, |ui| {
         let row_layout = control_layout(ui.available_width());
         let (row, _) = ui.allocate_exact_size(
@@ -233,11 +210,11 @@ fn show_toolbar(
         );
         let mut info_ui = ui.new_child(egui::UiBuilder::new().max_rect(info));
         info_ui.horizontal(|ui| {
-            if phase == MediaPhase::Watching {
+            if view.phase == MediaPhase::Watching {
                 live_badge(ui);
             } else {
                 ui.label(typography(
-                    match (locale, phase) {
+                    match (view.locale, view.phase) {
                         (Locale::Chinese, MediaPhase::Stopping) => "正在停止",
                         (Locale::English, MediaPhase::Stopping) => "Stopping",
                         (Locale::Chinese, _) => "正在准备",
@@ -252,10 +229,11 @@ fn show_toolbar(
                 egui::Label::new(typography(
                     format!(
                         "{} · {device_name}",
-                        match locale {
+                        match view.locale {
                             Locale::Chinese => "附近屏幕",
                             Locale::English => "Nearby screen",
-                        }
+                        },
+                        device_name = view.device_name,
                     ),
                     TypographyRole::Meta,
                     COLORS.player_text.into(),
@@ -265,12 +243,12 @@ fn show_toolbar(
         });
         let mut actions_ui = ui.new_child(egui::UiBuilder::new().max_rect(actions));
         actions_ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let enabled = phase != MediaPhase::Stopping;
+            let enabled = view.phase != MediaPhase::Stopping;
             if player_icon_button(
                 ui,
                 IconButtonSpec::player(
                     "⛶",
-                    match (locale, fullscreen) {
+                    match (view.locale, fullscreen) {
                         (Locale::Chinese, true) => "退出全屏",
                         (Locale::Chinese, false) => "全屏",
                         (Locale::English, true) => "Exit fullscreen",
@@ -287,7 +265,7 @@ fn show_toolbar(
             if control_button(
                 ui,
                 ButtonSpec::new(
-                    match locale {
+                    match view.locale {
                         Locale::Chinese => "停止观看",
                         Locale::English => "Stop watching",
                     },
@@ -302,36 +280,37 @@ fn show_toolbar(
                     ui.ctx()
                         .send_viewport_cmd(ViewportCommand::Fullscreen(false));
                 }
-                *action = Some(PlayerAction::Stop);
+                action = Some(PlayerAction::Stop);
             }
             if let Some(percent) = player_volume_control(
                 ui,
                 volume,
-                audio_playable(audio_phase) && enabled,
-                match locale {
+                audio_playable(view.audio_phase) && enabled,
+                match view.locale {
                     Locale::Chinese => "静音",
                     Locale::English => "Mute",
                 },
-                match locale {
+                match view.locale {
                     Locale::Chinese => "取消静音",
                     Locale::English => "Unmute",
                 },
-                match locale {
+                match view.locale {
                     Locale::Chinese => "播放音量",
                     Locale::English => "Playback volume",
                 },
-                match locale {
+                match view.locale {
                     Locale::Chinese => "当前没有可播放音频",
                     Locale::English => "No playable audio",
                 },
             ) {
-                *action = Some(PlayerAction::SetVolume {
-                    generation,
+                action = Some(PlayerAction::SetVolume {
+                    generation: view.generation,
                     percent,
                 });
             }
         });
     });
+    action
 }
 
 fn audio_playable(phase: AudioPhase) -> bool {

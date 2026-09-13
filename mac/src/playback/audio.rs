@@ -191,17 +191,29 @@ pub(super) struct Task {
     track: Option<String>,
 }
 
+pub(super) struct TaskConfig<'a> {
+    pub(super) generation: u64,
+    pub(super) path: &'a str,
+    pub(super) broadcast: &'a moq_tokio::moq_net::broadcast::Consumer,
+    pub(super) selection: &'a Selection,
+    pub(super) updates: &'a mpsc::Sender<Update>,
+    pub(super) engine: &'a Arc<OnceCell<moq_audio::playback::Engine>>,
+    pub(super) clock: &'a Arc<MediaClock>,
+    pub(super) volume: watch::Receiver<u8>,
+}
+
 impl Task {
-    pub(super) fn spawn(
-        generation: u64,
-        path: &str,
-        broadcast: &moq_tokio::moq_net::broadcast::Consumer,
-        selection: &Selection,
-        updates: &mpsc::Sender<Update>,
-        engine: &Arc<OnceCell<moq_audio::playback::Engine>>,
-        clock: &Arc<MediaClock>,
-        volume: watch::Receiver<u8>,
-    ) -> Self {
+    pub(super) fn spawn(config: TaskConfig<'_>) -> Self {
+        let TaskConfig {
+            generation,
+            path,
+            broadcast,
+            selection,
+            updates,
+            engine,
+            clock,
+            volume,
+        } = config;
         let broadcast = broadcast.clone();
         let selection = selection.clone();
         let track = selection.name().map(str::to_owned);

@@ -291,12 +291,14 @@ impl MoqCastApp {
         let texture = self.playback_texture.as_ref().zip(self.playback_display);
         match self.player.show(
             ui,
-            self.locale,
-            snapshot.media.generation().value(),
-            snapshot.media.phase(),
-            snapshot.watch_audio.phase,
-            &device_name,
-            texture,
+            player::PlayerView {
+                locale: self.locale,
+                generation: snapshot.media.generation().value(),
+                phase: snapshot.media.phase(),
+                audio_phase: snapshot.watch_audio.phase,
+                device_name: &device_name,
+                texture,
+            },
         ) {
             Some(player::PlayerAction::Stop) => {
                 self.runtime.stop_watching();
