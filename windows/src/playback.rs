@@ -4,6 +4,8 @@
 mod audio;
 #[cfg(any(target_os = "windows", test))]
 mod output_diagnostics;
+#[cfg(any(target_os = "windows", test))]
+mod sync;
 
 use std::sync::Arc;
 
@@ -359,6 +361,15 @@ impl Selection {
 }
 
 #[cfg(target_os = "windows")]
+struct PendingFrame {
+    decoded: moq_video::Frame,
+    identity: PlaybackFrameIdentity,
+    display: Option<(u32, u32)>,
+    quarter_turns: u8,
+    flip: bool,
+}
+
+#[cfg(target_os = "windows")]
 pub(crate) async fn run(
     generation: u64,
     path: String,
@@ -379,13 +390,18 @@ pub(crate) async fn run(
             .await?
             .ok_or_else(|| anyhow::anyhow!("remote screen catalog ended"))?;
         let mut selection = Selection::from_catalog(first)?;
-        let video_max_age = video_max_age(matches!(
-            selection.audio,
-            audio::Selection::Playable { .. }
-        ));
+        let initial_audio = matches!(selection.audio, audio::Selection::Playable { .. });
+        let video_max_age = video_max_age(initial_audio);
         let mut decoder = selection.decoder(&broadcast, video_max_age).await?;
-        let mut audio_task =
-            audio::Task::spawn(generation, &path, &broadcast, &selection.audio, &events);
+        let audio_events = audio::Events::new(generation, &path, &events);
+        let mut audio_task = audio::Task::spawn(&broadcast, &selection.audio, audio_events.clone());
+        let mut scheduler = sync::VideoScheduler::<PendingFrame>::default();
+        let mut audio_sync_allowed = initial_audio;
+        let mut clock_source = None;
+        let mut last_delta_us = None;
+        let mut reports = tokio::time::interval(std::time::Duration::from_secs(1));
+        reports.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        reports.tick().await;
         let mut decoder_generation = 1_u64;
         let mut sequence = 0_u64;
         let mut decoder_ready = false;
@@ -400,8 +416,78 @@ pub(crate) async fn run(
         );
 
         loop {
+            let anchor = if audio_sync_allowed {
+                audio_task.clock.anchor()
+            } else {
+                None
+            };
+            let advance = scheduler.advance(anchor, std::time::Instant::now());
+            if clock_source != Some(advance.audio_master) {
+                clock_source = Some(advance.audio_master);
+                tracing::info!(
+                    view_generation = generation,
+                    audio_master = advance.audio_master,
+                    "video presentation clock changed; audio position is an estimate"
+                );
+            }
+            if let Some(pending) = advance.frame {
+                last_delta_us = advance.delta_us;
+                let frame = tokio::task::spawn_blocking(move || {
+                    PlaybackFrame::from_video(
+                        pending.decoded,
+                        pending.identity,
+                        pending.display,
+                        pending.quarter_turns,
+                        pending.flip,
+                    )
+                })
+                .await??;
+                let width = frame.display_width;
+                let height = frame.display_height;
+                frames.send_replace(Some(Arc::new(frame)));
+                if !decoder_ready {
+                    decoder_ready = true;
+                    let _ = events
+                        .send(ViewEvent::DecoderReady {
+                            generation,
+                            path: path.clone(),
+                            decoder: decoder.name().to_owned(),
+                            width,
+                            height,
+                        })
+                        .await;
+                }
+            }
             tokio::select! {
-                biased;
+                _ = async {
+                    match advance.deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                        None => std::future::pending().await,
+                    }
+                } => {}
+                _ = audio_task.clock.changed() => {
+                    if audio_task.clock.anchor().is_none() {
+                        scheduler.reset();
+                    }
+                }
+                _ = reports.tick() => {
+                    let stats = scheduler.take_stats();
+                    tracing::info!(
+                        view_generation = generation,
+                        decoder_generation,
+                        audio_master = clock_source.unwrap_or(false),
+                        estimated_av_delta_us = ?last_delta_us,
+                        selected_for_ui = stats.selected,
+                        late_drops = stats.late,
+                        superseded = stats.superseded,
+                        capacity_drops = stats.capacity,
+                        expired_drops = stats.expired,
+                        nonmonotonic_drops = stats.nonmonotonic,
+                        resets = stats.resets,
+                        peak_queue = stats.peak_queue,
+                        "video presentation interval"
+                    );
+                }
                 update = catalog.next() => {
                     let Some(update) = update? else {
                         anyhow::bail!("remote screen catalog ended");
@@ -430,14 +516,13 @@ pub(crate) async fn run(
                         "remote screen catalog changed"
                     );
                     if next.audio != selection.audio {
+                        scheduler.reset();
                         drop(std::mem::replace(
                             &mut audio_task,
                             audio::Task::spawn(
-                                generation,
-                                &path,
                                 &broadcast,
                                 &next.audio,
-                                &events,
+                                audio_events.clone(),
                             ),
                         ));
                     }
@@ -448,6 +533,8 @@ pub(crate) async fn run(
                     let next_decoder = next.decoder(&broadcast, video_max_age).await?;
                     selection = next;
                     decoder = next_decoder;
+                    scheduler.reset();
+                    audio_sync_allowed = initial_audio;
                     decoder_generation = decoder_generation.saturating_add(1);
                     sequence = 0;
                     decoder_ready = false;
@@ -469,6 +556,8 @@ pub(crate) async fn run(
                     if let Some(previous_timestamp_us) = last_timestamp_us
                         && timestamp_us < previous_timestamp_us
                     {
+                        scheduler.reset();
+                        audio_sync_allowed = false;
                         tracing::warn!(
                             view_generation = generation,
                             decoder_generation,
@@ -516,29 +605,18 @@ pub(crate) async fn run(
                         decoder_generation,
                         sequence,
                     };
-                    let display = selection.display;
-                    let quarter_turns = selection.quarter_turns;
-                    let flip = selection.flip;
-                    let frame = tokio::task::spawn_blocking(move || {
-                        PlaybackFrame::from_video(decoded, identity, display, quarter_turns, flip)
-                    })
-                    .await??;
-                    let width = frame.display_width;
-                    let height = frame.display_height;
-                    frames.send_replace(Some(Arc::new(frame)));
-                    if !decoder_ready {
-                        decoder_ready = true;
-                        let _ = events
-                            .send(ViewEvent::DecoderReady {
-                                generation,
-                                path: path.clone(),
-                                decoder: decoder.name().to_owned(),
-                                width,
-                                height,
-                            })
-                            .await;
-                        }
-                    }
+                    scheduler.push(
+                        std::time::Duration::from_micros(timestamp_us.min(u128::from(u64::MAX)) as u64),
+                        PendingFrame {
+                            decoded,
+                            identity,
+                            display: selection.display,
+                            quarter_turns: selection.quarter_turns,
+                            flip: selection.flip,
+                        },
+                        std::time::Instant::now(),
+                    );
+                }
             }
         }
     }

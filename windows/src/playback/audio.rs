@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use tokio::{sync::mpsc, task::JoinHandle};
 
+use super::sync::{self, AudioAnchor, AudioClockReader, AudioClockWriter};
 use super::{
     AudioStats, ViewAudioPhase, ViewAudioSnapshot, ViewEvent, callback_consumed_nonzero,
     output_diagnostics, pcm_duration_us, pcm_has_nonzero_f32,
@@ -87,32 +88,30 @@ impl Playback {
     }
 }
 
-pub(super) struct Task(JoinHandle<()>);
+pub(super) struct Task {
+    task: JoinHandle<()>,
+    pub(super) clock: AudioClockReader,
+}
 
 impl Task {
     pub(super) fn spawn(
-        generation: u64,
-        path: &str,
         broadcast: &moq_tokio::moq_net::broadcast::Consumer,
         selection: &Selection,
-        events: &mpsc::Sender<ViewEvent>,
+        events: Events,
     ) -> Self {
         let broadcast = broadcast.clone();
         let selection = selection.clone();
-        let events = Events {
-            generation,
-            path: path.to_owned(),
-            sender: events.clone(),
-        };
-        Self(tokio::spawn(async move {
-            run(broadcast, selection, events).await;
-        }))
+        let (writer, clock) = sync::audio_clock();
+        let task = tokio::spawn(async move {
+            run(broadcast, selection, events, writer).await;
+        });
+        Self { task, clock }
     }
 }
 
 impl Drop for Task {
     fn drop(&mut self) {
-        self.0.abort();
+        self.task.abort();
     }
 }
 
@@ -120,6 +119,7 @@ async fn run(
     broadcast: moq_tokio::moq_net::broadcast::Consumer,
     selection: Selection,
     events: Events,
+    clock: AudioClockWriter,
 ) {
     let started_at = Instant::now();
     events
@@ -227,6 +227,7 @@ async fn run(
     reports.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     reports.tick().await;
     let mut callback_nonzero_observed = false;
+    let mut timeline = sync::AudioTimeline::default();
 
     loop {
         tokio::select! {
@@ -316,6 +317,21 @@ async fn run(
                     events.send(audio).await;
                     return;
                 }
+                let now = Instant::now();
+                let pts = Duration::from_micros(timestamp_us.min(u128::from(u64::MAX)) as u64);
+                let duration = Duration::from_micros(duration_us.min(u128::from(u64::MAX)) as u64);
+                if timeline.observe(pts, duration) {
+                    tracing::warn!(
+                        view_generation = events.generation,
+                        "audio PTS discontinuity; video uses latest frames until the audio task is replaced"
+                    );
+                }
+                let anchor = if timeline.is_continuous() {
+                    AudioAnchor::new(pts.saturating_add(duration), playback.sink.buffered(), now)
+                } else {
+                    None
+                };
+                clock.update(anchor);
                 if stats.wrote() {
                     let elapsed_ms = elapsed_ms(started_at);
                     tracing::info!(
@@ -401,13 +417,22 @@ fn log_interval(
     peak
 }
 
-struct Events {
+#[derive(Clone)]
+pub(super) struct Events {
     generation: u64,
     path: String,
     sender: mpsc::Sender<ViewEvent>,
 }
 
 impl Events {
+    pub(super) fn new(generation: u64, path: &str, sender: &mpsc::Sender<ViewEvent>) -> Self {
+        Self {
+            generation,
+            path: path.to_owned(),
+            sender: sender.clone(),
+        }
+    }
+
     async fn send(&self, audio: ViewAudioSnapshot) {
         let _ = self
             .sender
