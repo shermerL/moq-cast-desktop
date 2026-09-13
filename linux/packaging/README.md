@@ -30,7 +30,7 @@ MOQCAST_PACKAGE_DIR=/tmp/moqcast-package-2 ./scripts/build-appimage.sh
 
 - `MoQCast-<version>-linux-x86_64-<distribution>-glibc<version>.AppImage`
 - 对应的 SHA-256 文件
-- AppDir 内的 `build-info.txt` 和 `linked-libraries.txt`。`build-info.txt` 记录发行版、glibc、PipeWire 构建版本和首要验证目标。
+- AppDir 内的 `build-info.txt` 和 `linked-libraries.txt`。`build-info.txt` 记录源码提交、包变体、MoQ 与 vendored `moq-video` 基线，以及发行版、glibc、PipeWire 构建版本和首要验证目标。诊断导出中的构建身份在编译期读取同一份 `build-info.txt`，本地开发构建则保留 `local/unknown`。
 
 AppImage 包含应用和普通动态库，但不包含桌面会话服务、portal backend、PipeWire daemon 或 GPU 驱动。真机仍需安装并运行：
 
