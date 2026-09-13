@@ -1,6 +1,7 @@
 //! One Linux display capture published as the MoQCast screen broadcast.
 
 use moq_tokio::moq_net;
+use tokio::sync::watch;
 
 #[cfg(target_os = "linux")]
 use super::audio;
@@ -49,12 +50,14 @@ impl Publication {
     }
 
     /// Open the portal picker, capture the selected display, and publish H.264.
-    pub(crate) async fn run(self) -> anyhow::Result<()> {
+    pub(crate) async fn run(self, mut cancelled: watch::Receiver<bool>) -> anyhow::Result<()> {
         #[cfg(target_os = "linux")]
         {
             let mut capture = moq_video::capture::Config::default();
             capture.source = moq_video::capture::Source::Display(None);
             capture.framerate = Some(30);
+            let cleanup = moq_video::capture::cleanup::Owner::default();
+            capture.cleanup = Some(cleanup.handle());
 
             let mut encode = moq_video::encode::Options::default();
             encode.codec = moq_video::encode::Codec::H264;
@@ -62,24 +65,53 @@ impl Publication {
             encode.max_size = Some(moq_video::Size::new(1920, 1080));
             encode.bandwidth = self.bandwidth.clone();
             let clock = moq_mux::Clock::new();
-            let video = moq_video::encode::publish_capture(
-                self.broadcast.clone(),
-                self.catalog.clone(),
-                capture,
-                encode,
-                clock,
-            );
-            if self.system_audio {
-                let audio = audio::publish(self.broadcast.clone(), self.catalog.clone(), clock);
-                tokio::try_join!(async { video.await.map_err(anyhow::Error::from) }, audio)?;
-                Ok(())
-            } else {
-                video.await.map_err(Into::into)
+            let result = {
+                let media = async {
+                    let video = moq_video::encode::publish_capture(
+                        self.broadcast.clone(),
+                        self.catalog.clone(),
+                        capture,
+                        encode,
+                        clock,
+                    );
+                    if self.system_audio {
+                        let audio =
+                            audio::publish(self.broadcast.clone(), self.catalog.clone(), clock);
+                        tokio::try_join!(
+                            async { video.await.map_err(anyhow::Error::from) },
+                            audio
+                        )?;
+                        Ok(())
+                    } else {
+                        video.await.map_err(anyhow::Error::from)
+                    }
+                };
+                let stopped = *cancelled.borrow();
+                if stopped {
+                    Ok(())
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = cancelled.changed() => Ok(()),
+                        result = media => result,
+                    }
+                }
+            };
+            // Drop the media future before awaiting the parent-owned portal close.
+            let closed = cleanup.finish().await;
+            match (result, closed) {
+                (Err(error), Err(close)) => Err(anyhow::anyhow!("{error}; cleanup: {close}")),
+                (Err(error), Ok(())) => Err(error),
+                (Ok(()), Err(close)) => Err(anyhow::anyhow!(close)),
+                (Ok(()), Ok(())) => Ok(()),
             }
         }
 
         #[cfg(not(target_os = "linux"))]
-        unreachable!("non-Linux publication cannot be prepared")
+        {
+            let _ = &mut cancelled;
+            unreachable!("non-Linux publication cannot be prepared")
+        }
     }
 }
 
