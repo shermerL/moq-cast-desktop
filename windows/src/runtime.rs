@@ -367,6 +367,7 @@ struct PublicationOwner {
 struct ViewOwner {
     generation: u64,
     task: Option<tokio::task::JoinHandle<()>>,
+    cancel: Option<watch::Sender<bool>>,
     volume: Option<watch::Sender<u8>>,
 }
 
@@ -380,10 +381,12 @@ impl ViewOwner {
         frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
     ) {
         self.generation = generation;
+        let (cancel, cancel_rx) = watch::channel(false);
         let (volume, volume_rx) = watch::channel(DEFAULT_PLAYER_VOLUME_PERCENT);
+        self.cancel = Some(cancel);
         self.volume = Some(volume);
         self.task = Some(tokio::spawn(crate::playback::run(
-            generation, path, broadcast, events, frames, volume_rx,
+            generation, path, broadcast, events, frames, cancel_rx, volume_rx,
         )));
     }
 
@@ -401,14 +404,17 @@ impl ViewOwner {
     fn finished(&mut self, generation: u64) {
         if self.generation == generation {
             self.task = None;
+            self.cancel = None;
             self.volume = None;
         }
     }
 
     async fn stop(&mut self) {
         self.volume = None;
+        if let Some(cancel) = self.cancel.take() {
+            cancel.send_replace(true);
+        }
         if let Some(task) = self.task.take() {
-            task.abort();
             let _ = task.await;
         }
     }
@@ -826,11 +832,17 @@ async fn run(
                         snapshot.view.audio_changed(generation, &path, audio);
                     }
                     ViewEvent::Ended { generation, result } => {
-                        tracing::info!(
-                            view_generation = generation,
-                            failed = result.is_err(),
-                            "remote screen subscription ended"
-                        );
+                        match &result {
+                            Ok(()) => tracing::info!(
+                                view_generation = generation,
+                                "remote screen subscription ended"
+                            ),
+                            Err(error) => tracing::warn!(
+                                view_generation = generation,
+                                error = %error,
+                                "remote screen subscription failed"
+                            ),
+                        }
                         view.finished(generation);
                         playback.send_replace(None);
                         snapshot.view.ended(generation, result);
@@ -1730,6 +1742,7 @@ mod tests {
         let owner = ViewOwner {
             generation: 7,
             task: None,
+            cancel: None,
             volume: Some(volume),
         };
 
@@ -1737,6 +1750,32 @@ mod tests {
         assert_eq!(*current.borrow_and_update(), DEFAULT_PLAYER_VOLUME_PERCENT);
         assert!(owner.set_volume(7, 25));
         assert_eq!(*current.borrow_and_update(), 25);
+    }
+
+    #[tokio::test]
+    async fn stopping_view_signals_cancellation_and_awaits_teardown() {
+        let (cancel, mut canceled) = watch::channel(false);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let observed = stopped.clone();
+        let task = tokio::spawn(async move {
+            canceled
+                .wait_for(|cancelled| *cancelled)
+                .await
+                .expect("view cancellation sender retained");
+            observed.store(true, Ordering::SeqCst);
+        });
+        let mut owner = ViewOwner {
+            generation: 7,
+            task: Some(task),
+            cancel: Some(cancel),
+            volume: None,
+        };
+
+        owner.stop().await;
+
+        assert!(stopped.load(Ordering::SeqCst));
+        assert!(owner.task.is_none());
+        assert!(owner.cancel.is_none());
     }
 
     #[test]

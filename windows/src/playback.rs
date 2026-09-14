@@ -7,12 +7,16 @@ mod output_diagnostics;
 #[cfg(any(target_os = "windows", test))]
 mod sync;
 
+#[cfg(any(target_os = "windows", test))]
+use std::future::Future;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
 
 #[cfg(any(target_os = "windows", test))]
 const AV_LIVE_EDGE_BUDGET: std::time::Duration = std::time::Duration::from_millis(80);
+#[cfg(any(target_os = "windows", test))]
+const VIDEO_EVENT_CAPACITY: usize = 1;
 
 #[cfg(any(target_os = "windows", test))]
 fn video_max_age(has_playable_audio: bool) -> std::time::Duration {
@@ -207,6 +211,102 @@ pub(crate) enum ViewEvent {
 }
 
 #[cfg(any(target_os = "windows", test))]
+#[derive(Debug)]
+struct VideoUpdate<T> {
+    generation: u64,
+    event: T,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn accept_video_update<T>(generation: u64, update: VideoUpdate<T>) -> Option<T> {
+    (update.generation == generation).then_some(update.event)
+}
+
+#[cfg(any(target_os = "windows", test))]
+struct VideoTask {
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+trait VideoReader: Send + 'static {
+    type Frame: Send + 'static;
+
+    fn read(&mut self) -> impl Future<Output = Result<Option<Self::Frame>, String>> + Send;
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl VideoTask {
+    fn spawn<R>(
+        generation: u64,
+        mut reader: R,
+        updates: &mpsc::Sender<VideoUpdate<VideoEvent<R::Frame>>>,
+    ) -> Self
+    where
+        R: VideoReader,
+    {
+        let updates = updates.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                let event = match reader.read().await {
+                    Ok(Some(frame)) => VideoEvent::Frame(frame),
+                    Ok(None) => VideoEvent::Ended,
+                    Err(error) => VideoEvent::Failed(error),
+                };
+                let terminal = !matches!(&event, VideoEvent::Frame(_));
+                if updates
+                    .send(VideoUpdate { generation, event })
+                    .await
+                    .is_err()
+                    || terminal
+                {
+                    return;
+                }
+            }
+        });
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    async fn stop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl Drop for VideoTask {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug)]
+enum VideoEvent<T> {
+    Frame(T),
+    Ended,
+    Failed(String),
+}
+
+#[cfg(target_os = "windows")]
+impl VideoReader for moq_video::decode::Consumer {
+    type Frame = moq_video::Frame;
+
+    fn read(&mut self) -> impl Future<Output = Result<Option<Self::Frame>, String>> + Send {
+        async move {
+            moq_video::decode::Consumer::read(self)
+                .await
+                .map_err(|error| error.to_string())
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct AudioStatsReport {
     decoded_frames: u64,
@@ -369,6 +469,27 @@ struct PendingFrame {
     flip: bool,
 }
 
+#[cfg(any(target_os = "windows", test))]
+async fn wait_for_cancel(cancel: &mut watch::Receiver<bool>) {
+    if *cancel.borrow() {
+        return;
+    }
+    let _ = cancel.wait_for(|cancelled| *cancelled).await;
+}
+
+#[cfg(any(target_os = "windows", test))]
+async fn send_unless_cancelled<T: Send>(
+    cancel: &mut watch::Receiver<bool>,
+    events: &mpsc::Sender<T>,
+    event: T,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = wait_for_cancel(cancel) => false,
+        result = events.send(event) => result.is_ok(),
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) async fn run(
     generation: u64,
@@ -376,24 +497,36 @@ pub(crate) async fn run(
     broadcast: moq_tokio::moq_net::broadcast::Consumer,
     events: mpsc::Sender<ViewEvent>,
     frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
+    mut cancel: watch::Receiver<bool>,
     volume: watch::Receiver<u8>,
 ) {
     use moq_mux::catalog::Stream;
 
     let result = async {
-        let mut catalog = moq_mux::catalog::Consumer::<()>::new(
-            &broadcast,
-            moq_mux::catalog::CatalogFormat::Hang,
-        )
-        .await?;
-        let first = catalog
-            .next()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("remote screen catalog ended"))?;
+        let mut catalog = tokio::select! {
+            biased;
+            _ = wait_for_cancel(&mut cancel) => return Ok(()),
+            catalog = moq_mux::catalog::Consumer::<()>::new(
+                &broadcast,
+                moq_mux::catalog::CatalogFormat::Hang,
+            ) => catalog?,
+        };
+        let first = tokio::select! {
+            biased;
+            _ = wait_for_cancel(&mut cancel) => return Ok(()),
+            first = catalog.next() => first?
+                .ok_or_else(|| anyhow::anyhow!("remote screen catalog ended"))?,
+        };
         let mut selection = Selection::from_catalog(first)?;
         let initial_audio = matches!(selection.audio, audio::Selection::Playable { .. });
         let video_max_age = video_max_age(initial_audio);
-        let mut decoder = selection.decoder(&broadcast, video_max_age).await?;
+        let decoder = tokio::select! {
+            biased;
+            _ = wait_for_cancel(&mut cancel) => return Ok(()),
+            decoder = selection.decoder(&broadcast, video_max_age) => decoder?,
+        };
+        let mut decoder_name = decoder.name().to_owned();
+        let (video_updates_tx, mut video_updates_rx) = mpsc::channel(VIDEO_EVENT_CAPACITY);
         let audio_events = audio::Events::new(generation, &path, &events);
         let mut audio_task = audio::Task::spawn(
             &broadcast,
@@ -409,6 +542,11 @@ pub(crate) async fn run(
         reports.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         reports.tick().await;
         let mut decoder_generation = 1_u64;
+        let mut video_task = Some(VideoTask::spawn(
+            decoder_generation,
+            decoder,
+            &video_updates_tx,
+        ));
         let mut sequence = 0_u64;
         let mut decoder_ready = false;
         let mut last_timestamp_us = None;
@@ -416,12 +554,13 @@ pub(crate) async fn run(
         tracing::info!(
             view_generation = generation,
             decoder_generation,
-            decoder = decoder.name(),
+            decoder = %decoder_name,
             track = %selection.name,
             "remote video decoder opened"
         );
 
-        loop {
+        let loop_result: anyhow::Result<()> = async {
+            loop {
             let anchor = if audio_sync_allowed {
                 audio_task.clock.anchor()
             } else {
@@ -453,18 +592,26 @@ pub(crate) async fn run(
                 frames.send_replace(Some(Arc::new(frame)));
                 if !decoder_ready {
                     decoder_ready = true;
-                    let _ = events
-                        .send(ViewEvent::DecoderReady {
+                    let sent = send_unless_cancelled(
+                        &mut cancel,
+                        &events,
+                        ViewEvent::DecoderReady {
                             generation,
                             path: path.clone(),
-                            decoder: decoder.name().to_owned(),
+                            decoder: decoder_name.clone(),
                             width,
                             height,
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
+                    if !sent {
+                        break Ok(());
+                    }
                 }
             }
             tokio::select! {
+                biased;
+                _ = wait_for_cancel(&mut cancel) => break Ok(()),
                 _ = async {
                     match advance.deadline {
                         Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
@@ -537,9 +684,20 @@ pub(crate) async fn run(
                         selection = next;
                         continue;
                     }
-                    let next_decoder = next.decoder(&broadcast, video_max_age).await?;
+                    if let Some(task) = &mut video_task {
+                        task.stop().await;
+                    }
+                    video_task = None;
+                    let next_decoder = tokio::select! {
+                        biased;
+                        _ = wait_for_cancel(&mut cancel) => None,
+                        decoder = next.decoder(&broadcast, video_max_age) => Some(decoder?),
+                    };
+                    let Some(next_decoder) = next_decoder else {
+                        break Ok(());
+                    };
                     selection = next;
-                    decoder = next_decoder;
+                    decoder_name = next_decoder.name().to_owned();
                     scheduler.reset();
                     audio_sync_allowed = initial_audio;
                     decoder_generation = decoder_generation.saturating_add(1);
@@ -549,14 +707,27 @@ pub(crate) async fn run(
                     tracing::info!(
                         view_generation = generation,
                         decoder_generation,
-                        decoder = decoder.name(),
+                        decoder = %decoder_name,
                         track = %selection.name,
                         "remote video decoder rebuilt after catalog change"
                     );
+                    video_task = Some(VideoTask::spawn(
+                        decoder_generation,
+                        next_decoder,
+                        &video_updates_tx,
+                    ));
                 }
-                decoded = decoder.read() => {
-                    let Some(decoded) = decoded? else {
-                        anyhow::bail!("remote screen video track ended");
+                update = video_updates_rx.recv() => {
+                    let Some(update) = update else {
+                        anyhow::bail!("remote video decoder task ended without a terminal update");
+                    };
+                    let Some(update) = accept_video_update(decoder_generation, update) else {
+                        continue;
+                    };
+                    let decoded = match update {
+                        VideoEvent::Frame(frame) => frame,
+                        VideoEvent::Ended => anyhow::bail!("remote screen video track ended"),
+                        VideoEvent::Failed(error) => anyhow::bail!(error),
                     };
                     sequence = sequence.saturating_add(1);
                     let timestamp_us = decoded.timestamp.as_micros();
@@ -571,7 +742,7 @@ pub(crate) async fn run(
                             sequence,
                             previous_pts_us = %previous_timestamp_us,
                             frame_pts_us = %timestamp_us,
-                            decoder = decoder.name(),
+                            decoder = %decoder_name,
                             "decoded video PTS regressed; mux discontinuity is not exposed by moq-video"
                         );
                     }
@@ -588,7 +759,7 @@ pub(crate) async fn run(
                             frame_pts_us = %timestamp_us,
                             view_high_water_pts_us = %view_high_water_timestamp_us.unwrap_or_default(),
                             behind_high_water_us = %behind_high_water_us,
-                            decoder = decoder.name(),
+                            decoder = %decoder_name,
                             "decoded video remains behind the view PTS high-water mark"
                         );
                     }
@@ -603,7 +774,7 @@ pub(crate) async fn run(
                             decoder_generation,
                             sequence,
                             frame_pts_us = %timestamp_us,
-                            decoder = decoder.name(),
+                            decoder = %decoder_name,
                             "decoded remote video frame"
                         );
                     }
@@ -625,12 +796,23 @@ pub(crate) async fn run(
                     );
                 }
             }
+            }
         }
+        .await;
+        if let Some(mut task) = video_task.take() {
+            task.stop().await;
+        }
+        loop_result
     }
     .await
     .map_err(|error: anyhow::Error| error.to_string());
 
-    let _ = events.send(ViewEvent::Ended { generation, result }).await;
+    let _ = send_unless_cancelled(
+        &mut cancel,
+        &events,
+        ViewEvent::Ended { generation, result },
+    )
+    .await;
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -640,6 +822,7 @@ pub(crate) async fn run(
     _broadcast: moq_tokio::moq_net::broadcast::Consumer,
     events: mpsc::Sender<ViewEvent>,
     _frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
+    _cancel: watch::Receiver<bool>,
     _volume: watch::Receiver<u8>,
 ) {
     let _ = events
@@ -749,12 +932,196 @@ fn orient_rgba(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
     use super::*;
+
+    struct InFlightRead {
+        completed: bool,
+        canceled: Arc<AtomicBool>,
+    }
+
+    impl Drop for InFlightRead {
+        fn drop(&mut self) {
+            if !self.completed {
+                self.canceled.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    struct ControlledReader {
+        next: u8,
+        last: u8,
+        started: mpsc::Sender<u8>,
+        release: mpsc::Receiver<()>,
+        canceled: Arc<AtomicBool>,
+    }
+
+    impl VideoReader for ControlledReader {
+        type Frame = u8;
+
+        fn read(&mut self) -> impl Future<Output = Result<Option<Self::Frame>, String>> + Send {
+            async move {
+                if self.next > self.last {
+                    return Ok(None);
+                }
+                let event = self.next;
+                self.next = self.next.saturating_add(1);
+                let mut read = InFlightRead {
+                    completed: false,
+                    canceled: self.canceled.clone(),
+                };
+                self.started
+                    .send(event)
+                    .await
+                    .map_err(|_| "read observer closed".to_owned())?;
+                self.release
+                    .recv()
+                    .await
+                    .ok_or_else(|| "read release closed".to_owned())?;
+                read.completed = true;
+                Ok(Some(event))
+            }
+        }
+    }
 
     #[test]
     fn audio_video_share_80ms_and_video_only_skips_stale_groups() {
         assert_eq!(video_max_age(true), std::time::Duration::from_millis(80));
         assert_eq!(video_max_age(false), std::time::Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn control_events_do_not_cancel_continuous_owned_reads() {
+        let canceled = Arc::new(AtomicBool::new(false));
+        let observed = canceled.clone();
+        let (started_tx, mut started_rx) = mpsc::channel(1);
+        let (release_tx, release_rx) = mpsc::channel(1);
+        let (updates_tx, mut updates_rx) = mpsc::channel(1);
+        let mut task = VideoTask::spawn(
+            7,
+            ControlledReader {
+                next: 41,
+                last: 42,
+                started: started_tx,
+                release: release_rx,
+                canceled: observed,
+            },
+            &updates_tx,
+        );
+
+        let (control_tx, mut control_rx) = mpsc::channel(1);
+        for expected in [41_u8, 42_u8] {
+            assert_eq!(started_rx.recv().await, Some(expected));
+            control_tx.send(()).await.expect("control event queued");
+            tokio::select! {
+                event = control_rx.recv() => assert_eq!(event, Some(())),
+                update = updates_rx.recv() => panic!("read completed before release: {update:?}"),
+            }
+            assert!(!canceled.load(Ordering::SeqCst));
+
+            release_tx.send(()).await.expect("release owned read");
+            let update = tokio::time::timeout(std::time::Duration::from_secs(1), updates_rx.recv())
+                .await
+                .expect("owned read completion timed out")
+                .expect("owned read update channel closed");
+            assert!(matches!(
+                accept_video_update(7, update),
+                Some(VideoEvent::Frame(event)) if event == expected
+            ));
+            assert!(!canceled.load(Ordering::SeqCst));
+        }
+
+        task.stop().await;
+    }
+
+    #[tokio::test]
+    async fn stopping_an_owned_read_awaits_teardown_and_replacement_is_generation_scoped() {
+        let canceled = Arc::new(AtomicBool::new(false));
+        let observed = canceled.clone();
+        let (started_tx, mut started_rx) = mpsc::channel(1);
+        let (_release_tx, release_rx) = mpsc::channel(1);
+        let (old_updates_tx, _old_updates_rx) = mpsc::channel(1);
+        let mut task = VideoTask::spawn(
+            7,
+            ControlledReader {
+                next: 7,
+                last: 7,
+                started: started_tx,
+                release: release_rx,
+                canceled: observed,
+            },
+            &old_updates_tx,
+        );
+        assert_eq!(started_rx.recv().await, Some(7));
+
+        task.stop().await;
+        assert!(canceled.load(Ordering::SeqCst));
+
+        let (updates_tx, mut updates_rx) = mpsc::channel(2);
+        updates_tx
+            .send(VideoUpdate {
+                generation: 7,
+                event: VideoEvent::Frame(7_u8),
+            })
+            .await
+            .expect("queue stale completion");
+        let (replacement_started_tx, mut replacement_started_rx) = mpsc::channel(1);
+        let (replacement_release_tx, replacement_release_rx) = mpsc::channel(1);
+        let replacement_canceled = Arc::new(AtomicBool::new(false));
+        let mut replacement = VideoTask::spawn(
+            8,
+            ControlledReader {
+                next: 8,
+                last: 8,
+                started: replacement_started_tx,
+                release: replacement_release_rx,
+                canceled: replacement_canceled.clone(),
+            },
+            &updates_tx,
+        );
+        assert_eq!(replacement_started_rx.recv().await, Some(8));
+        replacement_release_tx
+            .send(())
+            .await
+            .expect("release replacement read");
+
+        let stale = updates_rx.recv().await.expect("stale completion queued");
+        assert!(accept_video_update(8, stale).is_none());
+        let current = updates_rx
+            .recv()
+            .await
+            .expect("replacement completion queued");
+        assert!(matches!(
+            accept_video_update(8, current),
+            Some(VideoEvent::Frame(8))
+        ));
+        assert!(!replacement_canceled.load(Ordering::SeqCst));
+
+        replacement.stop().await;
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_a_terminal_notification_blocked_by_a_full_queue() {
+        let (events, _events_rx) = mpsc::channel(1);
+        events.send(1_u8).await.expect("fill event queue");
+        let (cancel, mut canceled) = watch::channel(false);
+        let mut send = Box::pin(send_unless_cancelled(&mut canceled, &events, 2_u8));
+        std::future::poll_fn(|context| {
+            assert!(send.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+
+        cancel.send_replace(true);
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(1), send)
+            .await
+            .expect("terminal notification remained blocked");
+
+        assert!(!sent);
     }
 
     #[test]
