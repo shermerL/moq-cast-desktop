@@ -297,12 +297,10 @@ enum VideoEvent<T> {
 impl VideoReader for moq_video::decode::Consumer {
     type Frame = moq_video::Frame;
 
-    fn read(&mut self) -> impl Future<Output = Result<Option<Self::Frame>, String>> + Send {
-        async move {
-            moq_video::decode::Consumer::read(self)
-                .await
-                .map_err(|error| error.to_string())
-        }
+    async fn read(&mut self) -> Result<Option<Self::Frame>, String> {
+        moq_video::decode::Consumer::read(self)
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -963,28 +961,26 @@ mod tests {
     impl VideoReader for ControlledReader {
         type Frame = u8;
 
-        fn read(&mut self) -> impl Future<Output = Result<Option<Self::Frame>, String>> + Send {
-            async move {
-                if self.next > self.last {
-                    return Ok(None);
-                }
-                let event = self.next;
-                self.next = self.next.saturating_add(1);
-                let mut read = InFlightRead {
-                    completed: false,
-                    canceled: self.canceled.clone(),
-                };
-                self.started
-                    .send(event)
-                    .await
-                    .map_err(|_| "read observer closed".to_owned())?;
-                self.release
-                    .recv()
-                    .await
-                    .ok_or_else(|| "read release closed".to_owned())?;
-                read.completed = true;
-                Ok(Some(event))
+        async fn read(&mut self) -> Result<Option<Self::Frame>, String> {
+            if self.next > self.last {
+                return Ok(None);
             }
+            let event = self.next;
+            self.next = self.next.saturating_add(1);
+            let mut read = InFlightRead {
+                completed: false,
+                canceled: self.canceled.clone(),
+            };
+            self.started
+                .send(event)
+                .await
+                .map_err(|_| "read observer closed".to_owned())?;
+            self.release
+                .recv()
+                .await
+                .ok_or_else(|| "read release closed".to_owned())?;
+            read.completed = true;
+            Ok(Some(event))
         }
     }
 
