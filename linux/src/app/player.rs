@@ -232,7 +232,7 @@ impl LivePlayer {
                 ui.centered_and_justified(|ui| ui.spinner());
             });
         }
-        if controls_visible {
+        let volume_active = if controls_visible {
             player_toolbar_at(ui, rects.toolbar, |ui| {
                 show_controls(
                     ui,
@@ -243,8 +243,14 @@ impl LivePlayer {
                     fullscreen,
                     &mut self.volume,
                     &mut action,
-                );
-            });
+                )
+            })
+        } else {
+            false
+        };
+        if fullscreen && volume_active {
+            self.controls_last_active = now;
+            ui.ctx().request_repaint();
         }
 
         action
@@ -260,7 +266,7 @@ fn show_controls(
     fullscreen: bool,
     volume: &mut PlayerVolumeState,
     action: &mut Option<PlayerAction>,
-) {
+) -> bool {
     let row_layout = control_layout(ui.available_width(), mode.viewing());
     let (row, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), Size::CONTROL),
@@ -309,6 +315,7 @@ fn show_controls(
             );
         });
     });
+    let mut volume_active = false;
     ui.scope_builder(egui::UiBuilder::new().max_rect(actions), |ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let enabled = !mode.stopping();
@@ -344,7 +351,7 @@ fn show_controls(
                 }
                 *action = Some(PlayerAction::StopWatching);
             }
-            if let Some(percent) = player_volume_control(
+            let volume_response = player_volume_control(
                 ui,
                 volume,
                 audio_playable(mode.audio().phase) && enabled,
@@ -352,7 +359,9 @@ fn show_controls(
                 locale.unmute(),
                 locale.playback_volume(),
                 locale.playback_audio_unavailable(),
-            ) {
+            );
+            volume_active = volume_response.active();
+            if let Some(percent) = volume_response.changed_percent() {
                 *action = Some(PlayerAction::SetVolume {
                     generation: view_generation,
                     percent,
@@ -360,6 +369,7 @@ fn show_controls(
             }
         });
     });
+    volume_active
 }
 
 fn audio_playable(phase: RemoteAudioPhase) -> bool {

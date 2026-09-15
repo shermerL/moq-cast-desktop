@@ -1,15 +1,23 @@
 use egui::{
-    Align, CornerRadius, Layout, Rect, Response, Sense, Slider, Ui, UiBuilder, WidgetInfo,
-    WidgetType, pos2, vec2,
+    Align, Color32, CornerRadius, Layout, Rect, RectAlign, Response, Sense, Shape, Slider, Stroke,
+    Tooltip, Ui, UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
 };
 
-use crate::{COLORS, IconButtonSpec, Radius, Size, Spacing, player_icon_button};
+use crate::{COLORS, ControlRole, Radius, Size, Spacing};
+
+use super::common::{color, paint_focus, paint_surface, pointing_hand, resolve, sense};
 
 /// Default volume for every new remote playback session.
 pub const DEFAULT_PLAYER_VOLUME_PERCENT: u8 = 100;
 
 /// Stable width of the mute button and volume slider in a player toolbar.
 pub const PLAYER_VOLUME_CONTROL_WIDTH: f32 = 132.0;
+
+const PLAYER_VOLUME_SLIDER_WIDTH: f32 = 84.0;
+const PLAYER_VOLUME_RAIL_HEIGHT: f32 = 4.0;
+const PLAYER_VOLUME_THUMB_RADIUS: f32 = 6.0;
+const PLAYER_VOLUME_THUMB_RING_RADIUS: f32 = 9.0;
+const PLAYER_VOLUME_ICON_SIZE: f32 = 20.0;
 
 /// Session-scoped player volume, including the value restored after unmuting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +83,32 @@ impl PlayerVolumeState {
     }
 }
 
+/// Interaction result from one player volume control render.
+#[derive(Clone, Copy, Debug)]
+#[must_use]
+pub struct PlayerVolumeResponse {
+    changed_percent: Option<u8>,
+    active: bool,
+    #[cfg(test)]
+    mute_rect: Rect,
+    #[cfg(test)]
+    slider_rect: Rect,
+    #[cfg(test)]
+    slider_id: egui::Id,
+}
+
+impl PlayerVolumeResponse {
+    /// Returns a new percentage when mute or slider input changed the volume.
+    pub fn changed_percent(self) -> Option<u8> {
+        self.changed_percent
+    }
+
+    /// Returns whether the control is hovered, focused, or being dragged.
+    pub fn active(self) -> bool {
+        self.active
+    }
+}
+
 /// Renders a fixed-width mute button and volume slider for a player toolbar.
 pub fn player_volume_control(
     ui: &mut Ui,
@@ -84,7 +118,7 @@ pub fn player_volume_control(
     unmute_label: &str,
     volume_label: &str,
     unavailable_label: &str,
-) -> Option<u8> {
+) -> PlayerVolumeResponse {
     let (rect, _) = ui.allocate_exact_size(
         vec2(PLAYER_VOLUME_CONTROL_WIDTH, Size::CONTROL),
         Sense::hover(),
@@ -95,9 +129,6 @@ pub fn player_volume_control(
             .layout(Layout::left_to_right(Align::Center)),
     );
     child.spacing_mut().item_spacing.x = Size::PLAYER_TOOLBAR_ITEM_SPACING;
-    child.spacing_mut().slider_width =
-        PLAYER_VOLUME_CONTROL_WIDTH - Size::CONTROL - Size::PLAYER_TOOLBAR_ITEM_SPACING;
-    child.visuals_mut().selection.bg_fill = COLORS.brand.into();
 
     let mut changed = None;
     let muted = state.muted();
@@ -106,37 +137,203 @@ pub fn player_volume_control(
     } else {
         unavailable_label
     };
-    let mute = player_icon_button(
-        &mut child,
-        IconButtonSpec::player(if muted { "🔇" } else { "🔊" }, mute_accessible_label)
-            .enabled(enabled)
-            .selected(muted),
-    );
+    let mute = child
+        .add_enabled_ui(enabled, |ui| {
+            player_volume_icon_button(ui, muted, mute_accessible_label)
+        })
+        .inner;
     let mute_clicked = mute.clicked();
-    mute.on_hover_text(mute_accessible_label);
+    let mute_active =
+        mute.contains_pointer() || mute.has_focus() || mute.is_pointer_button_down_on();
+    if enabled {
+        mute.clone().on_hover_text(mute_accessible_label);
+    } else {
+        mute.clone().on_disabled_hover_text(unavailable_label);
+    }
     if mute_clicked {
         changed = Some(state.toggle_mute());
     }
 
     let mut percent = state.percent();
-    let slider = Slider::new(&mut percent, 0..=100)
-        .show_value(false)
-        .step_by(1.0)
-        .trailing_fill(true);
-    let slider = child.add_enabled(enabled, slider);
-    slider.widget_info(|| WidgetInfo::labeled(WidgetType::Slider, enabled, volume_label));
+    let slider = child
+        .add_enabled_ui(enabled, |ui| {
+            player_volume_slider(ui, &mut percent, volume_label)
+        })
+        .inner;
     let slider_changed = slider.changed();
-    let slider_hint = if enabled {
-        format!("{volume_label}: {percent}%")
-    } else {
-        unavailable_label.to_owned()
-    };
-    slider.on_hover_text(slider_hint);
+    let slider_active =
+        slider.contains_pointer() || slider.has_focus() || slider.is_pointer_button_down_on();
+    if enabled && slider_active {
+        let mut tooltip = Tooltip::for_widget(&slider);
+        tooltip.popup = tooltip.popup.align(RectAlign::TOP);
+        tooltip.show(|ui| {
+            ui.label(format!("{percent}%"));
+        });
+    } else if !enabled {
+        slider.clone().on_disabled_hover_text(unavailable_label);
+    }
     if slider_changed && state.set_percent(percent) {
         changed = Some(state.percent());
     }
 
-    changed
+    PlayerVolumeResponse {
+        changed_percent: changed,
+        active: mute_active || slider_active,
+        #[cfg(test)]
+        mute_rect: mute.rect,
+        #[cfg(test)]
+        slider_rect: slider.rect,
+        #[cfg(test)]
+        slider_id: slider.id,
+    }
+}
+
+fn player_volume_icon_button(ui: &mut Ui, muted: bool, accessible_label: &str) -> Response {
+    let enabled = ui.is_enabled();
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(Size::CONTROL, Size::CONTROL), sense(enabled));
+    let response = pointing_hand(response, enabled);
+    let (interaction, visual) = resolve(&response, ControlRole::PlayerIcon, enabled, false, None);
+    paint_surface(ui, rect, visual, Radius::MD as u8);
+    paint_speaker_icon(
+        ui,
+        Rect::from_center_size(
+            rect.center(),
+            vec2(PLAYER_VOLUME_ICON_SIZE, PLAYER_VOLUME_ICON_SIZE),
+        ),
+        muted,
+        color(visual.text, visual.opacity),
+    );
+    paint_focus(ui, rect, &response, interaction, Radius::MD);
+    response
+        .widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, muted, accessible_label));
+    response
+}
+
+fn paint_speaker_icon(ui: &Ui, rect: Rect, muted: bool, icon_color: Color32) {
+    let center = rect.center();
+    let body = vec![
+        pos2(center.x - 9.0, center.y - 3.0),
+        pos2(center.x - 5.0, center.y - 3.0),
+        pos2(center.x, center.y - 7.0),
+        pos2(center.x, center.y + 7.0),
+        pos2(center.x - 5.0, center.y + 3.0),
+        pos2(center.x - 9.0, center.y + 3.0),
+    ];
+    let stroke = Stroke::new(1.8, icon_color);
+    ui.painter().add(Shape::closed_line(body, stroke));
+    if muted {
+        ui.painter().line_segment(
+            [
+                pos2(center.x + 3.0, center.y - 4.0),
+                pos2(center.x + 9.0, center.y + 4.0),
+            ],
+            stroke,
+        );
+        ui.painter().line_segment(
+            [
+                pos2(center.x + 9.0, center.y - 4.0),
+                pos2(center.x + 3.0, center.y + 4.0),
+            ],
+            stroke,
+        );
+        return;
+    }
+
+    let wave = (0..=8)
+        .map(|step| {
+            let angle = -0.85 + 1.7 * step as f32 / 8.0;
+            pos2(center.x + angle.cos() * 8.0, center.y + angle.sin() * 8.0)
+        })
+        .collect();
+    ui.painter().add(Shape::line(wave, stroke));
+}
+
+fn player_volume_slider(ui: &mut Ui, percent: &mut u8, accessible_label: &str) -> Response {
+    let enabled = ui.is_enabled();
+    let response = ui
+        .scope(|ui| {
+            ui.spacing_mut().slider_width = PLAYER_VOLUME_SLIDER_WIDTH;
+            ui.spacing_mut().slider_rail_height = PLAYER_VOLUME_RAIL_HEIGHT;
+            ui.spacing_mut().interact_size.y = Size::CONTROL;
+            ui.visuals_mut().selection.bg_fill = COLORS.brand.into();
+            let widgets = &mut ui.visuals_mut().widgets;
+            for visual in [
+                &mut widgets.inactive,
+                &mut widgets.hovered,
+                &mut widgets.active,
+            ] {
+                visual.bg_fill = COLORS.player_bar.into();
+                visual.fg_stroke = Stroke::NONE;
+            }
+            ui.add(
+                Slider::new(percent, 0..=100)
+                    .show_value(false)
+                    .step_by(1.0)
+                    .trailing_fill(true)
+                    .handle_shape(egui::style::HandleShape::Rect {
+                        aspect_ratio: 0.375,
+                    }),
+            )
+        })
+        .inner;
+
+    response.widget_info(|| WidgetInfo::slider(enabled, *percent as f64, accessible_label));
+    paint_player_volume_slider(ui, response.rect, &response, *percent, enabled);
+    response
+}
+
+fn paint_player_volume_slider(
+    ui: &Ui,
+    rect: Rect,
+    response: &Response,
+    percent: u8,
+    enabled: bool,
+) {
+    let opacity = if enabled { 1.0 } else { Size::DISABLED_ALPHA };
+    let rail = Rect::from_center_size(
+        rect.center(),
+        vec2(PLAYER_VOLUME_SLIDER_WIDTH, PLAYER_VOLUME_RAIL_HEIGHT),
+    );
+    let thumb_x = rect.left()
+        + PLAYER_VOLUME_THUMB_RADIUS
+        + (rect.width() - PLAYER_VOLUME_THUMB_RADIUS * 2.0) * percent as f32 / 100.0;
+    let thumb_center = pos2(thumb_x, rect.center().y);
+    let remaining = Color32::from(COLORS.player_muted).gamma_multiply(0.32 * opacity);
+    let fill = Color32::from(COLORS.brand).gamma_multiply(opacity);
+    let thumb = Color32::from(if enabled {
+        COLORS.player_text
+    } else {
+        COLORS.player_muted
+    })
+    .gamma_multiply(opacity);
+
+    ui.painter()
+        .rect_filled(rail, CornerRadius::same(2), remaining);
+    let fill_width = player_volume_fill_width(percent, enabled);
+    if fill_width > 0.0 {
+        let fill_end = rail.left() + fill_width;
+        let filled = Rect::from_min_max(rail.min, pos2(fill_end, rail.max.y));
+        ui.painter()
+            .rect_filled(filled, CornerRadius::same(2), fill);
+    }
+    if enabled && (response.has_focus() || response.is_pointer_button_down_on()) {
+        ui.painter().circle_stroke(
+            thumb_center,
+            PLAYER_VOLUME_THUMB_RING_RADIUS,
+            Stroke::new(Size::FOCUS, COLORS.brand),
+        );
+    }
+    ui.painter()
+        .circle_filled(thumb_center, PLAYER_VOLUME_THUMB_RADIUS, thumb);
+}
+
+fn player_volume_fill_width(percent: u8, enabled: bool) -> f32 {
+    if enabled {
+        PLAYER_VOLUME_SLIDER_WIDTH * percent.min(100) as f32 / 100.0
+    } else {
+        0.0
+    }
 }
 
 /// Stable stage and bottom-toolbar rectangles for one player surface.
@@ -290,6 +487,56 @@ pub fn player_toolbar_at<R>(ui: &mut Ui, rect: Rect, content: impl FnOnce(&mut U
 mod tests {
     use super::*;
 
+    fn pointer_input(pos: egui::Pos2, pressed: bool) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn key_input(key: egui::Key) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn render_volume_fixture(
+        context: &egui::Context,
+        input: egui::RawInput,
+        state: &mut PlayerVolumeState,
+        enabled: bool,
+    ) -> PlayerVolumeResponse {
+        let mut output = None;
+        let frame = context.run_ui(input, |ui| {
+            output = Some(player_volume_control(
+                ui,
+                state,
+                enabled,
+                "Mute",
+                "Unmute",
+                "Playback volume",
+                "No playable audio",
+            ));
+        });
+        frame.drop_without_applying_deltas();
+        output.expect("volume fixture renders")
+    }
+
     #[test]
     fn player_volume_restores_the_last_nonzero_value_after_unmuting() {
         let mut volume = PlayerVolumeState::default();
@@ -320,6 +567,85 @@ mod tests {
         assert!(volume.sync_generation(5));
         assert_eq!(volume.percent(), DEFAULT_PLAYER_VOLUME_PERCENT);
         assert!(!volume.muted());
+    }
+
+    #[test]
+    fn player_volume_keeps_fixed_button_gap_and_slider_hit_areas() {
+        let context = egui::Context::default();
+        let mut volume = PlayerVolumeState::default();
+        let output = render_volume_fixture(&context, egui::RawInput::default(), &mut volume, true);
+
+        assert_eq!(output.mute_rect.size(), vec2(Size::CONTROL, Size::CONTROL));
+        assert_eq!(
+            output.slider_rect.size(),
+            vec2(PLAYER_VOLUME_SLIDER_WIDTH, Size::CONTROL)
+        );
+        assert_eq!(
+            output.slider_rect.left() - output.mute_rect.right(),
+            Size::PLAYER_TOOLBAR_ITEM_SPACING
+        );
+        assert_eq!(
+            output.slider_rect.right() - output.mute_rect.left(),
+            PLAYER_VOLUME_CONTROL_WIDTH
+        );
+    }
+
+    #[test]
+    fn player_volume_drag_updates_integer_percent_and_reports_activity() {
+        let context = egui::Context::default();
+        let mut volume = PlayerVolumeState::default();
+        let initial = render_volume_fixture(&context, egui::RawInput::default(), &mut volume, true);
+        let pointer = pos2(
+            initial.slider_rect.center().x,
+            initial.slider_rect.center().y,
+        );
+        let dragged =
+            render_volume_fixture(&context, pointer_input(pointer, true), &mut volume, true);
+
+        assert_eq!(dragged.changed_percent(), Some(50));
+        assert_eq!(volume.percent(), 50);
+        assert!(dragged.active());
+    }
+
+    #[test]
+    fn focused_player_volume_keeps_native_arrow_adjustment_and_activity() {
+        let context = egui::Context::default();
+        let mut volume = PlayerVolumeState::default();
+        let initial = render_volume_fixture(&context, egui::RawInput::default(), &mut volume, true);
+        context.memory_mut(|memory| memory.request_focus(initial.slider_id));
+        let focused =
+            render_volume_fixture(&context, key_input(egui::Key::ArrowLeft), &mut volume, true);
+
+        assert_eq!(focused.changed_percent(), Some(99));
+        assert_eq!(volume.percent(), 99);
+        assert!(focused.active());
+    }
+
+    #[test]
+    fn disabled_player_volume_keeps_geometry_without_accepting_input() {
+        let context = egui::Context::default();
+        let mut volume = PlayerVolumeState::default();
+        volume.set_percent(64);
+        let initial =
+            render_volume_fixture(&context, egui::RawInput::default(), &mut volume, false);
+        let pointer = initial.slider_rect.center();
+        let disabled =
+            render_volume_fixture(&context, pointer_input(pointer, true), &mut volume, false);
+
+        assert_eq!(disabled.changed_percent(), None);
+        assert_eq!(volume.percent(), 64);
+        assert!(disabled.active());
+        assert_eq!(disabled.slider_rect, initial.slider_rect);
+    }
+
+    #[test]
+    fn player_volume_fill_has_exact_zero_full_and_disabled_boundaries() {
+        assert_eq!(player_volume_fill_width(0, true), 0.0);
+        assert_eq!(
+            player_volume_fill_width(100, true),
+            PLAYER_VOLUME_SLIDER_WIDTH
+        );
+        assert_eq!(player_volume_fill_width(68, false), 0.0);
     }
 
     #[test]

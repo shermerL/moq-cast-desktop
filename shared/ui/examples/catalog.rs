@@ -7,11 +7,11 @@ use eframe::egui::{
 use moqcast_ui::{
     BadgeTone, ButtonSpec, COLORS, CheckboxSpec, ControlRole, DeviceBadgeSpec, DeviceListItemSpec,
     DeviceListSpec, DeviceRowSpec, DialogSpec, IconButtonSpec, Interaction, NavItemSpec,
-    SelectSpec, SettingRowSpec, Size, Spacing, StatePanelKind, StatePanelSpec, SwitchSpec, Theme,
-    TypographyRole, checkbox, control_button, device_list, device_row, dialog, install_ui_font,
-    nav_item, page_header, player_button, player_icon_button, player_surface, primary_button,
-    secondary_button, section_header, select, setting_row, state_panel, status_badge, switch,
-    typography,
+    PlayerVolumeState, SelectSpec, SettingRowSpec, Size, Spacing, StatePanelKind, StatePanelSpec,
+    SwitchSpec, Theme, TypographyRole, checkbox, control_button, device_list, device_row, dialog,
+    install_ui_font, nav_item, page_header, player_button, player_icon_button, player_surface,
+    player_volume_control, primary_button, secondary_button, section_header, select, setting_row,
+    state_panel, status_badge, switch, typography,
 };
 
 fn main() -> eframe::Result {
@@ -83,6 +83,7 @@ struct Catalog {
     select_value: usize,
     dialog_open: bool,
     selected_device: &'static str,
+    player_volume: PlayerVolumeState,
 }
 
 impl Catalog {
@@ -99,6 +100,7 @@ impl Catalog {
             select_value: 0,
             dialog_open: false,
             selected_device: "review-b",
+            player_volume: PlayerVolumeState::default(),
         }
     }
 
@@ -527,17 +529,25 @@ fn fixture_label(ui: &mut Ui, label: &str) {
     ui.label(typography(label, TypographyRole::Meta, COLORS.muted.into()));
 }
 
-fn player_catalog(catalog: &Catalog, ui: &mut Ui) {
+fn player_catalog(catalog: &mut Catalog, ui: &mut Ui) {
     section_header(ui, catalog.text("直播播放器", "Live player"), None);
+    let enabled = catalog.enabled;
+    let mute = catalog.text("静音", "Mute");
+    let unmute = catalog.text("取消静音", "Unmute");
+    let volume_label = catalog.text("播放音量", "Playback volume");
+    let unavailable = catalog.text("当前没有可播放音频", "No playable audio");
+    let stage_label = catalog.text(
+        "16:9 舞台 · contain · 允许黑边",
+        "16:9 stage · contain · letterbox allowed",
+    );
+    let fullscreen = catalog.text("全屏", "Fullscreen");
+    let stop = catalog.text("停止观看", "Stop watching");
     let _ = player_surface(
         ui,
         |ui| {
             ui.centered_and_justified(|ui| {
                 ui.label(typography(
-                    catalog.text(
-                        "16:9 舞台 · contain · 允许黑边",
-                        "16:9 stage · contain · letterbox allowed",
-                    ),
+                    stage_label,
                     TypographyRole::Body,
                     COLORS.player_muted.into(),
                 ));
@@ -551,12 +561,18 @@ fn player_catalog(catalog: &Catalog, ui: &mut Ui) {
                 COLORS.player_text.into(),
             ));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                player_icon_button(
+                player_icon_button(ui, IconButtonSpec::player("⛶", fullscreen))
+                    .on_hover_text(fullscreen);
+                player_button(ui, stop, true);
+                let _ = player_volume_control(
                     ui,
-                    IconButtonSpec::player("⛶", catalog.text("全屏", "Fullscreen")),
-                )
-                .on_hover_text(catalog.text("全屏", "Fullscreen"));
-                player_button(ui, catalog.text("停止观看", "Stop watching"), true);
+                    &mut catalog.player_volume,
+                    enabled,
+                    mute,
+                    unmute,
+                    volume_label,
+                    unavailable,
+                );
             });
         },
     );

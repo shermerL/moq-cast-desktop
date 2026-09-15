@@ -238,6 +238,7 @@ impl LivePlayer {
         }
 
         let mut action = None;
+        let mut volume_active = false;
         ui.vertical_centered(|ui| {
             let surface = if fullscreen {
                 let (surface, _) = ui.allocate_exact_size(layout.surface, Sense::hover());
@@ -264,7 +265,7 @@ impl LivePlayer {
                         surface.right_bottom(),
                     );
                     ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
-                        show_toolbar(
+                        volume_active = show_toolbar(
                             ui,
                             locale,
                             view,
@@ -275,7 +276,7 @@ impl LivePlayer {
                         );
                     });
                 } else {
-                    show_toolbar(
+                    volume_active = show_toolbar(
                         ui,
                         locale,
                         view,
@@ -287,6 +288,10 @@ impl LivePlayer {
                 }
             }
         });
+        if fullscreen && volume_active {
+            self.controls_last_active = now;
+            ui.ctx().request_repaint();
+        }
         action
     }
 }
@@ -299,10 +304,11 @@ fn show_toolbar(
     fullscreen: bool,
     volume: &mut PlayerVolumeState,
     action: &mut Option<PlayerAction>,
-) {
+) -> bool {
     player_toolbar(ui, |ui| {
-        show_controls(ui, locale, view, texture_ready, fullscreen, volume, action);
-    });
+        show_controls(ui, locale, view, texture_ready, fullscreen, volume, action)
+    })
+    .1
 }
 
 fn paint_surface(
@@ -331,7 +337,7 @@ fn show_controls(
     fullscreen: bool,
     volume: &mut PlayerVolumeState,
     action: &mut Option<PlayerAction>,
-) {
+) -> bool {
     let presentation = presentation(view.phase, texture_ready);
     let show_fullscreen = presentation == PlayerPresentation::Live;
     let row_layout = control_layout(ui.available_width(), show_fullscreen);
@@ -383,6 +389,7 @@ fn show_controls(
             );
         });
     });
+    let mut volume_active = false;
     ui.scope_builder(egui::UiBuilder::new().max_rect(actions), |ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let enabled = view.phase != ViewPhase::Stopping;
@@ -418,7 +425,7 @@ fn show_controls(
                 }
                 *action = Some(PlayerAction::Stop);
             }
-            if let Some(percent) = player_volume_control(
+            let volume_response = player_volume_control(
                 ui,
                 volume,
                 audio_playable(view.audio.phase) && enabled,
@@ -426,7 +433,9 @@ fn show_controls(
                 unmute(locale),
                 playback_volume(locale),
                 audio_unavailable(locale),
-            ) {
+            );
+            volume_active = volume_response.active();
+            if let Some(percent) = volume_response.changed_percent() {
                 *action = Some(PlayerAction::SetVolume {
                     generation: view.generation,
                     percent,
@@ -434,6 +443,7 @@ fn show_controls(
             }
         });
     });
+    volume_active
 }
 
 fn audio_playable(phase: ViewAudioPhase) -> bool {

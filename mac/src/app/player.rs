@@ -282,7 +282,7 @@ fn show_toolbar(
                 }
                 action = Some(PlayerAction::Stop);
             }
-            if let Some(percent) = player_volume_control(
+            let volume_response = player_volume_control(
                 ui,
                 volume,
                 audio_playable(view.audio_phase) && enabled,
@@ -302,7 +302,8 @@ fn show_toolbar(
                     Locale::Chinese => "当前没有可播放音频",
                     Locale::English => "No playable audio",
                 },
-            ) {
+            );
+            if let Some(percent) = volume_response.changed_percent() {
                 action = Some(PlayerAction::SetVolume {
                     generation: view.generation,
                     percent,
