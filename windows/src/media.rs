@@ -92,6 +92,9 @@ struct VideoEncodingPlan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PublicationFailure {
     CaptureUnavailable,
+    NoDisplaysAvailable,
+    DisplaySelectionRequired,
+    DisplaySelectionUnavailable,
     #[cfg(any(target_os = "windows", test))]
     CompatibleDisplayTooLarge,
     #[cfg(any(target_os = "windows", test))]
@@ -105,6 +108,13 @@ impl PublicationFailure {
     pub(crate) fn message(self) -> &'static str {
         match self {
             Self::CaptureUnavailable => "Windows could not open a capturable display.",
+            Self::NoDisplaysAvailable => "No capturable Windows displays are available.",
+            Self::DisplaySelectionRequired => {
+                "Choose an available display before starting screen sharing."
+            }
+            Self::DisplaySelectionUnavailable => {
+                "The selected display is no longer available. Choose a display again."
+            }
             #[cfg(any(target_os = "windows", test))]
             Self::CompatibleDisplayTooLarge => {
                 "Compatible mode supports native displays with a longest edge up to 1920 pixels."
@@ -143,11 +153,108 @@ pub(crate) enum MediaPhase {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum DisplayCatalogPhase {
+    #[default]
+    Loading,
+    Ready,
+    Empty,
+    Failed,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct DisplayChoice {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DisplayCatalogSnapshot {
+    pub(crate) phase: DisplayCatalogPhase,
+    pub(crate) choices: Vec<DisplayChoice>,
+    pub(crate) selected: Option<DisplayChoice>,
+    pub(crate) last_error: Option<&'static str>,
+    selection_invalidated: bool,
+}
+
+impl Default for DisplayCatalogSnapshot {
+    fn default() -> Self {
+        Self {
+            phase: DisplayCatalogPhase::Loading,
+            choices: Vec::new(),
+            selected: None,
+            last_error: None,
+            selection_invalidated: false,
+        }
+    }
+}
+
+impl DisplayCatalogSnapshot {
+    fn begin_refresh(&mut self) {
+        self.phase = DisplayCatalogPhase::Loading;
+        self.last_error = None;
+    }
+
+    fn refreshed(&mut self, choices: Vec<DisplayChoice>) {
+        let previous = self.selected.take();
+        self.phase = if choices.is_empty() {
+            DisplayCatalogPhase::Empty
+        } else {
+            DisplayCatalogPhase::Ready
+        };
+        self.choices = choices;
+        self.last_error = None;
+
+        match previous {
+            Some(selected) if self.choices.contains(&selected) => {
+                self.selected = Some(selected);
+            }
+            Some(_) => {
+                self.selection_invalidated = true;
+                self.last_error =
+                    Some("The selected display is no longer available. Choose a display again.");
+            }
+            None if !self.selection_invalidated => {
+                self.selected = self.choices.first().cloned();
+            }
+            None => {}
+        }
+    }
+
+    fn failed(&mut self) {
+        self.phase = DisplayCatalogPhase::Failed;
+        self.last_error = Some("Windows could not enumerate capturable displays.");
+    }
+
+    fn select(&mut self, choice: &DisplayChoice) -> bool {
+        if self.phase != DisplayCatalogPhase::Ready {
+            return false;
+        }
+        let Some(selected) = self.choices.iter().find(|display| *display == choice) else {
+            return false;
+        };
+        self.selected = Some(selected.clone());
+        self.selection_invalidated = false;
+        self.last_error = None;
+        true
+    }
+
+    fn invalidate_selection(&mut self) {
+        self.selected = None;
+        self.selection_invalidated = true;
+        self.last_error =
+            Some("The selected display is no longer available. Choose a display again.");
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MediaSnapshot {
     pub(crate) generation: u64,
     pub(crate) phase: MediaPhase,
     pub(crate) audio: AudioSnapshot,
+    pub(crate) displays: DisplayCatalogSnapshot,
     pub(crate) video_encoding: VideoEncodingPolicy,
     pub(crate) path: Option<String>,
     pub(crate) width: Option<u32>,
@@ -161,6 +268,7 @@ impl Default for MediaSnapshot {
             generation: 0,
             phase: MediaPhase::Idle,
             audio: AudioSnapshot::default(),
+            displays: DisplayCatalogSnapshot::default(),
             video_encoding: VideoEncodingPolicy::default(),
             path: None,
             width: None,
@@ -171,6 +279,46 @@ impl Default for MediaSnapshot {
 }
 
 impl MediaSnapshot {
+    pub(crate) fn begin_display_refresh(&mut self) -> bool {
+        if !matches!(self.phase, MediaPhase::Idle | MediaPhase::Failed) {
+            return false;
+        }
+        self.displays.begin_refresh();
+        true
+    }
+
+    pub(crate) fn display_refreshed(&mut self, choices: Vec<DisplayChoice>) {
+        self.displays.refreshed(choices);
+    }
+
+    pub(crate) fn display_refresh_failed(&mut self) {
+        self.displays.failed();
+    }
+
+    pub(crate) fn select_display(&mut self, choice: &DisplayChoice) -> bool {
+        if !matches!(self.phase, MediaPhase::Idle | MediaPhase::Failed) {
+            return false;
+        }
+        let selected = self.displays.select(choice);
+        if selected {
+            self.last_error = None;
+        }
+        selected
+    }
+
+    pub(crate) fn reject_start(&mut self, failure: PublicationFailure) -> bool {
+        if !matches!(self.phase, MediaPhase::Idle | MediaPhase::Failed) {
+            return false;
+        }
+        self.phase = MediaPhase::Failed;
+        self.last_error = Some(failure.message());
+        true
+    }
+
+    pub(crate) fn invalidate_display_selection(&mut self) {
+        self.displays.invalidate_selection();
+    }
+
     pub(crate) fn set_video_encoding_policy(&mut self, policy: VideoEncodingPolicy) -> bool {
         if !matches!(self.phase, MediaPhase::Idle | MediaPhase::Failed) {
             return false;
@@ -362,6 +510,34 @@ impl ReadyPublication {
 }
 
 impl Publication {
+    pub(crate) async fn enumerate_displays() -> Result<Vec<DisplayChoice>, PublicationFailure> {
+        #[cfg(target_os = "windows")]
+        {
+            moq_video::capture::displays()
+                .await
+                .map(|displays| {
+                    displays
+                        .into_iter()
+                        .map(|display| DisplayChoice {
+                            id: display.id,
+                            name: display.name,
+                            width: display.width,
+                            height: display.height,
+                        })
+                        .collect()
+                })
+                .map_err(|error| {
+                    tracing::warn!(%error, "could not enumerate Windows displays");
+                    PublicationFailure::CaptureUnavailable
+                })
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            Err(PublicationFailure::CaptureUnavailable)
+        }
+    }
+
     pub(crate) fn prepare(
         origin: &moq_net::origin::Producer,
         local_peer_id: &str,
@@ -384,6 +560,7 @@ impl Publication {
 
     pub(crate) async fn configure(
         self,
+        selected: &DisplayChoice,
         policy: VideoEncodingPolicy,
     ) -> Result<ReadyPublication, PublicationFailure> {
         #[cfg(target_os = "windows")]
@@ -394,8 +571,13 @@ impl Publication {
             })?;
             let display = displays
                 .into_iter()
-                .next()
-                .ok_or(PublicationFailure::CaptureUnavailable)?;
+                .find(|display| {
+                    display.id == selected.id
+                        && display.name == selected.name
+                        && display.width == selected.width
+                        && display.height == selected.height
+                })
+                .ok_or(PublicationFailure::DisplaySelectionUnavailable)?;
             let info = PublicationInfo {
                 width: display.width,
                 height: display.height,
@@ -419,6 +601,7 @@ impl Publication {
         #[cfg(not(target_os = "windows"))]
         {
             let _ = self;
+            let _ = selected;
             let _ = policy;
             Err(PublicationFailure::CaptureUnavailable)
         }
@@ -435,6 +618,101 @@ impl Drop for Publication {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn display(id: &str, name: &str, width: u32, height: u32) -> DisplayChoice {
+        DisplayChoice {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn first_display_refresh_selects_once_but_never_replaces_a_missing_choice() {
+        let first = display("display:0", "Display 1", 1920, 1080);
+        let second = display("display:1", "Display 2", 1280, 720);
+        let mut media = MediaSnapshot::default();
+
+        assert!(media.begin_display_refresh());
+        media.display_refreshed(vec![first.clone(), second.clone()]);
+        assert_eq!(media.displays.selected, Some(first.clone()));
+
+        assert!(media.select_display(&second));
+        assert!(media.begin_display_refresh());
+        media.display_refreshed(vec![first.clone()]);
+        assert!(media.displays.selected.is_none());
+        assert!(media.displays.last_error.is_some());
+
+        assert!(media.begin_display_refresh());
+        media.display_refreshed(vec![first]);
+        assert!(media.displays.selected.is_none());
+    }
+
+    #[test]
+    fn display_refresh_requires_an_exact_current_descriptor() {
+        let selected = display("display:0", "Display 1", 1920, 1080);
+        let mut media = MediaSnapshot::default();
+        media.display_refreshed(vec![selected.clone()]);
+        assert_eq!(media.displays.selected, Some(selected.clone()));
+
+        media.begin_display_refresh();
+        media.display_refreshed(vec![display("display:0", "Display 2", 2560, 1440)]);
+
+        assert!(media.displays.selected.is_none());
+        let refreshed = display("display:0", "Display 2", 2560, 1440);
+        assert!(!media.select_display(&selected));
+        assert!(media.select_display(&refreshed));
+        assert_eq!(media.displays.selected, Some(refreshed));
+    }
+
+    #[test]
+    fn display_selection_is_locked_for_the_entire_publication_lifecycle() {
+        let first = display("display:0", "Display 1", 1920, 1080);
+        let second = display("display:1", "Display 2", 1280, 720);
+        let mut media = MediaSnapshot::default();
+        media.display_refreshed(vec![first.clone(), second.clone()]);
+        let generation = media.begin("peer-a").expect("begin");
+
+        assert!(!media.select_display(&second));
+        assert!(!media.begin_display_refresh());
+        assert_eq!(media.displays.selected, Some(first));
+
+        assert!(media.started(
+            generation,
+            PublicationInfo {
+                width: 1920,
+                height: 1080,
+            }
+        ));
+        assert!(!media.select_display(&second));
+        assert!(!media.begin_display_refresh());
+
+        assert_eq!(media.begin_stop(), Some(generation));
+        assert!(!media.select_display(&second));
+        assert!(!media.begin_display_refresh());
+        assert!(media.stopped(generation));
+        assert!(media.select_display(&second));
+        assert_eq!(media.displays.selected, Some(second));
+    }
+
+    #[test]
+    fn display_failed_or_empty_refresh_preserves_explicit_retry_semantics() {
+        let mut media = MediaSnapshot::default();
+        media.display_refreshed(Vec::new());
+        assert_eq!(media.displays.phase, DisplayCatalogPhase::Empty);
+        assert!(media.displays.selected.is_none());
+
+        media.begin_display_refresh();
+        media.display_refresh_failed();
+        assert_eq!(media.displays.phase, DisplayCatalogPhase::Failed);
+        assert!(media.displays.last_error.is_some());
+
+        media.begin_display_refresh();
+        let available = display("display:0", "Display 1", 1920, 1080);
+        media.display_refreshed(vec![available.clone()]);
+        assert_eq!(media.displays.selected, Some(available));
+    }
 
     #[test]
     fn media_lifecycle_is_single_generation_and_stop_is_explicit() {

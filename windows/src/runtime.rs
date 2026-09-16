@@ -16,7 +16,7 @@ use url::Url;
 
 use crate::{
     audio::StatusUpdate as AudioStatusUpdate,
-    media::{MediaSnapshot, Publication, PublicationFailure, VideoEncodingPolicy},
+    media::{DisplayChoice, MediaSnapshot, Publication, PublicationFailure, VideoEncodingPolicy},
     playback::{PlaybackFrame, ViewEvent, ViewPhase, ViewSnapshot},
     registry::{PeerRegistry, PeerSummary, RegistryChange, sanitize_identity},
     remote::{Directory as RemoteDirectory, RemoteScreenView, ScreenAvailability},
@@ -341,6 +341,8 @@ impl RuntimeSnapshot {
 pub(crate) enum RuntimeCommand {
     StartScan,
     StopScan,
+    RefreshDisplays,
+    SelectDisplay { choice: DisplayChoice },
     SetVideoEncodingPolicy(VideoEncodingPolicy),
     ShareScreen,
     StopSharing,
@@ -669,6 +671,8 @@ async fn run(
     service_owner
         .start(&config, &mut snapshot, &snapshots)
         .await;
+    let _ = snapshots.send(snapshot.clone());
+    refresh_displays(&mut snapshot, &snapshots).await;
     let _ = snapshots.send(snapshot.clone());
 
     loop {
@@ -1008,6 +1012,16 @@ async fn handle_command(command: RuntimeCommand, context: RuntimeContext<'_>) ->
             services.stop(snapshot).await;
             false
         }
+        RuntimeCommand::RefreshDisplays => {
+            refresh_displays(snapshot, snapshots).await;
+            false
+        }
+        RuntimeCommand::SelectDisplay { choice } => {
+            if !snapshot.media.select_display(&choice) {
+                tracing::debug!(display_id = %choice.id, "ignored stale display selection");
+            }
+            false
+        }
         RuntimeCommand::SetVideoEncodingPolicy(policy) => {
             snapshot.media.set_video_encoding_policy(policy);
             false
@@ -1020,6 +1034,7 @@ async fn handle_command(command: RuntimeCommand, context: RuntimeContext<'_>) ->
                     publication,
                     media_events,
                     audio_updates,
+                    snapshots,
                 )
                 .await;
             } else {
@@ -1097,12 +1112,33 @@ async fn stop_active_media(
     }
 }
 
+async fn refresh_displays(
+    snapshot: &mut RuntimeSnapshot,
+    snapshots: &watch::Sender<RuntimeSnapshot>,
+) -> bool {
+    if !snapshot.media.begin_display_refresh() {
+        return false;
+    }
+    let _ = snapshots.send(snapshot.clone());
+    match Publication::enumerate_displays().await {
+        Ok(displays) => {
+            snapshot.media.display_refreshed(displays);
+            true
+        }
+        Err(_) => {
+            snapshot.media.display_refresh_failed();
+            false
+        }
+    }
+}
+
 async fn start_publication(
     snapshot: &mut RuntimeSnapshot,
     sessions: &SessionFoundation,
     publication: &mut PublicationOwner,
     media_events: &mpsc::Sender<MediaEvent>,
     audio_updates: &watch::Sender<Option<AudioStatusUpdate>>,
+    snapshots: &watch::Sender<RuntimeSnapshot>,
 ) {
     if !matches!(snapshot.view.phase, ViewPhase::Idle | ViewPhase::Failed) {
         snapshot.last_error = Some("Stop watching before sharing the local screen.");
@@ -1111,6 +1147,21 @@ async fn start_publication(
     let Some(local_id) = snapshot.local_id.clone() else {
         snapshot.last_error = Some("LAN services must be ready before sharing.");
         return;
+    };
+    if !refresh_displays(snapshot, snapshots).await {
+        return;
+    }
+    let selected = match snapshot.media.displays.selected.clone() {
+        Some(selected) => selected,
+        None => {
+            let failure = if snapshot.media.displays.choices.is_empty() {
+                PublicationFailure::NoDisplaysAvailable
+            } else {
+                PublicationFailure::DisplaySelectionRequired
+            };
+            snapshot.media.reject_start(failure);
+            return;
+        }
     };
     let Some(generation) = snapshot.media.begin(&local_id) else {
         return;
@@ -1126,9 +1177,12 @@ async fn start_publication(
             return;
         }
     };
-    let ready = match prepared.configure(policy).await {
+    let ready = match prepared.configure(&selected, policy).await {
         Ok(ready) => ready,
         Err(error) => {
+            if error == PublicationFailure::DisplaySelectionUnavailable {
+                snapshot.media.invalidate_display_selection();
+            }
             snapshot.media.ended(generation, Err(error));
             return;
         }
@@ -1138,6 +1192,8 @@ async fn start_publication(
         tracing::info!(
             generation,
             video_policy = ?policy,
+            display_id = %selected.id,
+            display_name = %selected.name,
             source_width = info.width,
             source_height = info.height,
             "screen publication configured"

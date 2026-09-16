@@ -13,7 +13,7 @@ use moqcast_ui::{
 use crate::{
     audio::AudioPhase,
     diagnostics::DiagnosticsUi,
-    media::{MediaPhase, VideoEncodingPolicy},
+    media::{DisplayCatalogPhase, MediaPhase, VideoEncodingPolicy},
     playback::{PlaybackFrameIdentity, ViewPhase},
     player::{LivePlayer, PlayerAction, TOOLBAR_HEIGHT},
     remote::ScreenAvailability,
@@ -658,21 +658,7 @@ impl MoqCastApp {
             },
             None,
         );
-        setting_value_row(
-            ui,
-            match self.locale {
-                Locale::Chinese => "来源",
-                Locale::English => "Source",
-            },
-            match self.locale {
-                Locale::Chinese => "此版本共享主显示器。",
-                Locale::English => "This version shares the primary display.",
-            },
-            match self.locale {
-                Locale::Chinese => "主显示器",
-                Locale::English => "Primary display",
-            },
-        );
+        self.display_source(ui);
         ui.separator();
         setting_value_row(
             ui,
@@ -735,7 +721,7 @@ impl MoqCastApp {
                     ) {
                         "正在观看远端屏幕。停止观看后才能开始共享。"
                     } else {
-                        "开始后会共享主显示器，并尝试捕获系统音频。"
+                        "开始前会重新核对所选屏幕，并尝试捕获系统音频。"
                     }
                 }
                 (Locale::English, MediaPhase::Idle) => {
@@ -745,7 +731,7 @@ impl MoqCastApp {
                     ) {
                         "A remote screen is active. Stop watching before sharing."
                     } else {
-                        "Starting shares the primary display and attempts system audio capture."
+                        "The selected display is checked again before sharing starts, together with system audio capture."
                     }
                 }
             },
@@ -758,6 +744,8 @@ impl MoqCastApp {
                 let enabled = self.snapshot.discovery.is_active()
                     && !self.nearby_turn_off_pending
                     && self.snapshot.local_id.is_some()
+                    && self.snapshot.media.displays.phase == DisplayCatalogPhase::Ready
+                    && self.snapshot.media.displays.selected.is_some()
                     && matches!(
                         self.snapshot.view.phase,
                         ViewPhase::Idle | ViewPhase::Failed
@@ -807,6 +795,149 @@ impl MoqCastApp {
                 error,
                 TypographyRole::Help,
                 COLORS.warning.into(),
+            ));
+        }
+    }
+
+    fn display_source(&mut self, ui: &mut egui::Ui) {
+        let editable = matches!(
+            self.snapshot.media.phase,
+            MediaPhase::Idle | MediaPhase::Failed
+        );
+        let refreshing = self.snapshot.media.displays.phase == DisplayCatalogPhase::Loading;
+        setting_row(
+            ui,
+            SettingRowSpec::new(match self.locale {
+                Locale::Chinese => "屏幕来源",
+                Locale::English => "Screen source",
+            })
+            .description(match self.locale {
+                Locale::Chinese => "开始共享前选择一块当前可用的屏幕。",
+                Locale::English => "Choose one currently available display before sharing.",
+            }),
+            |ui| {
+                if secondary_button(
+                    ui,
+                    match self.locale {
+                        Locale::Chinese => "刷新",
+                        Locale::English => "Refresh",
+                    },
+                    editable && !refreshing,
+                )
+                .clicked()
+                {
+                    self.send(RuntimeCommand::RefreshDisplays);
+                }
+            },
+        );
+
+        match self.snapshot.media.displays.phase {
+            DisplayCatalogPhase::Loading => state_panel(
+                ui,
+                StatePanelSpec::new(
+                    StatePanelKind::Pending,
+                    match self.locale {
+                        Locale::Chinese => "正在查找屏幕",
+                        Locale::English => "Finding displays",
+                    },
+                    match self.locale {
+                        Locale::Chinese => "正在读取 Windows 当前可捕获的显示器。",
+                        Locale::English => "Reading the displays Windows can currently capture.",
+                    },
+                ),
+                |_| {},
+            ),
+            DisplayCatalogPhase::Empty => state_panel(
+                ui,
+                StatePanelSpec::new(
+                    StatePanelKind::Empty,
+                    match self.locale {
+                        Locale::Chinese => "没有可用屏幕",
+                        Locale::English => "No displays available",
+                    },
+                    match self.locale {
+                        Locale::Chinese => "连接或启用屏幕后刷新列表。",
+                        Locale::English => "Connect or enable a display, then refresh the list.",
+                    },
+                ),
+                |_| {},
+            ),
+            DisplayCatalogPhase::Failed => state_panel(
+                ui,
+                StatePanelSpec::new(
+                    StatePanelKind::Failed,
+                    match self.locale {
+                        Locale::Chinese => "无法读取屏幕",
+                        Locale::English => "Displays unavailable",
+                    },
+                    match self.locale {
+                        Locale::Chinese => "检查 Windows 图形环境后重试。",
+                        Locale::English => "Check the Windows graphics environment and try again.",
+                    },
+                ),
+                |_| {},
+            ),
+            DisplayCatalogPhase::Ready => {
+                let choices = self.snapshot.media.displays.choices.clone();
+                let selected = self
+                    .snapshot
+                    .media
+                    .displays
+                    .selected
+                    .as_ref()
+                    .map(|display| display.id.as_str());
+                let subtitles = choices
+                    .iter()
+                    .map(|display| format!("{} × {}", display.width, display.height))
+                    .collect::<Vec<_>>();
+                let items = choices
+                    .iter()
+                    .zip(&subtitles)
+                    .map(|(display, subtitle)| {
+                        let is_selected = selected == Some(display.id.as_str());
+                        DeviceListItemSpec::new(display.clone(), &display.name)
+                            .subtitle(subtitle)
+                            .badge(DeviceBadgeSpec::new(
+                                match (self.locale, is_selected) {
+                                    (Locale::Chinese, true) => "已选择",
+                                    (Locale::English, true) => "Selected",
+                                    (Locale::Chinese, false) => "可用",
+                                    (Locale::English, false) => "Available",
+                                },
+                                if is_selected {
+                                    BadgeTone::Info
+                                } else {
+                                    BadgeTone::Neutral
+                                },
+                            ))
+                            .selected(is_selected)
+                            .enabled(editable)
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(choice) = device_list(
+                    ui,
+                    DeviceListSpec::new(egui::Id::new("windows-capture-displays"), &items),
+                ) {
+                    self.send(RuntimeCommand::SelectDisplay { choice });
+                }
+            }
+        }
+
+        if !editable {
+            ui.label(typography(
+                match self.locale {
+                    Locale::Chinese => "停止共享后才能更改屏幕来源。",
+                    Locale::English => "Stop sharing before changing the screen source.",
+                },
+                TypographyRole::Help,
+                COLORS.warning.into(),
+            ));
+        }
+        if let Some(error) = self.snapshot.media.displays.last_error {
+            ui.label(typography(
+                error,
+                TypographyRole::Help,
+                COLORS.danger.into(),
             ));
         }
     }
