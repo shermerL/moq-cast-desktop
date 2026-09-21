@@ -11,7 +11,8 @@ use tokio::task::JoinHandle;
 
 use crate::app::MediaState;
 use crate::app::{
-    AppSnapshot, DialRole, DiscoveredPeer, RemoteAudioSnapshot, TransportState, UserCommand,
+    AppSnapshot, DialRole, DiscoveredPeer, RemoteAudioSnapshot, RemoteVideoSnapshot,
+    TransportState, UserCommand,
 };
 use crate::network::discovery::{PeerRecord, PeerRegistry, PeerUpdate};
 use crate::network::{peer, server, service};
@@ -164,6 +165,11 @@ enum OperationEvent {
         generation: u64,
         path: String,
         audio: RemoteAudioSnapshot,
+    },
+    ViewVideoChanged {
+        generation: u64,
+        path: String,
+        video: RemoteVideoSnapshot,
     },
     ViewEnded {
         generation: u64,
@@ -958,6 +964,20 @@ impl Supervisor {
                     LoopAction::Unchanged
                 }
             }
+            OperationEvent::ViewVideoChanged {
+                generation,
+                path,
+                video,
+            } => {
+                if generation != self.view.generation {
+                    return LoopAction::Unchanged;
+                }
+                if self.state.set_remote_video(&path, video) {
+                    LoopAction::Changed
+                } else {
+                    LoopAction::Unchanged
+                }
+            }
             OperationEvent::ViewEnded { generation, result } => {
                 if generation != self.view.generation {
                     return LoopAction::Unchanged;
@@ -1337,6 +1357,28 @@ async fn run_view(
                             generation,
                             path: path.clone(),
                             audio,
+                        };
+                        tokio::select! {
+                            result = events.send(operation) => {
+                                if result.is_err() {
+                                    break Err(anyhow::anyhow!("runtime operation channel closed"));
+                                }
+                            }
+                            changed = cancelled.changed() => {
+                                if changed.is_err() || *cancelled.borrow_and_update() {
+                                    cancelling = true;
+                                }
+                            }
+                        }
+                    }
+                    super::playback::Event::Video(video) => {
+                        if cancelling {
+                            continue;
+                        }
+                        let operation = OperationEvent::ViewVideoChanged {
+                            generation,
+                            path: path.clone(),
+                            video,
                         };
                         tokio::select! {
                             result = events.send(operation) => {

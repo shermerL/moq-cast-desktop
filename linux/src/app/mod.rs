@@ -14,14 +14,14 @@ pub use command::UserCommand;
 pub use locale::Locale;
 pub use snapshot::{
     AppSnapshot, DialRole, DiscoveredPeer, DiscoveryState, MediaState, PeerDiscoveryState,
-    PeerSnapshot, RemoteAudioPhase, RemoteAudioSnapshot, RemoteScreenSnapshot, ScreenAvailability,
-    StateError, TransportState,
+    PeerSnapshot, RemoteAudioPhase, RemoteAudioSnapshot, RemoteScreenSnapshot, RemoteVideoSnapshot,
+    ScreenAvailability, StateError, TransportState,
 };
 
 use eframe::egui::{self, Color32, Frame, Margin, Stroke};
 use moqcast_ui::{
-    COLORS, NavItemSpec, PageWidth, Size, Spacing, TypographyRole, app_bar_content_rect, nav_item,
-    page_content_rect, typography,
+    COLORS, NavItemSpec, PageWidth, PlayerFrameSample, Size, Spacing, TypographyRole,
+    app_bar_content_rect, nav_item, page_content_rect, typography,
 };
 
 use crate::runtime::{PlaybackFrameIdentity, RuntimeHandle, RuntimeStartError};
@@ -369,6 +369,7 @@ impl eframe::App for MoqCastApp {
                         ui,
                         self.locale,
                         &snapshot,
+                        playback_frame_sample(self.playback_identity),
                         self.playback_texture.as_ref(),
                         &mut self.player,
                     ) {
@@ -467,6 +468,7 @@ impl eframe::App for MoqCastApp {
                                     ui,
                                     self.locale,
                                     &snapshot,
+                                    playback_frame_sample(self.playback_identity),
                                     self.playback_texture.as_ref(),
                                     &mut self.player,
                                 ) {
@@ -537,6 +539,14 @@ impl eframe::App for MoqCastApp {
             if self.developer_mode { "true" } else { "false" }.to_owned(),
         );
     }
+}
+
+fn playback_frame_sample(identity: Option<PlaybackFrameIdentity>) -> Option<PlayerFrameSample> {
+    identity.map(|identity| PlayerFrameSample {
+        view_generation: identity.view_generation,
+        decoder_generation: identity.decoder_generation,
+        sequence: identity.sequence,
+    })
 }
 
 fn view_switcher(ui: &mut egui::Ui, page: &mut Page, locale: Locale) {

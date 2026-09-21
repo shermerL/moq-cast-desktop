@@ -965,6 +965,7 @@ impl MoqCastApp {
                         self.locale,
                         &self.snapshot.view,
                         self.playback_texture.as_ref(),
+                        self.playback_identity,
                     );
                     self.handle_player_action(action);
                 });
@@ -1423,6 +1424,7 @@ impl eframe::App for MoqCastApp {
                         self.locale,
                         &self.snapshot.view,
                         self.playback_texture.as_ref(),
+                        self.playback_identity,
                     );
                     self.handle_player_action(action);
                 });

@@ -66,6 +66,7 @@ pub(crate) struct ViewSnapshot {
     pub(crate) phase: ViewPhase,
     pub(crate) path: Option<String>,
     pub(crate) decoder: Option<String>,
+    pub(crate) video_codec: Option<String>,
     pub(crate) width: Option<u32>,
     pub(crate) height: Option<u32>,
     pub(crate) audio: ViewAudioSnapshot,
@@ -84,6 +85,7 @@ impl ViewSnapshot {
         self.phase = ViewPhase::Preparing;
         self.path = Some(path.to_owned());
         self.decoder = None;
+        self.video_codec = None;
         self.width = None;
         self.height = None;
         self.audio = ViewAudioSnapshot {
@@ -99,6 +101,7 @@ impl ViewSnapshot {
         generation: u64,
         path: &str,
         decoder: String,
+        video_codec: String,
         width: u32,
         height: u32,
     ) -> bool {
@@ -110,6 +113,7 @@ impl ViewSnapshot {
         }
         self.phase = ViewPhase::Viewing;
         self.decoder = Some(decoder);
+        self.video_codec = Some(video_codec);
         self.width = Some(width);
         self.height = Some(height);
         true
@@ -164,6 +168,7 @@ impl ViewSnapshot {
         self.phase = phase;
         self.path = None;
         self.decoder = None;
+        self.video_codec = None;
         self.width = None;
         self.height = None;
         self.audio = ViewAudioSnapshot::default();
@@ -196,6 +201,7 @@ pub(crate) enum ViewEvent {
         generation: u64,
         path: String,
         decoder: String,
+        video_codec: String,
         width: u32,
         height: u32,
     },
@@ -597,6 +603,7 @@ pub(crate) async fn run(
                             generation,
                             path: path.clone(),
                             decoder: decoder_name.clone(),
+                            video_codec: selection.config.codec.to_string(),
                             width,
                             height,
                         },
@@ -1129,6 +1136,7 @@ mod tests {
             generation + 1,
             "moqcast.screen/peer-a",
             "mediafoundation".to_owned(),
+            "avc1.640028".to_owned(),
             1920,
             1080,
         ));
@@ -1136,10 +1144,13 @@ mod tests {
             generation,
             "moqcast.screen/peer-a",
             "mediafoundation".to_owned(),
+            "avc1.640028".to_owned(),
             1920,
             1080,
         ));
         assert_eq!(view.phase, ViewPhase::Viewing);
+        assert_eq!(view.decoder.as_deref(), Some("mediafoundation"));
+        assert_eq!(view.video_codec.as_deref(), Some("avc1.640028"));
     }
 
     #[test]
@@ -1187,6 +1198,7 @@ mod tests {
             generation,
             "moqcast.screen/peer-a",
             "mediafoundation".to_owned(),
+            "avc1.640028".to_owned(),
             1920,
             1080,
         ));

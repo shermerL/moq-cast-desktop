@@ -10,7 +10,7 @@ use moq_tokio::moq_net;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
-use crate::app::RemoteAudioSnapshot;
+use crate::app::{RemoteAudioSnapshot, RemoteVideoSnapshot};
 
 use super::playback_sync as sync;
 use super::{PlaybackFrame, PlaybackFrameIdentity};
@@ -24,6 +24,8 @@ pub(super) enum Event {
     Started { ack: oneshot::Sender<()> },
     /// Remote audio progressed without changing the video lifecycle.
     Audio(RemoteAudioSnapshot),
+    /// The selected video track or decoder backend changed.
+    Video(RemoteVideoSnapshot),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -328,6 +330,13 @@ pub(super) async fn run(
             track = %video.name,
             "remote video decoder opened"
         );
+        events
+            .send(Event::Video(RemoteVideoSnapshot {
+                codec: Some(video.config.codec.to_string()),
+                decoder: Some(decoder.name().to_owned()),
+            }))
+            .await
+            .map_err(|_| anyhow::anyhow!("playback event receiver closed"))?;
         video_task = Some(VideoTask::spawn(
             frames_sequence.decoder_generation,
             decoder,
@@ -451,12 +460,23 @@ pub(super) async fn run(
                                 track = %video.name,
                                 "remote video decoder rebuilt after catalog change"
                             );
+                            events
+                                .send(Event::Video(RemoteVideoSnapshot {
+                                    codec: Some(video.config.codec.to_string()),
+                                    decoder: Some(decoder.name().to_owned()),
+                                }))
+                                .await
+                                .map_err(|_| anyhow::anyhow!("playback event receiver closed"))?;
                             video_task = Some(VideoTask::spawn(
                                 frames_sequence.decoder_generation,
                                 decoder,
                                 &video_updates_tx,
                             ));
                         } else {
+                            events
+                                .send(Event::Video(RemoteVideoSnapshot::default()))
+                                .await
+                                .map_err(|_| anyhow::anyhow!("playback event receiver closed"))?;
                             tracing::debug!(
                                 view_generation,
                                 decoder_generation = frames_sequence.decoder_generation,
@@ -501,6 +521,10 @@ pub(super) async fn run(
                             }
                             frames_sequence.replace_decoder();
                             video_scheduler.reset();
+                            events
+                                .send(Event::Video(RemoteVideoSnapshot::default()))
+                                .await
+                                .map_err(|_| anyhow::anyhow!("playback event receiver closed"))?;
                             tracing::debug!(
                                 view_generation,
                                 decoder_generation = frames_sequence.decoder_generation,

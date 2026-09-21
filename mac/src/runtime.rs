@@ -175,6 +175,7 @@ pub(crate) struct AppSnapshot {
     pub(crate) share_audio_error: Option<String>,
     pub(crate) watch_audio: playback::AudioSnapshot,
     pub(crate) media_decoder: Option<String>,
+    pub(crate) media_video_codec: Option<String>,
     pub(crate) media_width: Option<u32>,
     pub(crate) media_height: Option<u32>,
     pub(crate) media_error: Option<String>,
@@ -204,6 +205,7 @@ impl Default for AppSnapshot {
             share_audio_error: None,
             watch_audio: playback::AudioSnapshot::default(),
             media_decoder: None,
+            media_video_codec: None,
             media_width: None,
             media_height: None,
             media_error: None,
@@ -230,6 +232,7 @@ impl AppSnapshot {
         self.media_peer = Some(peer.to_owned());
         self.media_path = Some(path.to_owned());
         self.media_decoder = None;
+        self.media_video_codec = None;
         self.media_width = None;
         self.media_height = None;
         self.media_error = None;
@@ -259,6 +262,30 @@ impl AppSnapshot {
         true
     }
 
+    fn playback_video_changed(
+        &mut self,
+        generation: Generation,
+        decoder: String,
+        codec: String,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        if self.media_owner != Some(MediaOwner::Watch)
+            || self.media.generation() != generation
+            || !matches!(
+                self.media.phase(),
+                MediaPhase::PreparingWatch | MediaPhase::Watching
+            )
+        {
+            return false;
+        }
+        self.media_decoder = Some(decoder);
+        self.media_video_codec = Some(codec);
+        self.media_width = Some(width);
+        self.media_height = Some(height);
+        true
+    }
+
     fn playback_ended(&mut self, generation: Generation, result: Result<(), String>) -> bool {
         if self.media_owner != Some(MediaOwner::Watch)
             || self.media.generation() != generation
@@ -274,6 +301,7 @@ impl AppSnapshot {
             Err(error) => {
                 self.media.apply(generation, MediaPhase::Failed);
                 self.media_decoder = None;
+                self.media_video_codec = None;
                 self.media_width = None;
                 self.media_height = None;
                 self.media_error = Some(error);
@@ -362,6 +390,7 @@ impl AppSnapshot {
         self.media_peer = None;
         self.media_path = None;
         self.media_decoder = None;
+        self.media_video_codec = None;
         self.media_width = None;
         self.media_height = None;
         self.media_error = None;
@@ -481,6 +510,7 @@ impl AppSnapshot {
         self.media_peer = None;
         self.media_path = None;
         self.media_decoder = None;
+        self.media_video_codec = None;
         self.media_width = None;
         self.media_height = None;
         self.media_error = error;
@@ -1376,6 +1406,31 @@ fn apply_playback_event(
                     width,
                     height,
                     "remote screen playback started"
+                );
+            }
+        }
+        PlaybackEvent::VideoChanged {
+            generation,
+            decoder,
+            codec,
+            width,
+            height,
+        } => {
+            let generation = Generation(generation);
+            if snapshot.playback_video_changed(
+                generation,
+                decoder.clone(),
+                codec.clone(),
+                width,
+                height,
+            ) {
+                tracing::info!(
+                    view_generation = generation.value(),
+                    decoder,
+                    codec,
+                    width,
+                    height,
+                    "remote screen video decoder changed"
                 );
             }
         }
@@ -2402,8 +2457,27 @@ mod tests {
 
         assert!(!snapshot.playback_started(first, "stale".to_owned(), 640, 360));
         assert!(snapshot.playback_started(second, "videotoolbox".to_owned(), 640, 360));
+        assert!(!snapshot.playback_video_changed(
+            first,
+            "stale".to_owned(),
+            "stale".to_owned(),
+            320,
+            180,
+        ));
+        assert!(snapshot.playback_video_changed(
+            second,
+            "videotoolbox".to_owned(),
+            "avc1.640028".to_owned(),
+            1920,
+            1080,
+        ));
         assert_eq!(snapshot.media.phase(), MediaPhase::Watching);
         assert_eq!(snapshot.media_decoder.as_deref(), Some("videotoolbox"));
+        assert_eq!(snapshot.media_video_codec.as_deref(), Some("avc1.640028"));
+        assert_eq!(
+            (snapshot.media_width, snapshot.media_height),
+            (Some(1920), Some(1080))
+        );
     }
 
     #[test]
@@ -2503,6 +2577,14 @@ mod tests {
             channels: Some(2),
             last_error: None,
         };
+        let generation = snapshot.media.generation();
+        assert!(snapshot.playback_video_changed(
+            generation,
+            "videotoolbox".to_owned(),
+            "avc1.640028".to_owned(),
+            1920,
+            1080,
+        ));
         let stopping = snapshot.begin_stop_watch().expect("stop");
         assert!(snapshot.finish_stop_media(stopping));
 
@@ -2511,6 +2593,9 @@ mod tests {
         assert!(snapshot.share_system_audio);
         assert_eq!(snapshot.share_audio, ShareAudioPhase::Off);
         assert_eq!(snapshot.watch_audio, playback::AudioSnapshot::default());
+        assert_eq!(snapshot.media_decoder, None);
+        assert_eq!(snapshot.media_video_codec, None);
+        assert_eq!((snapshot.media_width, snapshot.media_height), (None, None));
     }
 
     fn display_selection() -> ShareSelection {

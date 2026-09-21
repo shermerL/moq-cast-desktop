@@ -813,6 +813,7 @@ async fn run(
                         generation,
                         path,
                         decoder,
+                        video_codec,
                         width,
                         height,
                     } => {
@@ -820,13 +821,19 @@ async fn run(
                             view_generation = generation,
                             path = %path,
                             decoder = %decoder,
+                            video_codec = %video_codec,
                             width,
                             height,
                             "remote video decoder produced its first frame"
                         );
-                        snapshot
-                            .view
-                            .decoder_ready(generation, &path, decoder, width, height);
+                        snapshot.view.decoder_ready(
+                            generation,
+                            &path,
+                            decoder,
+                            video_codec,
+                            width,
+                            height,
+                        );
                     }
                     ViewEvent::AudioChanged {
                         generation,

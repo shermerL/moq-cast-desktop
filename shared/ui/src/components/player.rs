@@ -3,9 +3,8 @@ use egui::{
     Tooltip, Ui, UiBuilder, WidgetInfo, WidgetType, pos2, vec2,
 };
 
-use crate::{COLORS, ControlRole, Radius, Size, Spacing};
-
 use super::common::{color, paint_focus, paint_surface, pointing_hand, resolve, sense};
+use crate::{COLORS, ControlRole, Radius, Size, Spacing};
 
 /// Default volume for every new remote playback session.
 pub const DEFAULT_PLAYER_VOLUME_PERCENT: u8 = 100;
@@ -18,7 +17,6 @@ const PLAYER_VOLUME_RAIL_HEIGHT: f32 = 4.0;
 const PLAYER_VOLUME_THUMB_RADIUS: f32 = 6.0;
 const PLAYER_VOLUME_THUMB_RING_RADIUS: f32 = 9.0;
 const PLAYER_VOLUME_ICON_SIZE: f32 = 20.0;
-
 /// Session-scoped player volume, including the value restored after unmuting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlayerVolumeState {

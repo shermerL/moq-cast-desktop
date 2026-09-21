@@ -35,6 +35,13 @@ pub(crate) enum Event {
         width: u32,
         height: u32,
     },
+    VideoChanged {
+        generation: u64,
+        decoder: String,
+        codec: String,
+        width: u32,
+        height: u32,
+    },
     Audio {
         generation: u64,
         snapshot: AudioSnapshot,
@@ -484,6 +491,7 @@ async fn run_inner(playback: PlaybackRun) -> anyhow::Result<()> {
     let mut sequence = FrameSequence::new(generation);
     let (video_tx, mut video_rx) = mpsc::channel(1);
     let mut decoder_name = None;
+    let mut reported_decoder_generation = None;
     let mut video_task = None;
     let media_clock = Arc::new(sync::MediaClock::default());
     let mut video_scheduler = sync::VideoScheduler::default();
@@ -571,8 +579,24 @@ async fn run_inner(playback: PlaybackRun) -> anyhow::Result<()> {
                 .await??;
                 let width = frame.display_width;
                 let height = frame.display_height;
+                let decoder_generation = frame.identity.decoder_generation;
                 frames.send_replace(Some(Arc::new(frame)));
                 wake();
+                if reported_decoder_generation != Some(decoder_generation) {
+                    events
+                        .send(Event::VideoChanged {
+                            generation,
+                            decoder: decoder_name
+                                .clone()
+                                .expect("scheduled video frame has a decoder name"),
+                            codec: selected.config.codec.to_string(),
+                            width,
+                            height,
+                        })
+                        .await
+                        .map_err(|_| anyhow::anyhow!("playback event receiver closed"))?;
+                    reported_decoder_generation = Some(decoder_generation);
+                }
                 if first_view_frame {
                     events
                         .send(Event::Started {

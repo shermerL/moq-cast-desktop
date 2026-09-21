@@ -9,8 +9,8 @@ mod view;
 use eframe::egui::{self, Align, Color32, Frame, Key, Layout, Modifiers};
 use moqcast_ui::{
     BadgeTone, ButtonSpec, COLORS, ControlRole, DetailRowSpec, DeviceBadgeSpec, DeviceListItemSpec,
-    DeviceListSpec, DialogClosePolicy, DialogSpec, NavItemSpec, PageWidth, SelectSpec,
-    SettingRowSpec, Size, Spacing, StatePanelKind, StatePanelSpec, SwitchSpec, Theme,
+    DeviceListSpec, DialogClosePolicy, DialogSpec, NavItemSpec, PageWidth, PlayerFrameSample,
+    SelectSpec, SettingRowSpec, Size, Spacing, StatePanelKind, StatePanelSpec, SwitchSpec, Theme,
     TypographyRole, app_bar_content_rect, control_button, danger_button,
     detail_row as compact_detail_row, device_list, dialog, install_ui_font, nav_item, page_header,
     page_shell, primary_button, secondary_button, section_header, select, setting_row, state_panel,
@@ -295,7 +295,14 @@ impl MoqCastApp {
                 locale: self.locale,
                 generation: snapshot.media.generation().value(),
                 phase: snapshot.media.phase(),
-                audio_phase: snapshot.watch_audio.phase,
+                frame: self.playback_identity.map(|identity| PlayerFrameSample {
+                    view_generation: identity.view_generation,
+                    decoder_generation: identity.decoder_generation,
+                    sequence: identity.sequence,
+                }),
+                video_codec: snapshot.media_video_codec.as_deref(),
+                decoder: snapshot.media_decoder.as_deref(),
+                audio: &snapshot.watch_audio,
                 device_name: &device_name,
                 texture,
             },

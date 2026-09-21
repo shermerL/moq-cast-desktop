@@ -1,9 +1,9 @@
 //! Remote screen playback page.
 
 use eframe::egui;
-use moqcast_ui::{StatePanelKind, StatePanelSpec, primary_button, state_panel};
+use moqcast_ui::{PlayerFrameSample, StatePanelKind, StatePanelSpec, primary_button, state_panel};
 
-use super::super::player::{LivePlayer, PlayerAction, PlayerMode};
+use super::super::player::{LivePlayer, PlayerAction, PlayerMode, PlayerPlayback};
 use super::super::{AppSnapshot, Locale, MediaState, UserCommand};
 
 pub(in crate::app) enum WatchAction {
@@ -15,6 +15,7 @@ pub(in crate::app) fn show(
     ui: &mut egui::Ui,
     locale: Locale,
     snapshot: &AppSnapshot,
+    frame: Option<PlayerFrameSample>,
     playback: Option<&egui::TextureHandle>,
     player: &mut LivePlayer,
 ) -> Option<WatchAction> {
@@ -23,7 +24,11 @@ pub(in crate::app) fn show(
             .show(
                 ui,
                 locale,
-                snapshot.view_generation,
+                PlayerPlayback {
+                    generation: snapshot.view_generation,
+                    frame,
+                    video: &snapshot.remote_video,
+                },
                 PlayerMode::Preparing {
                     device: device_name(snapshot, path, locale),
                     audio: &snapshot.remote_audio,
@@ -35,7 +40,11 @@ pub(in crate::app) fn show(
             .show(
                 ui,
                 locale,
-                snapshot.view_generation,
+                PlayerPlayback {
+                    generation: snapshot.view_generation,
+                    frame,
+                    video: &snapshot.remote_video,
+                },
                 PlayerMode::Viewing {
                     device: device_name(snapshot, path, locale),
                     stopping: matches!(snapshot.media, MediaState::StoppingView { .. }),

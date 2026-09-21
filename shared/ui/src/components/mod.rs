@@ -6,6 +6,7 @@ mod header;
 mod layout;
 mod navigation;
 mod player;
+mod player_info;
 mod row;
 mod state_panel;
 
@@ -24,6 +25,10 @@ pub use player::{
     DEFAULT_PLAYER_VOLUME_PERCENT, PLAYER_VOLUME_CONTROL_WIDTH, PlayerRects, PlayerSurfaceResponse,
     PlayerVolumeResponse, PlayerVolumeState, player_rects, player_stage, player_stage_at,
     player_surface, player_toolbar, player_toolbar_at, player_volume_control,
+};
+pub use player_info::{
+    PlayerAudioState, PlayerFrameSample, PlayerInfoLocale, PlayerInfoResponse, PlayerInfoSnapshot,
+    PlayerInfoState, player_info_control,
 };
 pub use row::{
     DetailRowSpec, DeviceBadgeSpec, DeviceListItemSpec, DeviceListSpec, DeviceRowSpec,

@@ -2,13 +2,14 @@
 
 use eframe::egui::{self, Align, Color32, Layout, Rect, Sense, TextureHandle, ViewportCommand};
 use moqcast_ui::{
-    ButtonSpec, COLORS, ControlRole, IconButtonSpec, PLAYER_VOLUME_CONTROL_WIDTH,
-    PlayerVolumeState, Size, TypographyRole, control_button, player_icon_button, player_rects,
+    ButtonSpec, COLORS, ControlRole, IconButtonSpec, PLAYER_VOLUME_CONTROL_WIDTH, PlayerAudioState,
+    PlayerFrameSample, PlayerInfoLocale, PlayerInfoSnapshot, PlayerInfoState, PlayerVolumeState,
+    Size, TypographyRole, control_button, player_icon_button, player_info_control, player_rects,
     player_stage_at, player_toolbar_at, player_volume_control, typography,
 };
 
 use super::Locale;
-use crate::playback::AudioPhase;
+use crate::playback::{AudioPhase, AudioSnapshot};
 use crate::runtime::MediaPhase;
 
 const FALLBACK_ASPECT: egui::Vec2 = egui::vec2(16.0, 9.0);
@@ -36,8 +37,13 @@ fn control_layout(available_width: f32) -> ControlLayout {
     } else {
         CONTROL_BUTTON_WIDTH
     };
-    let actions_width =
-        button_width + CONTROL_GAP + Size::CONTROL + CONTROL_GAP + PLAYER_VOLUME_CONTROL_WIDTH;
+    let actions_width = button_width
+        + CONTROL_GAP
+        + Size::CONTROL
+        + CONTROL_GAP
+        + Size::CONTROL
+        + CONTROL_GAP
+        + PLAYER_VOLUME_CONTROL_WIDTH;
     ControlLayout {
         info_width: (available_width - actions_width - CONTROL_GAP).max(0.0),
         actions_width: actions_width.min(available_width),
@@ -85,7 +91,10 @@ pub(super) struct PlayerView<'a> {
     pub(super) locale: Locale,
     pub(super) generation: u64,
     pub(super) phase: MediaPhase,
-    pub(super) audio_phase: AudioPhase,
+    pub(super) frame: Option<PlayerFrameSample>,
+    pub(super) video_codec: Option<&'a str>,
+    pub(super) decoder: Option<&'a str>,
+    pub(super) audio: &'a AudioSnapshot,
     pub(super) device_name: &'a str,
     pub(super) texture: Option<(&'a TextureHandle, (u32, u32))>,
 }
@@ -93,6 +102,7 @@ pub(super) struct PlayerView<'a> {
 #[derive(Default)]
 pub(super) struct Player {
     fullscreen: bool,
+    info: PlayerInfoState,
     volume: PlayerVolumeState,
 }
 
@@ -107,7 +117,9 @@ impl Player {
     }
 
     pub(super) fn show(&mut self, ui: &mut egui::Ui, view: PlayerView<'_>) -> Option<PlayerAction> {
+        self.info.sync_generation(view.generation);
         self.volume.sync_generation(view.generation);
+        let now = ui.input(|input| input.time);
         if self.fullscreen && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
             ui.ctx()
                 .send_viewport_cmd(ViewportCommand::Fullscreen(false));
@@ -135,7 +147,17 @@ impl Player {
         player_stage_at(ui, rects.stage, |_| ());
         paint_surface(ui, rects.stage, layout.image, view.texture);
         paint_status(ui, rects.stage, view.locale, view.phase);
-        show_toolbar(ui, rects.toolbar, &view, self.fullscreen, &mut self.volume)
+        show_toolbar(
+            ui,
+            rects.toolbar,
+            &view,
+            self.fullscreen,
+            now,
+            ToolbarState {
+                info: &mut self.info,
+                volume: &mut self.volume,
+            },
+        )
     }
 }
 
@@ -194,8 +216,10 @@ fn show_toolbar(
     toolbar: Rect,
     view: &PlayerView<'_>,
     fullscreen: bool,
-    volume: &mut PlayerVolumeState,
+    now: f64,
+    state: ToolbarState<'_>,
 ) -> Option<PlayerAction> {
+    let ToolbarState { info, volume } = state;
     let mut action = None;
     player_toolbar_at(ui, toolbar, |ui| {
         let row_layout = control_layout(ui.available_width());
@@ -203,12 +227,13 @@ fn show_toolbar(
             egui::vec2(ui.available_width(), Size::CONTROL),
             Sense::hover(),
         );
-        let info = Rect::from_min_size(row.min, egui::vec2(row_layout.info_width, row.height()));
+        let info_rect =
+            Rect::from_min_size(row.min, egui::vec2(row_layout.info_width, row.height()));
         let actions = Rect::from_min_size(
             egui::pos2(row.right() - row_layout.actions_width, row.top()),
             egui::vec2(row_layout.actions_width, row.height()),
         );
-        let mut info_ui = ui.new_child(egui::UiBuilder::new().max_rect(info));
+        let mut info_ui = ui.new_child(egui::UiBuilder::new().max_rect(info_rect));
         info_ui.horizontal(|ui| {
             if view.phase == MediaPhase::Watching {
                 live_badge(ui);
@@ -282,10 +307,18 @@ fn show_toolbar(
                 }
                 action = Some(PlayerAction::Stop);
             }
+            let _ = player_info_control(
+                ui,
+                info,
+                player_info_locale(view.locale),
+                now,
+                player_info_snapshot(view, volume.muted()),
+                enabled,
+            );
             let volume_response = player_volume_control(
                 ui,
                 volume,
-                audio_playable(view.audio_phase) && enabled,
+                audio_playable(view.audio.phase) && enabled,
                 match view.locale {
                     Locale::Chinese => "静音",
                     Locale::English => "Mute",
@@ -312,6 +345,47 @@ fn show_toolbar(
         });
     });
     action
+}
+
+struct ToolbarState<'a> {
+    info: &'a mut PlayerInfoState,
+    volume: &'a mut PlayerVolumeState,
+}
+
+fn player_info_snapshot<'a>(view: &'a PlayerView<'a>, muted: bool) -> PlayerInfoSnapshot<'a> {
+    PlayerInfoSnapshot {
+        generation: view.generation,
+        frame: view.frame,
+        resolution: view.texture.map(|(_, display)| display),
+        video_codec: view.video_codec,
+        decoder: view.decoder,
+        audio_state: player_audio_state(view.audio.phase, muted),
+        audio_codec: view.audio.codec.as_deref(),
+        audio_sample_rate: view.audio.sample_rate,
+        audio_channels: view.audio.channels,
+    }
+}
+
+fn player_info_locale(locale: Locale) -> PlayerInfoLocale {
+    match locale {
+        Locale::Chinese => PlayerInfoLocale::Chinese,
+        Locale::English => PlayerInfoLocale::English,
+    }
+}
+
+fn player_audio_state(phase: AudioPhase, muted: bool) -> PlayerAudioState {
+    match phase {
+        AudioPhase::Idle | AudioPhase::Pending => PlayerAudioState::Pending,
+        AudioPhase::NoAudio => PlayerAudioState::NoAudio,
+        AudioPhase::Failed => PlayerAudioState::Failed,
+        AudioPhase::TrackSelected | AudioPhase::PcmDecoded | AudioPhase::PcmSubmitted => {
+            if muted {
+                PlayerAudioState::Muted
+            } else {
+                PlayerAudioState::Ready
+            }
+        }
+    }
 }
 
 fn audio_playable(phase: AudioPhase) -> bool {
@@ -388,8 +462,8 @@ mod tests {
     #[test]
     fn compact_toolbar_reserves_volume_and_actions() {
         let layout = control_layout(360.0);
-        assert_eq!(layout.actions_width, 280.0);
-        assert_eq!(layout.info_width, 72.0);
+        assert_eq!(layout.actions_width, 328.0);
+        assert_eq!(layout.info_width, 24.0);
         assert_eq!(layout.button_width, COMPACT_CONTROL_BUTTON_WIDTH);
     }
 
@@ -402,5 +476,29 @@ mod tests {
         assert!(audio_playable(AudioPhase::PcmDecoded));
         assert!(audio_playable(AudioPhase::PcmSubmitted));
         assert!(!audio_playable(AudioPhase::Failed));
+    }
+
+    #[test]
+    fn playback_information_distinguishes_audio_availability_from_local_mute() {
+        assert_eq!(
+            player_audio_state(AudioPhase::Pending, false),
+            PlayerAudioState::Pending
+        );
+        assert_eq!(
+            player_audio_state(AudioPhase::NoAudio, false),
+            PlayerAudioState::NoAudio
+        );
+        assert_eq!(
+            player_audio_state(AudioPhase::PcmSubmitted, true),
+            PlayerAudioState::Muted
+        );
+        assert_eq!(
+            player_audio_state(AudioPhase::PcmSubmitted, false),
+            PlayerAudioState::Ready
+        );
+        assert_eq!(
+            player_audio_state(AudioPhase::Failed, false),
+            PlayerAudioState::Failed
+        );
     }
 }

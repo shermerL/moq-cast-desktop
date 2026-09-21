@@ -131,6 +131,15 @@ pub struct RemoteAudioSnapshot {
     pub last_error: Option<String>,
 }
 
+/// Latest remote video decoder selection for the active screen viewer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteVideoSnapshot {
+    /// Codec of the currently selected video track.
+    pub codec: Option<String>,
+    /// Backend that owns the current video decoder.
+    pub decoder: Option<String>,
+}
+
 /// Discovery details used to update one peer row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscoveredPeer {
@@ -193,6 +202,8 @@ pub struct AppSnapshot {
     pub view_generation: u64,
     /// Remote audio progress for the current viewer.
     pub remote_audio: RemoteAudioSnapshot,
+    /// Remote video decoder metadata for the current viewer.
+    pub remote_video: RemoteVideoSnapshot,
     /// Most recent user-facing runtime failure.
     pub last_error: Option<String>,
 }
@@ -447,6 +458,7 @@ impl AppSnapshot {
             phase: RemoteAudioPhase::Pending,
             ..RemoteAudioSnapshot::default()
         };
+        self.remote_video = RemoteVideoSnapshot::default();
         self.last_error = None;
         Ok(())
     }
@@ -461,6 +473,19 @@ impl AppSnapshot {
             return false;
         }
         self.remote_audio = audio;
+        true
+    }
+
+    /// Update video decoder metadata for the current remote screen.
+    pub fn set_remote_video(&mut self, path: &str, video: RemoteVideoSnapshot) -> bool {
+        let current = match &self.media {
+            MediaState::PreparingView { path } | MediaState::Viewing { path } => path,
+            _ => return false,
+        };
+        if current != path {
+            return false;
+        }
+        self.remote_video = video;
         true
     }
 
@@ -483,6 +508,7 @@ impl AppSnapshot {
         }
         self.media = MediaState::Idle;
         self.remote_audio = RemoteAudioSnapshot::default();
+        self.remote_video = RemoteVideoSnapshot::default();
         self.last_error = Some(error.into());
         Ok(())
     }
@@ -494,6 +520,7 @@ impl AppSnapshot {
         }
         self.media = MediaState::Idle;
         self.remote_audio = RemoteAudioSnapshot::default();
+        self.remote_video = RemoteVideoSnapshot::default();
         Ok(())
     }
 
@@ -514,6 +541,7 @@ impl AppSnapshot {
         }
         self.media = MediaState::Idle;
         self.remote_audio = RemoteAudioSnapshot::default();
+        self.remote_video = RemoteVideoSnapshot::default();
         Ok(())
     }
 
@@ -589,6 +617,25 @@ mod tests {
     }
 
     #[test]
+    fn remote_video_updates_only_the_active_view_path() {
+        let mut snapshot = AppSnapshot {
+            media: MediaState::Viewing {
+                path: "moqcast.screen/current".into(),
+            },
+            ..AppSnapshot::default()
+        };
+        let submitted = RemoteVideoSnapshot {
+            codec: Some("avc1.640028".into()),
+            decoder: Some("vaapi".into()),
+        };
+
+        assert!(!snapshot.set_remote_video("moqcast.screen/old", submitted.clone()));
+        assert_eq!(snapshot.remote_video, RemoteVideoSnapshot::default());
+        assert!(snapshot.set_remote_video("moqcast.screen/current", submitted.clone()));
+        assert_eq!(snapshot.remote_video, submitted);
+    }
+
+    #[test]
     fn stopping_view_resets_remote_audio_state() {
         let mut snapshot = AppSnapshot {
             media: MediaState::StoppingView {
@@ -598,6 +645,10 @@ mod tests {
                 phase: RemoteAudioPhase::PcmSubmitted,
                 ..RemoteAudioSnapshot::default()
             },
+            remote_video: RemoteVideoSnapshot {
+                codec: Some("avc1.640028".into()),
+                decoder: Some("vaapi".into()),
+            },
             ..AppSnapshot::default()
         };
 
@@ -605,5 +656,6 @@ mod tests {
 
         assert_eq!(snapshot.media, MediaState::Idle);
         assert_eq!(snapshot.remote_audio, RemoteAudioSnapshot::default());
+        assert_eq!(snapshot.remote_video, RemoteVideoSnapshot::default());
     }
 }
