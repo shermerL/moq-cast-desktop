@@ -192,7 +192,7 @@ mod tests {
             let c_session = server::accept(request, "proof", accepted_origins)
                 .await
                 .expect("C accepted");
-            (a_session, c_session)
+            (listener, a_session, c_session)
         });
 
         let a_connection = dial(&peer(addr, fingerprint.clone(), "proof"), a)
@@ -205,10 +205,11 @@ mod tests {
             .established()
             .await
             .expect("C established");
-        let (a_session, c_session) = tokio::time::timeout(Duration::from_secs(5), accept)
-            .await
-            .expect("both sessions accepted")
-            .expect("accept task");
+        let (_listener, a_session, c_session) =
+            tokio::time::timeout(Duration::from_secs(5), accept)
+                .await
+                .expect("both sessions accepted")
+                .expect("accept task");
 
         let from_a = a_publish
             .create_broadcast("moqcast.screen/a")
@@ -217,11 +218,17 @@ mod tests {
             .announce(moq_net::origin::Route::default())
             .expect("A announcement");
         tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let update = b_announcements.next().await.expect("B receive origin");
-                if update.prefix.as_str() == "moqcast.screen/a" {
-                    break;
-                }
+            tokio::select! {
+                result = async {
+                    loop {
+                        let update = b_announcements.next().await.expect("B receive origin");
+                        if update.prefix.as_str() == "moqcast.screen/a" {
+                            break;
+                        }
+                    }
+                } => result,
+                closed = a_connection.closed() => panic!("A connection closed before B announcement: {closed:?}"),
+                closed = a_session.closed() => panic!("A session closed before B announcement: {closed:?}"),
             }
         })
         .await
@@ -234,11 +241,17 @@ mod tests {
             .announce(moq_net::origin::Route::default())
             .expect("B announcement");
         tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let update = a_announcements.next().await.expect("A receive origin");
-                if update.prefix.as_str() == "moqcast.screen/b" {
-                    break;
-                }
+            tokio::select! {
+                result = async {
+                    loop {
+                        let update = a_announcements.next().await.expect("A receive origin");
+                        if update.prefix.as_str() == "moqcast.screen/b" {
+                            break;
+                        }
+                    }
+                } => result,
+                closed = a_connection.closed() => panic!("A connection closed before B announcement: {closed:?}"),
+                closed = a_session.closed() => panic!("A session closed before B announcement: {closed:?}"),
             }
         })
         .await
