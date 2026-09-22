@@ -170,7 +170,7 @@ jobs:
           codesign -dv --verbose=4 "$app" 2>&1 | grep -q "Signature=adhoc"
           grep -Fxq "source_commit=${{ github.sha }}" "$app/Contents/Resources/build-info.txt"
           grep -Fxq "minimum_macos=14.2" "$app/Contents/Resources/build-info.txt"
-          grep -Fxq "moq_dependency=moq-dev/moq@81d39f7bf04c82aae324a9ee4251b7f8aa08fb53" "$app/Contents/Resources/build-info.txt"
+          grep -Fxq "moq_dependency=moq-dev/moq@615d166d246b04cde8d0449c80a556f22356f719" "$app/Contents/Resources/build-info.txt"
           test -f "$archive"
           test -f "$archive.sha256"
           cd "$(dirname "$archive")"

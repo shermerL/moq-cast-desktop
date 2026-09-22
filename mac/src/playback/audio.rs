@@ -14,7 +14,7 @@ pub(super) const LIVE_EDGE_BUDGET: Duration = Duration::from_millis(80);
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Identity {
     track: String,
-    broadcast: Option<moq_tokio::moq_net::PathRelativeOwned>,
+    broadcast: Option<moq_tokio::moq_net::path::RelativeOwned>,
     codec: hang::catalog::AudioCodec,
     description: Option<Vec<u8>>,
     container: hang::catalog::Container,
@@ -411,12 +411,11 @@ async fn run(
             return;
         }
     };
-    let sink = match output.sink(moq_audio::playback::Input {
-        format: moq_audio::Format::F32,
-        sample_rate: consumer.sample_rate(),
-        layout: consumer.layout(),
-        ..Default::default()
-    }) {
+    let mut input = moq_audio::playback::Input::default();
+    input.format = moq_audio::Format::F32;
+    input.sample_rate = consumer.sample_rate();
+    input.layout = consumer.layout();
+    let sink = match output.sink(input) {
         Ok(sink) => sink,
         Err(error) => {
             tracing::warn!(

@@ -181,7 +181,7 @@ impl Drop for Owner {
 #[derive(Clone, Debug, PartialEq)]
 struct VideoIdentity {
     track: String,
-    broadcast: Option<moq_tokio::moq_net::PathRelativeOwned>,
+    broadcast: Option<moq_tokio::moq_net::path::RelativeOwned>,
     codec: hang::catalog::VideoCodec,
     description: Option<Vec<u8>>,
     container: hang::catalog::Container,
@@ -856,7 +856,7 @@ impl Frame {
             width > 0 && height > 0 && width.is_multiple_of(2) && height.is_multiple_of(2),
             "remote I420 frame dimensions must be non-zero and even"
         );
-        let i420 = frame.surface.into_i420()?;
+        let i420 = frame.surface.into_i420()?.into_data();
         let pixels = width
             .checked_mul(height)
             .ok_or_else(|| anyhow::anyhow!("remote frame dimensions overflow"))?;

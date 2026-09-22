@@ -64,7 +64,7 @@ pub(crate) fn bind(bind: SocketAddr) -> Result<BoundServer, StartError> {
 }
 
 pub(super) async fn accept(
-    request: moq_tokio::Request,
+    request: moq_tokio::server::Request,
     credential: &str,
     origins: SessionOrigins,
 ) -> Result<moq_tokio::moq_net::Session, AcceptError> {

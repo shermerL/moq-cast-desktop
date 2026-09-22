@@ -49,9 +49,9 @@ fn direct_config(fingerprint: String) -> moq_tokio::connect::Config {
     let mut config = moq_tokio::connect::Config::default();
     config.bind = Some("[::]:0".parse().expect("valid ephemeral bind"));
     config.once = Some(false);
-    config.backoff.timeout = Some(RECONNECT_BUDGET);
+    config.backoff.timeout = RECONNECT_BUDGET;
     config.timeout = CONNECT_TIMEOUT;
-    config.goaway.redirect = Some(moq_tokio::Redirect::Ignore);
+    config.goaway.redirect = moq_tokio::Redirect::Ignore;
     config.version = config
         .versions()
         .iter()
@@ -108,7 +108,7 @@ mod tests {
     fn direct_only_connections_ignore_goaway_redirects() {
         let config = direct_config("00".repeat(32));
 
-        assert_eq!(config.goaway.redirect, Some(moq_tokio::Redirect::Ignore));
+        assert_eq!(config.goaway.redirect, moq_tokio::Redirect::Ignore);
     }
 
     #[tokio::test]
