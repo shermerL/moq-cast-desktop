@@ -12,7 +12,7 @@ use openh264::encoder::{
 use openh264::formats::YUVSlices;
 use openh264_sys2::{ENCODER_OPTION_BITRATE, SBitrateInfo, SPATIAL_LAYER_ALL};
 
-use super::super::encoder::Config;
+use super::super::encoder::{Config, Gop};
 use super::{Backend, Encoded};
 use crate::{Color, Error, Frame};
 
@@ -34,6 +34,7 @@ impl Openh264 {
 	}
 
 	fn new(config: &Config) -> Result<Self, Error> {
+		let Gop::Keyframe { interval } = config.gop;
 		let color = config.resolved_color();
 		// State the color space in the SPS so a decoder doesn't fall back to
 		// guessing it from the frame height.
@@ -52,12 +53,14 @@ impl Openh264 {
 		.full_range(!color.limited());
 
 		let cfg = EncoderConfig::new()
-			.bitrate(BitRate::from_bps(config.resolved_bitrate().min(u32::MAX as u64) as u32))
-			.max_frame_rate(FrameRate::from_hz(config.framerate as f32))
+			.bitrate(BitRate::from_bps(
+				config.resolved_bitrate().as_bps().min(u32::MAX as u64) as u32,
+			))
+			.max_frame_rate(FrameRate::from_hz(config.framerate.as_f64() as f32))
 			.rate_control_mode(RateControlMode::Bitrate)
 			// Real-time camera: prioritize latency over compression.
 			.usage_type(UsageType::CameraVideoRealTime)
-			.intra_frame_period(IntraFramePeriod::from_num_frames(config.gop))
+			.intra_frame_period(IntraFramePeriod::from_num_frames(interval))
 			.vui(vui);
 
 		let encoder = Encoder::with_api_config(OpenH264API::from_source(), cfg)
@@ -117,7 +120,7 @@ impl Openh264 {
 }
 
 impl Backend for Openh264 {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
 		// A rate deferred from before the encoder existed lands here, ahead of the
 		// frame rather than after it, so a rejected rate can't cost us a frame's
 		// packets on the way out.
@@ -127,7 +130,7 @@ impl Backend for Openh264 {
 			self.apply_bitrate(bitrate)?;
 		}
 
-		if keyframe {
+		if cut {
 			self.encoder.force_intra_frame();
 		}
 
@@ -179,7 +182,11 @@ impl Backend for Openh264 {
 		self.apply_bitrate(bitrate)
 	}
 
-	fn name(&self) -> &str {
+	fn can_cut(&self) -> bool {
+		true
+	}
+
+	fn name(&self) -> &'static str {
 		NAME
 	}
 }
@@ -193,14 +200,15 @@ mod tests {
 	fn config() -> Config {
 		Config {
 			kind: Kind::Software,
-			..Config::new(320, 240, 30)
+			..Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
 		}
 	}
 
 	/// A mid-gray frame at an arbitrary time; these tests only exercise the rate
 	/// controls, so the timestamp is never read back.
 	fn gray() -> Frame {
-		let i420 = I420::new(320, 240, vec![0x80u8; I420::len(320, 240)]).unwrap();
+		let size = crate::Size::new(320, 240);
+		let i420 = I420::new(size, vec![0x80u8; I420::len(size).unwrap()]).unwrap();
 		Frame::new(Surface::I420(i420), moq_net::Timestamp::from_micros(0).unwrap())
 	}
 
@@ -211,7 +219,7 @@ mod tests {
 		let mut enc = Openh264::new(&config()).unwrap();
 		enc.encode(&gray(), true).unwrap();
 
-		let lower = config().resolved_bitrate() / 2;
+		let lower = config().resolved_bitrate().as_bps() / 2;
 		enc.set_bitrate(lower).unwrap();
 		assert_eq!(enc.read_bitrate(), lower as i64);
 	}
@@ -225,7 +233,7 @@ mod tests {
 		let mut enc = Openh264::new(&config()).unwrap();
 		enc.encode(&gray(), true).unwrap();
 
-		let higher = config().resolved_bitrate() * 4;
+		let higher = config().resolved_bitrate().as_bps() * 4;
 		assert!(enc.set_bitrate(higher).is_err());
 	}
 
@@ -236,7 +244,7 @@ mod tests {
 	fn set_bitrate_at_the_opening_rate_is_accepted() {
 		let mut enc = Openh264::new(&config()).unwrap();
 		enc.encode(&gray(), true).unwrap();
-		let opened = config().resolved_bitrate();
+		let opened = config().resolved_bitrate().as_bps();
 
 		enc.set_bitrate(opened / 2).unwrap();
 		enc.set_bitrate(opened).unwrap();
@@ -251,7 +259,7 @@ mod tests {
 	#[test]
 	fn a_live_set_supersedes_a_deferred_one() {
 		let mut enc = Openh264::new(&config()).unwrap();
-		let opened = config().resolved_bitrate();
+		let opened = config().resolved_bitrate().as_bps();
 
 		// Deferred: the encoder doesn't exist yet.
 		enc.set_bitrate(opened / 2).unwrap();
@@ -278,7 +286,7 @@ mod tests {
 		] {
 			let config = Config {
 				kind: Kind::Software,
-				..Config::new(size.width, size.height, 30)
+				..Config::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
 			};
 			let mut enc = Openh264::new(&config).unwrap();
 

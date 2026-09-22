@@ -41,8 +41,9 @@ pub(crate) fn dial(
     let mut config = moq_tokio::connect::Config::default();
     config.bind = Some("[::]:0".parse().expect("valid ephemeral bind"));
     config.once = Some(false);
-    config.backoff.timeout = Some(RECONNECT_BUDGET);
-    config.timeout = Some(CONNECT_TIMEOUT);
+    config.backoff.timeout = RECONNECT_BUDGET;
+    config.timeout = CONNECT_TIMEOUT;
+    config.goaway.redirect = moq_tokio::Redirect::Ignore;
     config.version = config
         .versions()
         .iter()
@@ -100,10 +101,7 @@ mod tests {
     }
 
     fn origin_pair() -> (moq_net::origin::Producer, moq_net::origin::Producer) {
-        (
-            moq_tokio::origin::spawn(moq_net::Origin::random()),
-            moq_tokio::origin::spawn(moq_net::Origin::random()),
-        )
+        (moq_tokio::origin::spawn(), moq_tokio::origin::spawn())
     }
 
     fn publish_test_screen(
@@ -111,8 +109,9 @@ mod tests {
         path: &str,
         payload: &'static [u8],
     ) -> (moq_net::broadcast::Producer, moq_net::track::Producer) {
-        let mut broadcast = origin
-            .create_broadcast(path, moq_net::broadcast::Route::new().with_announce(true))
+        let broadcast = origin.create_broadcast(path).unwrap();
+        broadcast
+            .announce(moq_net::origin::Route::default())
             .unwrap();
         let mut track = broadcast.create_track("video", None).unwrap();
         let mut group = track.append_group().unwrap();
@@ -125,11 +124,12 @@ mod tests {
 
     async fn find_available(
         announcements: &mut moq_net::announce::Consumer,
+        origin: &moq_net::origin::Producer,
         path: &str,
     ) -> Option<moq_net::broadcast::Consumer> {
         while let Some(update) = announcements.next().await {
-            if update.path.as_str() == path && update.broadcast.is_some() {
-                return update.broadcast;
+            if update.prefix.as_str() == path && update.kind.is_active() {
+                return origin.consume().request_broadcast(path).await.ok();
             }
         }
         None
@@ -137,12 +137,16 @@ mod tests {
 
     async fn expect_available(
         announcements: &mut moq_net::announce::Consumer,
+        origin: &moq_net::origin::Producer,
         path: &str,
     ) -> moq_net::broadcast::Consumer {
-        tokio::time::timeout(Duration::from_secs(3), find_available(announcements, path))
-            .await
-            .expect("announcement stayed bounded")
-            .expect("origin closed before the expected announcement")
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            find_available(announcements, origin, path),
+        )
+        .await
+        .expect("announcement stayed bounded")
+        .expect("origin closed before the expected announcement")
     }
 
     async fn read_test_frame(broadcast: &moq_net::broadcast::Consumer) -> Vec<u8> {
@@ -171,12 +175,12 @@ mod tests {
         let (server, addr, fingerprint) = listener().await;
         let mut listener = server.listen().await.unwrap();
 
-        let a_publish = moq_tokio::origin::spawn(moq_net::Origin::random());
-        let a_receive = moq_tokio::origin::spawn(moq_net::Origin::random());
-        let b_publish = moq_tokio::origin::spawn(moq_net::Origin::random());
-        let b_receive = moq_tokio::origin::spawn(moq_net::Origin::random());
-        let c_publish = moq_tokio::origin::spawn(moq_net::Origin::random());
-        let c_receive = moq_tokio::origin::spawn(moq_net::Origin::random());
+        let a_publish = moq_tokio::origin::spawn();
+        let a_receive = moq_tokio::origin::spawn();
+        let b_publish = moq_tokio::origin::spawn();
+        let b_receive = moq_tokio::origin::spawn();
+        let c_publish = moq_tokio::origin::spawn();
+        let c_receive = moq_tokio::origin::spawn();
 
         let mut a_announcements = a_receive.consume().announced();
         let mut b_announcements = b_receive.consume().announced();
@@ -202,9 +206,9 @@ mod tests {
         let a_connection = a_connection.unwrap();
         let b_a_session = b_a_session.unwrap();
 
-        let a_on_b = expect_available(&mut b_announcements, "moqcast.screen/a").await;
+        let a_on_b = expect_available(&mut b_announcements, &b_receive, "moqcast.screen/a").await;
         assert_eq!(read_test_frame(&a_on_b).await, b"from-a");
-        let b_on_a = expect_available(&mut a_announcements, "moqcast.screen/b").await;
+        let b_on_a = expect_available(&mut a_announcements, &a_receive, "moqcast.screen/b").await;
         assert_eq!(read_test_frame(&b_on_a).await, b"from-b");
 
         let c_pending = dial(
@@ -224,12 +228,16 @@ mod tests {
         let c_connection = c_connection.unwrap();
         let b_c_session = b_c_session.unwrap();
 
-        let b_on_c = expect_available(&mut c_b_announcements, "moqcast.screen/b").await;
+        let b_on_c = expect_available(&mut c_b_announcements, &c_receive, "moqcast.screen/b").await;
         assert_eq!(read_test_frame(&b_on_c).await, b"from-b");
 
         let relayed_to_c = tokio::time::timeout(
             Duration::from_secs(1),
-            find_available(&mut c_no_relay_announcements, "moqcast.screen/a"),
+            find_available(
+                &mut c_no_relay_announcements,
+                &c_receive,
+                "moqcast.screen/a",
+            ),
         )
         .await
         .ok()
@@ -239,8 +247,8 @@ mod tests {
             "B must not republish A's remote screen to C"
         );
 
-        a_connection.close();
-        c_connection.close();
+        a_connection.abort(moq_net::Error::Cancel);
+        c_connection.abort(moq_net::Error::Cancel);
         b_a_session.abort(moq_net::Error::Cancel);
         b_c_session.abort(moq_net::Error::Cancel);
     }
@@ -275,7 +283,7 @@ mod tests {
         let session = accept.await.unwrap().unwrap();
 
         assert!(connection.connected());
-        connection.close();
+        connection.abort(moq_net::Error::Cancel);
         session.abort(moq_net::Error::Cancel);
     }
 
@@ -341,7 +349,7 @@ mod tests {
             result.is_err(),
             "fingerprint failures remain in bounded backoff"
         );
-        connection.close();
+        connection.abort(moq_net::Error::Cancel);
         accept.abort();
     }
 
@@ -373,7 +381,7 @@ mod tests {
         let session = accept.await.unwrap().unwrap();
 
         assert!(connection.connected());
-        connection.close();
+        connection.abort(moq_net::Error::Cancel);
         session.abort(moq_net::Error::Cancel);
     }
 }

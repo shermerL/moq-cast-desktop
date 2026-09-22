@@ -38,7 +38,7 @@ use spa::param::video::{VideoFormat, VideoInfoRaw};
 use super::channel::FrameChannel;
 use super::cleanup;
 use super::pump::Geometry;
-use super::{Config, FrameStream};
+use super::{Config, Stream};
 use crate::frame::{DmaBuf, DmaBufFrame, DmaBufPlane, DrmFormat, I420, Surface, wait_dma_buf_readable};
 use crate::{Color, Error, Size};
 
@@ -58,7 +58,7 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The portal restore token from the last grant, replayed on the next [`open`]
 /// so a demand-driven reopen skips the picker dialog. Process-wide because the
-/// capture session (and its `FrameStream`) is torn down between opens.
+/// capture session (and its `Stream`) is torn down between opens.
 static RESTORE_TOKEN: Mutex<Option<String>> = Mutex::new(None);
 
 fn err(ctx: &str, e: impl std::fmt::Display) -> Error {
@@ -66,7 +66,7 @@ fn err(ctx: &str, e: impl std::fmt::Display) -> Error {
 }
 
 /// Open a portal screen capture and stream its frames from a PipeWire loop thread.
-pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameStream, Error> {
+pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream, Error> {
 	if let Some(device) = device {
 		tracing::debug!(%device, "portal screen capture ignores the device selector; the picker owns selection");
 	}
@@ -75,7 +75,10 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 	let (node_id, fd, session) = portal_negotiate(config.cursor, &cleanup).await?;
 
 	let chan = FrameChannel::new();
-	let framerate = config.framerate.unwrap_or(DEFAULT_FRAMERATE).max(1);
+	let framerate = config
+		.framerate
+		.unwrap_or(crate::Rate::integer(DEFAULT_FRAMERATE))
+		.rounded();
 	let (geo_tx, geo_rx) = tokio::sync::oneshot::channel();
 	let (quit_tx, quit_rx) = pw::channel::channel::<()>();
 	let (return_tx, return_rx) = pw::channel::channel::<Lease>();
@@ -94,6 +97,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 				fresh: false,
 				generation: 0,
 				dmabuf_modifier: None,
+				terminal: None,
 			}));
 			if let Err(e) = run_loop(CaptureLoop {
 				fd,
@@ -114,7 +118,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 					.fail(format!("screen capture stream failed: {e}"));
 				match state.borrow_mut().geo_tx.take() {
 					Some(tx) => drop(tx.send(Err(e))),
-					None => tracing::warn!(error = %e, "screen capture stream failed"),
+					None => chan.fail(e),
 				}
 			}
 			chan.close();
@@ -148,8 +152,9 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 	};
 
 	let first = match tokio::time::timeout(FIRST_FRAME_TIMEOUT, chan.recv()).await {
-		Ok(Some(frame)) => frame,
-		Ok(None) | Err(_) => {
+		Ok(Ok(Some(frame))) => frame,
+		Ok(Err(error)) => return Err(error),
+		Ok(Ok(None)) | Err(_) => {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"no frames from the compositor within {FIRST_FRAME_TIMEOUT:?}"
 			)));
@@ -163,12 +168,12 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 		"opened screen capture (PipeWire)"
 	);
 
-	Ok(FrameStream::new(
+	Ok(Stream::new(
 		chan,
 		geo.width,
 		geo.height,
 		geo.framerate,
-		geo.device,
+		geo.label,
 		Some(first),
 		Box::new(guard),
 	))
@@ -236,7 +241,7 @@ async fn portal_negotiate(cursor: bool, cleanup: &cleanup::Handle) -> Result<(u3
 		.await
 		.map_err(|e| err("portal start", e))?
 		.response()
-		.map_err(|e| err("screen capture request denied", e))?;
+		.map_err(|e| Error::PermissionDenied(format!("screen capture request: {e}")))?;
 	*RESTORE_TOKEN.lock().unwrap() = response.restore_token().map(str::to_string);
 
 	let stream = response
@@ -293,6 +298,8 @@ struct State {
 	generation: u64,
 	/// Explicit DRM modifier from the negotiated DMA-BUF format.
 	dmabuf_modifier: Option<u64>,
+	/// Why a live stream ended, if it was not an intentional restart or teardown.
+	terminal: Option<Error>,
 }
 
 /// A retained frame for the static-screen pacing tick.
@@ -378,12 +385,16 @@ impl DmaBufFrame for PipeWireDmaBuf {
 						None => frame,
 					})
 				}
-				DrmFormat::XRGB8888 | DrmFormat::ARGB8888 => {
-					I420::from_bgra(data, self.layout.stride, self.layout.width, self.layout.height)
-				}
-				DrmFormat::XBGR8888 | DrmFormat::ABGR8888 => {
-					I420::from_rgba(data, self.layout.stride, self.layout.width, self.layout.height)
-				}
+				DrmFormat::XRGB8888 | DrmFormat::ARGB8888 => I420::from_bgra(
+					data,
+					self.layout.stride,
+					crate::Size::new(self.layout.width, self.layout.height),
+				),
+				DrmFormat::XBGR8888 | DrmFormat::ABGR8888 => I420::from_rgba(
+					data,
+					self.layout.stride,
+					crate::Size::new(self.layout.width, self.layout.height),
+				),
 				other => Err(Error::Codec(anyhow::anyhow!(
 					"cannot download DMA-BUF format {:#x}",
 					other.as_raw()
@@ -587,7 +598,7 @@ fn nv12_to_i420(data: &[u8], layout: FrameLayout) -> Result<I420, Error> {
 		packed[packed_uv + row * width..packed_uv + (row + 1) * width]
 			.copy_from_slice(&uv[row * stride..row * stride + width]);
 	}
-	I420::from_nv12(&packed, width as u32, height as u32)
+	I420::from_nv12(&packed, crate::Size::new(width as u32, height as u32))
 }
 
 /// Queues a raw PipeWire buffer unless ownership is transferred to a DMA-BUF
@@ -773,6 +784,10 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					// teardown quits the loop before anything disconnects, so it
 					// never reaches this path.
 					*RESTORE_TOKEN.lock().unwrap() = None;
+					state.borrow_mut().terminal = Some(Error::SourceUnavailable(match &new {
+						pw::stream::StreamState::Error(error) => format!("PipeWire stream failed: {error}"),
+						_ => "the selected screen is no longer available".to_string(),
+					}));
 					// Keep source loss terminal even when demand-idle wins the select.
 					state
 						.borrow()
@@ -855,6 +870,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 							Some(tx) => drop(tx.send(Err(e))),
 							None => {
 								tracing::warn!(error = %e, "unsupported pipewire video color space");
+								state.terminal = Some(e);
 								if let Some(mainloop) = mainloop.upgrade() {
 									mainloop.quit();
 								}
@@ -870,12 +886,12 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					// The compositor reports 0/1 for a variable rate; only a real
 					// rate is worth forwarding to the encoder.
 					let fr = state.format.framerate();
-					let framerate = (fr.num > 0 && fr.denom > 0).then(|| (fr.num / fr.denom).max(1));
+					let framerate = crate::Rate::new(fr.num, fr.denom).ok();
 					let _ = tx.send(Ok(Geometry {
 						width,
 						height,
 						framerate,
-						device: format!("pipewire:{node_id}"),
+						label: format!("pipewire:{node_id}"),
 					}));
 				} else if format_requires_restart(state.geometry, state.color, width, height, color) {
 					// The encoder's geometry and VUI are fixed when it opens. End the
@@ -1054,6 +1070,9 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 				// means the producer forced an unsupported buffer representation.
 				let Some(bytes) = data.data() else {
 					tracing::warn!("pipewire buffer is not CPU-mapped; stopping capture");
+					state.terminal = Some(Error::SourceUnavailable(
+						"PipeWire buffer is not CPU-mapped".to_string(),
+					));
 					if let Some(mainloop) = mainloop.upgrade() {
 						mainloop.quit();
 					}
@@ -1074,6 +1093,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					Err(e) => {
 						// Persistent (bad format), not per-frame; stop rather than spam.
 						tracing::warn!(error = %e, "screen frame conversion failed; stopping capture");
+						state.terminal = Some(e);
 						if let Some(mainloop) = mainloop.upgrade() {
 							mainloop.quit();
 						}
@@ -1124,7 +1144,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 		.into_result()
 		.map_err(|e| err("pipewire timer", e))?;
 
-	// Quit when the FrameStream drops.
+	// Quit when the Stream drops.
 	let _quit = quit_rx.attach(mainloop.loop_(), {
 		let mainloop = mainloop.downgrade();
 		move |_| {
@@ -1135,7 +1155,11 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 	});
 
 	mainloop.run();
-	Ok(())
+	let terminal = state.borrow_mut().terminal.take();
+	match terminal {
+		Some(error) => Err(error),
+		None => Ok(()),
+	}
 }
 
 fn normalize_chunk_offset(offset: u32, maxsize: u32) -> Option<usize> {
@@ -1285,9 +1309,16 @@ fn color_from_pipewire(range: u32, matrix: u32, size: Size) -> Result<Option<Col
 	}))
 }
 
-// Older distribution headers omit these stable SPA enum names.
-const PIPEWIRE_TRANSFER_BT2020_10: u32 = 13;
-const PIPEWIRE_TRANSFER_BT601: u32 = 16;
+/// `SPA_VIDEO_TRANSFER_BT2020_10` and `SPA_VIDEO_TRANSFER_BT601`, spelled out.
+///
+/// Both were appended to libspa's `spa_video_transfer_function`, so a header
+/// older than they are does not define the names and `spa::sys` does not export
+/// them. The values travel on the wire either way, and a build against an older
+/// libspa still has to recognise a stream carrying one. libspa's own
+/// documentation notes that both are functionally the same transfer function as
+/// `BT709`, which is why all three are accepted together.
+const SPA_VIDEO_TRANSFER_BT2020_10: spa::sys::spa_video_transfer_function = 13;
+const SPA_VIDEO_TRANSFER_BT601: spa::sys::spa_video_transfer_function = 16;
 
 fn validate_pipewire_description(color: Color, primaries: u32, transfer: u32) -> Result<(), Error> {
 	let expected_primaries = match color {
@@ -1303,8 +1334,8 @@ fn validate_pipewire_description(color: Color, primaries: u32, transfer: u32) ->
 		transfer,
 		spa::sys::SPA_VIDEO_TRANSFER_UNKNOWN
 			| spa::sys::SPA_VIDEO_TRANSFER_BT709
-			| PIPEWIRE_TRANSFER_BT601
-			| PIPEWIRE_TRANSFER_BT2020_10
+			| SPA_VIDEO_TRANSFER_BT601
+			| SPA_VIDEO_TRANSFER_BT2020_10
 	) {
 		return Err(Error::Codec(anyhow::anyhow!(
 			"unsupported PipeWire NV12 transfer function {transfer}"
@@ -1333,8 +1364,12 @@ fn convert(format: VideoFormat, bytes: &[u8], layout: FrameLayout, color: Option
 				None => frame,
 			})
 		}
-		VideoFormat::BGRx | VideoFormat::BGRA => I420::from_bgra(bytes, layout.stride, layout.width, layout.height),
-		VideoFormat::RGBx | VideoFormat::RGBA => I420::from_rgba(bytes, layout.stride, layout.width, layout.height),
+		VideoFormat::BGRx | VideoFormat::BGRA => {
+			I420::from_bgra(bytes, layout.stride, crate::Size::new(layout.width, layout.height))
+		}
+		VideoFormat::RGBx | VideoFormat::RGBA => {
+			I420::from_rgba(bytes, layout.stride, crate::Size::new(layout.width, layout.height))
+		}
 		other => Err(Error::Codec(anyhow::anyhow!(
 			"pipewire negotiated an unsupported video format {other:?}"
 		))),
@@ -1983,7 +2018,11 @@ mod tests {
 		assert!(stream.height() >= 2 && stream.height().is_multiple_of(2), "bad height");
 
 		for i in 0..5 {
-			let frame = stream.read().await.unwrap_or_else(|| panic!("no frame {i}"));
+			let frame = stream
+				.read()
+				.await
+				.unwrap_or_else(|error| panic!("read frame {i}: {error}"))
+				.unwrap_or_else(|| panic!("no frame {i}"));
 			assert_eq!(frame.width(), stream.width());
 			assert_eq!(frame.height(), stream.height());
 		}

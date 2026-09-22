@@ -43,52 +43,14 @@ impl PlaybackFrame {
         frame: moq_video::Frame,
         identity: PlaybackFrameIdentity,
     ) -> anyhow::Result<Self> {
-        let width = frame.surface.width() as usize;
-        let height = frame.surface.height() as usize;
-        anyhow::ensure!(
-            width > 0 && height > 0 && width.is_multiple_of(2) && height.is_multiple_of(2),
-            "remote I420 frame dimensions must be non-zero and even"
-        );
-        let i420 = frame.surface.into_i420()?;
-        let pixels = width
-            .checked_mul(height)
-            .ok_or_else(|| anyhow::anyhow!("remote frame dimensions overflow"))?;
-        let i420_len = pixels
-            .checked_mul(3)
-            .map(|length| length / 2)
-            .ok_or_else(|| anyhow::anyhow!("remote I420 frame length overflow"))?;
-        anyhow::ensure!(
-            i420.len() == i420_len,
-            "remote I420 frame has an invalid byte length"
-        );
-        let u_offset = pixels;
-        let v_offset = pixels + pixels / 4;
-        let rgba_len = pixels
-            .checked_mul(4)
-            .ok_or_else(|| anyhow::anyhow!("remote RGBA frame length overflow"))?;
-        let mut rgba = Vec::with_capacity(rgba_len);
-        for y in 0..height {
-            for x in 0..width {
-                let luma = i32::from(i420[y * width + x]) - 16;
-                let chroma = (y / 2) * (width / 2) + x / 2;
-                let u = i32::from(i420[u_offset + chroma]) - 128;
-                let v = i32::from(i420[v_offset + chroma]) - 128;
-                let r = (298 * luma + 409 * v + 128) >> 8;
-                let g = (298 * luma - 100 * u - 208 * v + 128) >> 8;
-                let b = (298 * luma + 516 * u + 128) >> 8;
-                rgba.extend_from_slice(&[
-                    r.clamp(0, 255) as u8,
-                    g.clamp(0, 255) as u8,
-                    b.clamp(0, 255) as u8,
-                    255,
-                ]);
-            }
-        }
+        let image = frame
+            .surface
+            .to_rgba(&moq_video::convert::Config::default())?;
         Ok(Self {
             identity,
-            width,
-            height,
-            rgba,
+            width: image.width() as usize,
+            height: image.height() as usize,
+            rgba: image.into_data(),
         })
     }
 }
@@ -187,6 +149,34 @@ impl Drop for RuntimeHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn decoded_i420_uses_the_vendor_rgba_conversion() {
+        let size = moq_video::Size::new(2, 2);
+        let pixels = moq_video::I420::new(size, vec![16, 16, 16, 16, 128, 128]).unwrap();
+        let frame = moq_video::Frame::new(
+            moq_video::Surface::I420(pixels),
+            moq_tokio::moq_net::Timestamp::ZERO,
+        );
+        let identity = PlaybackFrameIdentity {
+            view_generation: 1,
+            decoder_generation: 1,
+            sequence: 1,
+        };
+
+        let converted = PlaybackFrame::from_video(frame, identity).unwrap();
+        assert_eq!((converted.width, converted.height), (2, 2));
+        assert_eq!(converted.rgba.len(), 16);
+        assert_eq!(
+            converted
+                .rgba
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>(),
+            vec![255; 4]
+        );
+    }
 
     #[test]
     fn equal_sequences_from_different_view_generations_are_different_frames() {

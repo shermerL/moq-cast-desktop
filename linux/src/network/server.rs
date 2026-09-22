@@ -15,7 +15,9 @@ pub(crate) enum AcceptError {
 
 pub(crate) fn build() -> Result<moq_tokio::Server, moq_tokio::Error> {
     let mut config = moq_tokio::listen::Config::default();
-    config.bind = Some("[::]:0".into());
+    config.bind = Some(moq_tokio::listen::Bind::Addr(
+        "[::]:0".parse().expect("valid listener bind"),
+    ));
     config.tls.generate = vec!["moq-cast-desktop".into()];
     config.init(moq_tokio::quic::Config::default())
 }
@@ -31,7 +33,7 @@ pub(crate) async fn accept(
     receive_origin: moq_net::origin::Producer,
 ) -> Result<moq_net::Session, AcceptError> {
     if !authorized_request(&request, credential) {
-        request.close(403).await?;
+        request.reject(moq_tokio::server::Reject::Forbidden).await?;
         return Err(AcceptError::Unauthorized);
     }
 

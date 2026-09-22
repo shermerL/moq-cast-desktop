@@ -102,6 +102,23 @@ impl MediaClock {
         }
         true
     }
+
+    fn invalidate_audio(&self, generation: u64) -> bool {
+        let notify = {
+            let mut state = self.audio.lock().expect("media clock mutex poisoned");
+            let Some(current) = state
+                .as_mut()
+                .filter(|state| state.generation == generation)
+            else {
+                return false;
+            };
+            current.anchor.take().is_some()
+        };
+        if notify {
+            self.changed.notify_one();
+        }
+        true
+    }
 }
 
 pub(super) struct AudioLease {
@@ -115,6 +132,10 @@ impl AudioLease {
             self.generation,
             Clock::new(audio_media_position(end, buffered), wall),
         )
+    }
+
+    pub(super) fn invalidate(&self) -> bool {
+        self.clock.invalidate_audio(self.generation)
     }
 }
 
@@ -275,6 +296,28 @@ mod tests {
         );
         drop(fresh);
         assert!(media.audio_anchor().is_none());
+    }
+
+    #[test]
+    fn dropped_pcm_invalidates_only_its_own_audio_anchor() {
+        let media = Arc::new(MediaClock::default());
+        let old = media.audio(1);
+        assert!(old.anchor(at(1_000_000), Duration::ZERO, Instant::now()));
+        let fresh = media.audio(2);
+        assert!(fresh.anchor(at(2_000_000), Duration::ZERO, Instant::now()));
+
+        assert!(!old.invalidate());
+        assert_eq!(
+            media.audio_anchor().map(|clock| clock.media),
+            Some(at(2_000_000))
+        );
+        assert!(fresh.invalidate());
+        assert!(media.audio_anchor().is_none());
+        assert!(fresh.anchor(at(3_000_000), Duration::ZERO, Instant::now()));
+        assert_eq!(
+            media.audio_anchor().map(|clock| clock.media),
+            Some(at(3_000_000))
+        );
     }
 
     #[tokio::test]

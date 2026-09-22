@@ -4,10 +4,11 @@
 //! The decode-side mirror of [`encode::Sink`](crate::encode::Sink), for the same
 //! reason: the Windows backend is a Media Foundation transform whose COM handles
 //! must be created, driven, and dropped all on one thread (COM apartments are
-//! per-thread). `unsafe impl Send for MediaFoundation` holds only while that is
-//! true, and a decoder held across `.await` in a plain task does not keep it: the
-//! future migrates between executor workers, so the apartment is opened on one
-//! and closed on another.
+//! per-thread). Backends are `!Send` and the synchronous `Decoder` inherits it;
+//! confinement is enforced by that plus the `Worker` below, which keeps the
+//! whole codec lifetime on one thread. A decoder held across `.await` in a
+//! plain task does not keep it: the future migrates between executor workers,
+//! so the apartment is opened on one and closed on another.
 //!
 //! macOS keeps decoding inline: VideoToolbox has no COM apartment to balance, so
 //! a thread would only add a hop, and its zero-copy `CVPixelBuffer` surface is
@@ -39,11 +40,11 @@ use threaded::Inner;
 ///
 /// # Cancellation
 ///
-/// Not cancel-safe, and it says so rather than letting it slide. A queued decode
+/// Not cancel-safe, and it says so rather than letting it slide. A queued request
 /// runs whether or not anyone is still waiting, so dropping the future (racing it
-/// in a `select!`, giving it a timeout) leaves the decoder a step ahead of the
-/// stream, holding frames nobody received. Rather than let the next call carry on
-/// against a decoder that has moved, the sink refuses every call after a
+/// in a `select!`, giving it a timeout) can leave the decoder a step ahead of the
+/// caller. Rather than let the next call carry on against a decoder that has moved,
+/// the sink refuses every call after a
 /// cancelled one. Drop it and open another.
 ///
 /// macOS never refuses, because there is no thread to run ahead: the decoder runs
@@ -73,6 +74,14 @@ impl Sink {
 	pub async fn decode(&mut self, payload: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Frame>, Error> {
 		self.0.decode(payload, timestamp, keyframe).await
 	}
+
+	/// Drain the frames the decoder still holds once the stream has ended.
+	///
+	/// Otherwise [`Decoder::flush`](super::Decoder::flush), confined to the codec
+	/// thread like [`decode`](Self::decode).
+	pub async fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		self.0.flush().await
+	}
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -94,6 +103,9 @@ mod threaded {
 			payload: Bytes,
 			timestamp: Timestamp,
 			keyframe: bool,
+			resp: oneshot::Sender<Result<Vec<Frame>, Error>>,
+		},
+		Flush {
 			resp: oneshot::Sender<Result<Vec<Frame>, Error>>,
 		},
 	}
@@ -121,6 +133,9 @@ mod threaded {
 					resp,
 				} => {
 					let _ = resp.send(decoder.decode(&payload, timestamp, keyframe));
+				}
+				Request::Flush { resp } => {
+					let _ = resp.send(decoder.flush());
 				}
 			}
 		}
@@ -160,6 +175,10 @@ mod threaded {
 				})
 				.await
 		}
+
+		pub async fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+			self.0.request(|resp| Request::Flush { resp }).await
+		}
 	}
 }
 
@@ -174,6 +193,11 @@ mod inline {
 
 	/// A [`Decoder`] driven inline on the calling thread (see the module docs).
 	pub struct Inner(Decoder);
+
+	// SAFETY: VideoToolbox and Core Foundation handles may move between threads
+	// when calls remain serialized. `Sink` provides that serialization; the
+	// synchronous `Decoder` remains thread-bound.
+	unsafe impl Send for Inner {}
 
 	impl Inner {
 		pub async fn open(catalog: &VideoConfig, config: &Config) -> Result<Self, Error> {
@@ -193,6 +217,10 @@ mod inline {
 			keyframe: bool,
 		) -> Result<Vec<Frame>, Error> {
 			self.0.decode(&payload, timestamp, keyframe)
+		}
+
+		pub async fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+			self.0.flush()
 		}
 	}
 }

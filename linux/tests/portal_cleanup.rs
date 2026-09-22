@@ -1,4 +1,4 @@
-//! Run the vendored production cleanup ownership and exit-policy regressions.
+//! Run the vendored production Portal cleanup ownership regressions.
 
 #[path = "../vendor/moq-video/src/capture/cleanup.rs"]
 #[rustfmt::skip]

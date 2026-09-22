@@ -42,7 +42,7 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface};
 
-use super::super::encoder::{Codec, Config};
+use super::super::encoder::{Codec, Config, Gop};
 use super::{Backend, Encoded};
 use crate::frame::{Surface, interleave_uv};
 use crate::mf::{ComGuard, mf_err, pack_2x32};
@@ -63,8 +63,9 @@ pub(crate) struct MediaFoundation {
 	codec: Codec,
 	width: u32,
 	height: u32,
-	framerate: u32,
+	framerate: crate::Rate,
 	bitrate: u32,
+	/// Keyframe interval in frames.
 	gop: u32,
 	/// The color space of the input frames, stamped onto both media types so the
 	/// encoder writes it into the bitstream's VUI.
@@ -100,12 +101,6 @@ pub(crate) struct MediaFoundation {
 	_manager: Option<IMFDXGIDeviceManager>,
 	_com: ComGuard,
 }
-
-// The MFT and its COM handles are created, driven, and dropped only on the
-// dedicated encode thread (see `encode::sink`), so the per-thread COM apartment
-// this opens in `ComGuard::new` stays balanced. `Send` lets the boxed trait
-// object satisfy `Backend: Send`.
-unsafe impl Send for MediaFoundation {}
 
 impl MediaFoundation {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
@@ -143,8 +138,11 @@ impl MediaFoundation {
 			width: config.width,
 			height: config.height,
 			framerate: config.framerate,
-			bitrate: clamp_u32(config.resolved_bitrate()),
-			gop: config.gop,
+			bitrate: clamp_u32(config.resolved_bitrate().as_bps()),
+			gop: {
+				let Gop::Keyframe { interval } = config.gop;
+				interval
+			},
 			color: config.resolved_color(),
 			started: false,
 			provides_samples: false,
@@ -283,7 +281,10 @@ impl MediaFoundation {
 				.SetUINT64(&MF_MT_FRAME_SIZE, pack_2x32(self.width, self.height))
 				.map_err(|e| mf_err("output frame size", e))?;
 			media
-				.SetUINT64(&MF_MT_FRAME_RATE, pack_2x32(self.framerate, 1))
+				.SetUINT64(
+					&MF_MT_FRAME_RATE,
+					pack_2x32(self.framerate.numerator(), self.framerate.denominator()),
+				)
 				.map_err(|e| mf_err("output frame rate", e))?;
 			self.set_color(&media)?;
 			self.transform
@@ -309,7 +310,10 @@ impl MediaFoundation {
 				.SetUINT64(&MF_MT_FRAME_SIZE, pack_2x32(self.width, self.height))
 				.map_err(|e| mf_err("input frame size", e))?;
 			media
-				.SetUINT64(&MF_MT_FRAME_RATE, pack_2x32(self.framerate, 1))
+				.SetUINT64(
+					&MF_MT_FRAME_RATE,
+					pack_2x32(self.framerate.numerator(), self.framerate.denominator()),
+				)
 				.map_err(|e| mf_err("input frame rate", e))?;
 			self.set_color(&media)?;
 			self.transform
@@ -360,7 +364,7 @@ impl MediaFoundation {
 
 	/// One frame's worth of the Media Foundation sample clock, in 100ns units.
 	fn tick(&self) -> i64 {
-		HNS_PER_SEC / self.framerate.max(1) as i64
+		HNS_PER_SEC * i64::from(self.framerate.denominator()) / i64::from(self.framerate.numerator())
 	}
 
 	/// The sample time for the frame currently going in.
@@ -579,7 +583,7 @@ impl MediaFoundation {
 }
 
 impl Backend for MediaFoundation {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
 		if !self.started {
 			self.start(&frame.surface)?;
 		}
@@ -587,7 +591,7 @@ impl Backend for MediaFoundation {
 		let mut out = Vec::new();
 		self.wait_for_input(&mut out)?;
 
-		if keyframe {
+		if cut {
 			self.set_codec(&CODECAPI_AVEncVideoForceKeyFrame, variant_u32(1))?;
 		}
 
@@ -654,7 +658,11 @@ impl Backend for MediaFoundation {
 		Ok(())
 	}
 
-	fn name(&self) -> &str {
+	fn can_cut(&self) -> bool {
+		true
+	}
+
+	fn name(&self) -> &'static str {
 		NAME
 	}
 }

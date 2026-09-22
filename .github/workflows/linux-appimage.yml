@@ -122,6 +122,20 @@ jobs:
         working-directory: linux
         run: cargo test --locked
 
+      - name: Test vendored video capture lifecycle and sizing
+        working-directory: linux
+        run: |
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::cleanup::tests -- --list |
+            grep -Fq 'capture::cleanup::tests::source_loss_remains_terminal_when_demand_idle_wins: test'
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::cleanup::tests
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib encode::producer::tests -- --list |
+            grep -Fq 'encode::producer::tests::recoverable_capture_end_reopens_but_source_error_is_terminal: test'
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib encode::producer::tests -- --list |
+            grep -Fq 'encode::producer::tests::maximum_output_size_preserves_source_geometry: test'
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib encode::producer::tests -- --list |
+            grep -Fq 'encode::producer::tests::sticky_capture_failure_prevents_reopen_after_demand_idle: test'
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib encode::producer::tests
+
       - name: Build AppImage
         working-directory: linux
         env:

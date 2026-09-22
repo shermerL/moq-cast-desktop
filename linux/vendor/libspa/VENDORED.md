@@ -1,8 +1,8 @@
 # Vendored libspa
 
 source_repository = `https://gitlab.freedesktop.org/pipewire/pipewire-rs`
-source_version = `0.10.0`
-source_package = `https://crates.io/crates/libspa/0.10.0`
+source_version = `0.10.1`
+source_package = `https://crates.io/crates/libspa/0.10.1`
 
 The local copy keeps the public crate version and dependencies unchanged. It
 implements two SPA metadata macros in Rust, initializes `spa_video_info_raw`

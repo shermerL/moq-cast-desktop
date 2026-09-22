@@ -15,6 +15,7 @@
 
 use std::time::{Duration, Instant};
 
+use windows::Win32::Foundation::E_ACCESSDENIED;
 use windows::Win32::Graphics::Direct3D11::{
 	D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 	ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
@@ -27,7 +28,7 @@ use windows::core::Interface;
 
 use super::channel::FrameChannel;
 use super::pump::{self, Geometry};
-use super::{Config, FrameStream};
+use super::{Config, Stream};
 use crate::Error;
 use crate::frame::{I420, Surface, d3d11};
 
@@ -74,7 +75,7 @@ pub(super) fn displays() -> Result<Vec<super::Display>, Error> {
 }
 
 /// Open a display capture and stream its frames over a pump thread.
-pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameStream, Error> {
+pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream, Error> {
 	let config = config.clone();
 	// The device opens on the pump thread, so the selector has to be owned.
 	let device = device.map(str::to_string);
@@ -86,8 +87,8 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 			let geometry = Geometry {
 				width: cap.width,
 				height: cap.height,
-				framerate: Some(cap.framerate),
-				device: cap.device_name.clone(),
+				framerate: Some(crate::Rate::integer(cap.framerate)),
+				label: cap.device_name.clone(),
 			};
 			Ok((cap, geometry))
 		},
@@ -95,12 +96,12 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 	)
 	.await?;
 
-	Ok(FrameStream::new(
+	Ok(Stream::new(
 		chan,
 		geo.width,
 		geo.height,
 		geo.framerate,
-		geo.device,
+		geo.label,
 		None,
 		Box::new(guard),
 	))
@@ -154,7 +155,10 @@ impl Duplicator {
 			)));
 		}
 
-		let framerate = config.framerate.unwrap_or(DEFAULT_FRAMERATE).max(1);
+		let framerate = config
+			.framerate
+			.unwrap_or(crate::Rate::integer(DEFAULT_FRAMERATE))
+			.rounded();
 		let mut cap = Self {
 			device,
 			context,
@@ -195,7 +199,10 @@ impl Duplicator {
 	/// Rebuild the duplication after `DXGI_ERROR_ACCESS_LOST` (e.g. a resolution
 	/// change or a fullscreen exclusive app grabbing/releasing the output).
 	fn reduplicate(&mut self) -> Result<(), Error> {
-		self.dupl = duplicate(&self.output, &self.device)?;
+		self.dupl = duplicate(&self.output, &self.device).map_err(|error| match error {
+			Error::PermissionDenied(_) => error,
+			error => Error::SourceUnavailable(format!("{}: {error}", self.device_name)),
+		})?;
 		self.staging = None;
 		Ok(())
 	}
@@ -212,7 +219,12 @@ impl Duplicator {
 				self.reduplicate()?;
 				return Ok(false);
 			}
-			Err(e) => return Err(err("AcquireNextFrame", e)),
+			Err(e) => {
+				return Err(Error::SourceUnavailable(format!(
+					"{}: AcquireNextFrame: {e}",
+					self.device_name
+				)));
+			}
 		}
 
 		let resource = resource.ok_or_else(|| Error::Codec(anyhow::anyhow!("AcquireNextFrame returned no surface")))?;
@@ -249,7 +261,7 @@ impl Duplicator {
 		let pitch = mapped.RowPitch;
 		let len = pitch as usize * self.height as usize;
 		let bgra = unsafe { std::slice::from_raw_parts(mapped.pData as *const u8, len) };
-		self.last = Some(I420::from_bgra(bgra, pitch, self.width, self.height)?);
+		self.last = Some(I420::from_bgra(bgra, pitch, crate::Size::new(self.width, self.height))?);
 		Ok(())
 	}
 
@@ -282,7 +294,7 @@ impl Duplicator {
 	/// Capture the next frame, paced to the target frame rate. Coalesces a burst
 	/// of desktop updates into the latest frame, and re-emits the last frame when
 	/// the screen hasn't changed, so the output rate stays steady.
-	fn read(&mut self) -> Result<Option<Surface>, Error> {
+	fn read(&mut self) -> Result<pump::Read, Error> {
 		let deadline = *self.next_deadline.get_or_insert_with(|| Instant::now() + self.interval);
 
 		loop {
@@ -301,7 +313,12 @@ impl Duplicator {
 		let next = deadline + self.interval;
 		self.next_deadline = Some(next.max(Instant::now()));
 
-		Ok(self.last.clone().map(Surface::I420))
+		// A screen that hasn't changed since the stream opened has no frame to hand
+		// back yet, which is not the duplication API going away.
+		Ok(self
+			.last
+			.clone()
+			.map_or(pump::Read::Idle, |frame| pump::Read::Frame(Surface::I420(frame))))
 	}
 }
 
@@ -317,7 +334,7 @@ impl Drop for UnmapGuard<'_> {
 }
 
 /// Which monitor to capture: a bare index or the `display:{index}` form that
-/// [`FrameStream::device`](super::FrameStream) reports; `None` is the first one.
+/// [`Stream::device`](super::Stream) reports; `None` is the first one.
 fn select_output(selector: Option<&str>) -> Result<u32, Error> {
 	match selector {
 		None => Ok(0),
@@ -335,7 +352,7 @@ fn enumerate_output(device: &ID3D11Device, index: u32) -> Result<IDXGIOutput1, E
 	let output = unsafe {
 		adapter
 			.EnumOutputs(index)
-			.map_err(|_| Error::Codec(anyhow::anyhow!("no display at index {index}")))?
+			.map_err(|_| Error::SourceUnavailable(format!("no display at index {index}")))?
 	};
 	output
 		.cast::<IDXGIOutput1>()
@@ -352,7 +369,13 @@ fn adapter(device: &ID3D11Device) -> Result<IDXGIAdapter, Error> {
 
 /// Start duplicating `output` on `device`.
 fn duplicate(output: &IDXGIOutput1, device: &ID3D11Device) -> Result<IDXGIOutputDuplication, Error> {
-	unsafe { output.DuplicateOutput(device) }.map_err(|e| err("DuplicateOutput", e))
+	unsafe { output.DuplicateOutput(device) }.map_err(|error| {
+		if error.code() == E_ACCESSDENIED {
+			Error::PermissionDenied(format!("display capture: {error}"))
+		} else {
+			err("DuplicateOutput", error)
+		}
+	})
 }
 
 #[cfg(test)]
@@ -380,12 +403,15 @@ mod tests {
 
 		for i in 0..5 {
 			let frame = cap.read().expect("read frame");
-			let Some(Surface::I420(i420)) = frame else {
+			let pump::Read::Frame(Surface::I420(i420)) = frame else {
 				panic!("frame {i} was not I420");
 			};
 			assert_eq!(i420.width, cap.width);
 			assert_eq!(i420.height, cap.height);
-			assert_eq!(i420.data.len(), I420::len(cap.width, cap.height));
+			assert_eq!(
+				i420.data.len(),
+				I420::len(crate::Size::new(cap.width, cap.height)).unwrap()
+			);
 		}
 		eprintln!("captured 5 frames at {}x{}", cap.width, cap.height);
 	}

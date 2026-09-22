@@ -131,6 +131,7 @@ struct Metrics {
     pcm_sample_frames: u64,
     sink_write_attempts: u64,
     sink_write_failures: u64,
+    dropped_sample_frames: u64,
     submitted_chunks: u64,
     submitted_bytes: u64,
     submitted_sample_frames: u64,
@@ -293,23 +294,38 @@ impl Tracker {
         bytes: usize,
         sample_rate: u32,
         channels: u32,
-        succeeded: bool,
+        accepted_sample_frames: Result<usize, ()>,
         now: impl FnOnce() -> Instant,
     ) -> Option<Duration> {
-        let sample_frames = pcm_sample_frames(bytes, channels);
-        let duration = pcm_duration(sample_frames, sample_rate);
+        let requested_sample_frames = pcm_sample_frames(bytes, channels);
+        let accepted_sample_frames = match accepted_sample_frames {
+            Ok(accepted) => u64::try_from(accepted)
+                .unwrap_or(u64::MAX)
+                .min(requested_sample_frames),
+            Err(()) => {
+                self.metrics.sink_write_attempts =
+                    self.metrics.sink_write_attempts.saturating_add(1);
+                self.metrics.sink_write_failures =
+                    self.metrics.sink_write_failures.saturating_add(1);
+                return None;
+            }
+        };
         self.metrics.sink_write_attempts = self.metrics.sink_write_attempts.saturating_add(1);
-
-        if !succeeded {
-            self.metrics.sink_write_failures = self.metrics.sink_write_failures.saturating_add(1);
+        self.metrics.dropped_sample_frames = self
+            .metrics
+            .dropped_sample_frames
+            .saturating_add(requested_sample_frames.saturating_sub(accepted_sample_frames));
+        if accepted_sample_frames == 0 {
             return None;
         }
+        let sample_frames = accepted_sample_frames;
+        let duration = pcm_duration(sample_frames, sample_rate);
+        let submitted_bytes = sample_frames
+            .saturating_mul(u64::from(channels))
+            .saturating_mul(size_of::<f32>() as u64);
 
         self.metrics.submitted_chunks = self.metrics.submitted_chunks.saturating_add(1);
-        self.metrics.submitted_bytes = self
-            .metrics
-            .submitted_bytes
-            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        self.metrics.submitted_bytes = self.metrics.submitted_bytes.saturating_add(submitted_bytes);
         self.metrics.submitted_sample_frames = self
             .metrics
             .submitted_sample_frames
@@ -328,7 +344,7 @@ impl Tracker {
                 codec = %self.codec,
                 audio_generation = self.generation,
                 time_to_first_pcm_submit = ?elapsed,
-                chunk_bytes = bytes,
+                chunk_bytes = submitted_bytes,
                 chunk_sample_frames = sample_frames,
                 chunk_duration_us = duration_us(duration),
                 "first remote PCM sink write returned successfully"
@@ -401,6 +417,7 @@ impl Tracker {
             pcm_sample_frames = self.metrics.pcm_sample_frames,
             sink_write_attempts = self.metrics.sink_write_attempts,
             sink_write_failures = self.metrics.sink_write_failures,
+            dropped_sample_frames = self.metrics.dropped_sample_frames,
             submitted_chunks = self.metrics.submitted_chunks,
             submitted_bytes = self.metrics.submitted_bytes,
             submitted_sample_frames = self.metrics.submitted_sample_frames,
@@ -437,6 +454,7 @@ impl Tracker {
             pcm_sample_frames = self.metrics.pcm_sample_frames,
             sink_write_attempts = self.metrics.sink_write_attempts,
             sink_write_failures = self.metrics.sink_write_failures,
+            dropped_sample_frames = self.metrics.dropped_sample_frames,
             submitted_chunks = self.metrics.submitted_chunks,
             submitted_bytes = self.metrics.submitted_bytes,
             submitted_sample_frames = self.metrics.submitted_sample_frames,
@@ -593,7 +611,7 @@ mod tests {
         assert_eq!(tracker.metrics().post_submit_buffered_min, None);
         assert_eq!(tracker.metrics().post_submit_buffered_max, None);
 
-        tracker.observe_write(3_840, 48_000, 2, true, || now);
+        tracker.observe_write(3_840, 48_000, 2, Ok(480), || now);
         tracker.observe_buffered(at(10));
         tracker.observe_buffered(at(50));
 
@@ -614,8 +632,8 @@ mod tests {
             .observe_frame(FrameTiming::new(at(10), 3_840, 48_000, 2), || {
                 selected + at(8)
             });
-        let first_submit = tracker.observe_write(3_840, 48_000, 2, true, || selected + at(12));
-        let second_submit = tracker.observe_write(3_840, 48_000, 2, true, || selected + at(16));
+        let first_submit = tracker.observe_write(3_840, 48_000, 2, Ok(480), || selected + at(12));
+        let second_submit = tracker.observe_write(3_840, 48_000, 2, Ok(480), || selected + at(16));
 
         assert_eq!(first_decode, Some(at(4)));
         assert_eq!(second_decode, None);
@@ -635,9 +653,9 @@ mod tests {
         };
         tracker.observe_frame(FrameTiming::new(at(0), 3_840, 48_000, 2), &mut now);
         tracker.observe_frame(FrameTiming::new(at(10), 3_840, 48_000, 2), &mut now);
-        tracker.observe_write(1_920, 48_000, 2, false, &mut now);
-        tracker.observe_write(3_840, 48_000, 2, true, &mut now);
-        tracker.observe_write(3_840, 48_000, 2, true, &mut now);
+        tracker.observe_write(1_920, 48_000, 2, Err(()), &mut now);
+        tracker.observe_write(3_840, 48_000, 2, Ok(480), &mut now);
+        tracker.observe_write(3_840, 48_000, 2, Ok(480), &mut now);
 
         assert_eq!(calls.get(), 2);
     }
@@ -647,8 +665,8 @@ mod tests {
         let selected = Instant::now();
         let mut tracker = tracker(selected);
 
-        let failed = tracker.observe_write(1_920, 48_000, 2, false, || selected + at(1));
-        let submitted = tracker.observe_write(3_840, 48_000, 2, true, || selected + at(2));
+        let failed = tracker.observe_write(1_920, 48_000, 2, Err(()), || selected + at(1));
+        let submitted = tracker.observe_write(3_840, 48_000, 2, Ok(480), || selected + at(2));
 
         assert_eq!(failed, None);
         assert_eq!(submitted, Some(at(2)));
@@ -659,6 +677,29 @@ mod tests {
         assert_eq!(tracker.metrics().submitted_sample_frames, 480);
         assert_eq!(tracker.metrics().submitted_duration, at(10));
         assert_eq!(tracker.metrics().max_submitted_chunk_duration, at(10));
+    }
+
+    #[test]
+    fn zero_and_partial_writes_only_count_accepted_pcm() {
+        let selected = Instant::now();
+        let mut tracker = tracker(selected);
+
+        assert_eq!(
+            tracker.observe_write(3_840, 48_000, 2, Ok(0), || selected),
+            None
+        );
+        assert_eq!(tracker.metrics().post_submit_buffered_min, None);
+        assert_eq!(
+            tracker.observe_write(3_840, 48_000, 2, Ok(240), || selected + at(3)),
+            Some(at(3))
+        );
+        assert_eq!(tracker.metrics().sink_write_attempts, 2);
+        assert_eq!(tracker.metrics().sink_write_failures, 0);
+        assert_eq!(tracker.metrics().dropped_sample_frames, 720);
+        assert_eq!(tracker.metrics().submitted_chunks, 1);
+        assert_eq!(tracker.metrics().submitted_bytes, 1_920);
+        assert_eq!(tracker.metrics().submitted_sample_frames, 240);
+        assert_eq!(tracker.metrics().submitted_duration, at(5));
     }
 
     #[test]

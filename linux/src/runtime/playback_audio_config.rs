@@ -13,11 +13,11 @@ pub(super) fn remote_video_max_age(has_playable_audio: bool) -> Duration {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn remote_audio_decode_config() -> moq_audio::decode::Config {
-    let mut config = moq_audio::decode::Config::new();
-    config.format = moq_audio::Format::F32;
-    config.max_age = REMOTE_AUDIO_LIVE_EDGE_BUDGET;
-    config
+pub(super) fn remote_audio_decode_config() -> moq_audio::decode::Options {
+    let mut options = moq_audio::decode::Options::new();
+    options.output.format = moq_audio::Format::F32;
+    options.max_age = REMOTE_AUDIO_LIVE_EDGE_BUDGET;
+    options
 }
 
 #[cfg(test)]
@@ -36,7 +36,7 @@ mod tests {
     fn remote_audio_decode_config_uses_f32_and_live_edge_budget() {
         let config = remote_audio_decode_config();
 
-        assert_eq!(config.format, moq_audio::Format::F32);
+        assert_eq!(config.output.format, moq_audio::Format::F32);
         assert_eq!(config.max_age, REMOTE_AUDIO_LIVE_EDGE_BUDGET);
     }
 }

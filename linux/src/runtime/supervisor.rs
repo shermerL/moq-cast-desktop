@@ -186,7 +186,7 @@ enum PeerSession {
 impl PeerSession {
     fn close(&self) {
         match self {
-            Self::Outbound(connection) => connection.close(),
+            Self::Outbound(connection) => connection.abort(moq_net::Error::Cancel),
             Self::Inbound(session) => session.abort(moq_net::Error::Cancel),
         }
     }
@@ -411,9 +411,7 @@ impl PublishResources {
 struct Supervisor {
     state: AppSnapshot,
     publish_origin: moq_net::origin::Producer,
-    publish_origin_driver: JoinHandle<()>,
     receive_origin: moq_net::origin::Producer,
-    receive_origin_driver: JoinHandle<()>,
     discovery: DiscoveryResources,
     mesh: MeshResources,
     remote_screens: HashMap<String, moq_net::broadcast::Consumer>,
@@ -431,19 +429,13 @@ impl Supervisor {
     fn new(playback_tx: watch::Sender<Option<Arc<PlaybackFrame>>>) -> Self {
         let (service_tx, service_rx) = mpsc::channel(EVENT_CAPACITY);
         let (operation_tx, operation_rx) = mpsc::channel(EVENT_CAPACITY);
-        let (publish_origin, publish_origin_driver) =
-            moq_net::origin::Producer::new(moq_net::origin::Info::new(moq_net::Origin::random()));
-        let publish_origin_driver = tokio::spawn(publish_origin_driver);
-        let (receive_origin, receive_origin_driver) =
-            moq_net::origin::Producer::new(moq_net::origin::Info::new(moq_net::Origin::random()));
-        let receive_origin_driver = tokio::spawn(receive_origin_driver);
+        let publish_origin = moq_tokio::origin::spawn();
+        let receive_origin = moq_tokio::origin::spawn();
         let announcements = watch_announcements(receive_origin.clone(), operation_tx.clone());
         Self {
             state: AppSnapshot::default(),
             publish_origin,
-            publish_origin_driver,
             receive_origin,
-            receive_origin_driver,
             discovery: DiscoveryResources::default(),
             mesh: MeshResources::default(),
             remote_screens: HashMap::new(),
@@ -502,8 +494,6 @@ impl Supervisor {
         self.playback_tx.send_replace(None);
         drop(self.publish_origin);
         drop(self.receive_origin);
-        let _ = self.publish_origin_driver.await;
-        let _ = self.receive_origin_driver.await;
         tracing::info!(stage = "runtime", "desktop runtime stopped");
     }
 
@@ -646,7 +636,7 @@ impl Supervisor {
         };
 
         let publication =
-            match Publication::prepare(&self.publish_origin, &local_peer_id, None, system_audio) {
+            match Publication::prepare(&self.publish_origin, &local_peer_id, system_audio) {
                 Ok(publication) => publication,
                 Err(error) => {
                     self.state
@@ -1276,11 +1266,24 @@ fn watch_announcements(
     tokio::spawn(async move {
         let mut announcements = receive_origin.consume().announced();
         while let Some(update) = announcements.next().await {
+            let path = update.prefix.to_string();
+            let broadcast = if update.kind.is_active() {
+                match receive_origin
+                    .consume()
+                    .request_broadcast(path.as_str())
+                    .await
+                {
+                    Ok(broadcast) => Some(broadcast),
+                    Err(error) => {
+                        tracing::warn!(%error, "remote screen announcement could not resolve");
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             if events
-                .send(OperationEvent::ScreenAnnouncement {
-                    path: update.path.to_string(),
-                    broadcast: update.broadcast,
-                })
+                .send(OperationEvent::ScreenAnnouncement { path, broadcast })
                 .await
                 .is_err()
             {

@@ -5,9 +5,11 @@
 //! dedicated thread that pushes frames into the channel; the encode loop awaits
 //! them like any other backend. The device is built on the thread (so a `!Send`
 //! handle such as `IMFSourceReader` is fine) and dropped when the thread exits.
-//! [`PumpGuard`] stops and joins the thread when the [`FrameStream`](super::FrameStream)
+//! [`PumpGuard`] stops and joins the thread when the [`Stream`](super::Stream)
 //! drops, releasing the device. The stop flag is checked between reads, so on a
-//! live device (which delivers a frame per interval) shutdown is prompt; the join
+//! live device (which delivers a frame per interval) shutdown is prompt; a read
+//! with no frame to hand back returns [`Read::Idle`] rather than blocking, which
+//! is what keeps a held capture (a minimized window) just as prompt. The join
 //! is what guarantees the device fd is closed before a subsequent reopen, so we
 //! don't race EBUSY. A wedged device that blocks a read forever would stall that
 //! join, the same as the original `spawn_blocking` path did, but that needs a
@@ -18,15 +20,29 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use super::channel::FrameChannel;
-use crate::Error;
 use crate::frame::Surface;
+use crate::{Error, Rate};
+
+/// The outcome of one device read.
+pub(super) enum Read {
+	/// A captured frame.
+	Frame(Surface),
+	/// A captured frame with a timestamp in the device's private timeline.
+	FrameAt(Surface, moq_net::Timestamp),
+	/// No frame this turn, but the source is still live: the pump re-checks its
+	/// stop flag and calls again. A backend uses this to hold a capture (a
+	/// minimized or mid-resize window) without ending the stream.
+	Idle,
+	/// The source stopped producing; the stream ends and the caller reopens.
+	Done,
+}
 
 /// The negotiated geometry a backend reports once its device is open.
 pub(super) struct Geometry {
 	pub width: u32,
 	pub height: u32,
-	pub framerate: Option<u32>,
-	pub device: String,
+	pub framerate: Option<Rate>,
+	pub label: String,
 }
 
 /// Stops and joins the pump thread on drop, releasing the device.
@@ -47,9 +63,9 @@ impl Drop for PumpGuard {
 /// Run `init` then `read` on a dedicated thread, feeding `chan`.
 ///
 /// `init` builds the blocking device and reports its [`Geometry`]; it runs on
-/// the thread, so the device handle never has to be `Send`. `read` pulls one
-/// frame per call (blocking, bounded). Returns once the device is open (or its
-/// init fails), so geometry is known before the first `read().await`.
+/// the thread, so the device handle never has to be `Send`. `read` pulls at most
+/// one frame per call (blocking, bounded). Returns once the device is open (or
+/// its init fails), so geometry is known before the first `read().await`.
 pub(super) async fn spawn<S, I, R>(
 	chan: Arc<FrameChannel>,
 	init: I,
@@ -57,7 +73,7 @@ pub(super) async fn spawn<S, I, R>(
 ) -> Result<(Geometry, PumpGuard), Error>
 where
 	I: FnOnce() -> Result<(S, Geometry), Error> + Send + 'static,
-	R: FnMut(&mut S) -> Result<Option<Surface>, Error> + Send + 'static,
+	R: FnMut(&mut S) -> Result<Read, Error> + Send + 'static,
 {
 	let stop = Arc::new(AtomicBool::new(false));
 	let (geo_tx, geo_rx) = tokio::sync::oneshot::channel();
@@ -80,10 +96,12 @@ where
 
 			while !stop.load(Ordering::SeqCst) {
 				match read(&mut source) {
-					Ok(Some(frame)) => chan.push(frame),
-					Ok(None) => break, // device stopped producing frames
+					Ok(Read::Frame(frame)) => chan.push(frame),
+					Ok(Read::FrameAt(frame, timestamp)) => chan.push_native(frame, timestamp),
+					Ok(Read::Idle) => {}     // held: re-check the stop flag, then read again
+					Ok(Read::Done) => break, // device stopped producing frames
 					Err(err) => {
-						tracing::warn!(error = %err, "capture read failed; stopping");
+						chan.fail(err);
 						break;
 					}
 				}

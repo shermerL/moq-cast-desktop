@@ -7,21 +7,6 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio::task::JoinHandle;
 
-/// Demand idle may reopen; a stopped source requires a fresh user action.
-pub(crate) enum CaptureEnd {
-	Unused,
-	SourceClosed,
-}
-
-impl CaptureEnd {
-	pub(crate) fn resume(self) -> Result<(), &'static str> {
-		match self {
-			Self::Unused => Ok(()),
-			Self::SourceClosed => Err("capture source closed; start sharing again to select a source"),
-		}
-	}
-}
-
 #[derive(Default, Debug)]
 struct Registry {
 	pending: VecDeque<Arc<AsyncMutex<Pending>>>,
@@ -124,12 +109,6 @@ mod tests {
 		release
 	}
 
-	#[test]
-	fn demand_idle_may_resume_but_source_loss_requires_user_action() {
-		assert!(CaptureEnd::Unused.resume().is_ok());
-		assert!(CaptureEnd::SourceClosed.resume().is_err());
-	}
-
 	#[tokio::test]
 	async fn cancellation_during_acquisition_still_closes_the_late_resource() {
 		let owner = Owner::default();
@@ -168,7 +147,6 @@ mod tests {
 		let handle = owner.handle();
 		let release = on_release(&handle, async { Ok(()) });
 		handle.fail("screen capture source closed".to_owned());
-		assert!(CaptureEnd::Unused.resume().is_ok());
 		drop(release);
 		assert_eq!(handle.wait().await.unwrap_err(), "screen capture source closed");
 		assert_eq!(owner.finish().await.unwrap_err(), "screen capture source closed");

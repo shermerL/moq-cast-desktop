@@ -53,7 +53,8 @@ impl Services {
             .into_iter()
             .next()
             .ok_or(StartError::MissingFingerprint)?;
-        let discovery = mdns::Config::new(port)
+        let app = "moqcast".parse::<mdns::App>().expect("valid LAN app name");
+        let discovery = mdns::Config::new(app, port)
             .with_fingerprint(fingerprint)
             .advertise()
             .await?;

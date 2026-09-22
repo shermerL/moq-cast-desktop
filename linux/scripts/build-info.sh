@@ -10,8 +10,8 @@ write_build_info() {
         printf 'moq_revision=%s\n' "$MOQ_REVISION"
         printf 'moq_video_source=vendored\n'
         printf 'moq_video_revision=%s\n' "$MOQ_VIDEO_REVISION"
-        printf 'libspa_source=vendored-0.10.0\n'
-        printf 'cargo_features=moq-tokio:aws-lc-rs,mdns,quinn;moq-audio:playback;moq-video:capture,nvidia,pipewire\n'
+        printf 'libspa_source=vendored-0.10.1\n'
+        printf 'cargo_features=moq-tokio:aws-lc-rs,mdns,noq;moq-audio:playback;moq-video:capture,nvidia,openh264,pipewire\n'
         printf 'system_audio=pipewire\n'
         printf 'remote_audio_output=cpal-alsa\n'
         printf 'build_date=%s\n' "$BUILD_DATE"

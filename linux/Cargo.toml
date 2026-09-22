@@ -6,7 +6,9 @@ rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 
 [workspace]
-exclude = ["vendor/libspa", "vendor/moq-video"]
+members = [".", "vendor/moq-video"]
+default-members = ["."]
+exclude = ["vendor/libspa"]
 
 [patch.crates-io]
 libspa = { path = "vendor/libspa" }
@@ -15,7 +17,7 @@ libspa = { path = "vendor/libspa" }
 anyhow = "1"
 eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wayland", "wgpu", "x11"] }
 gethostname = "1.1.0"
-moq-tokio = { git = "https://github.com/moq-dev/moq.git", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["aws-lc-rs", "mdns", "quinn"] }
+moq-tokio = { git = "https://github.com/moq-dev/moq.git", rev = "615d166d246b04cde8d0449c80a556f22356f719", default-features = false, features = ["aws-lc-rs", "mdns", "noq"] }
 moqcast-diagnostics = { path = "../shared/diagnostics" }
 moqcast-ui = { path = "../shared/ui" }
 rfd = "0.17.2"
@@ -25,10 +27,10 @@ tracing = "0.1"
 url = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-hang = { git = "https://github.com/moq-dev/moq.git", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53" }
-moq-audio = { git = "https://github.com/moq-dev/moq.git", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["playback"] }
-moq-mux = { git = "https://github.com/moq-dev/moq.git", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53" }
-moq-video = { path = "vendor/moq-video", default-features = false, features = ["capture", "nvidia", "pipewire"] }
+hang = { git = "https://github.com/moq-dev/moq.git", rev = "615d166d246b04cde8d0449c80a556f22356f719" }
+moq-audio = { git = "https://github.com/moq-dev/moq.git", rev = "615d166d246b04cde8d0449c80a556f22356f719", default-features = false, features = ["playback"] }
+moq-mux = { git = "https://github.com/moq-dev/moq.git", rev = "615d166d246b04cde8d0449c80a556f22356f719" }
+moq-video = { path = "vendor/moq-video", default-features = false, features = ["capture", "nvidia", "openh264", "pipewire"] }
 pipewire = "0.10"
 
 [dev-dependencies]

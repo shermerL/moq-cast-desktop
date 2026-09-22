@@ -21,8 +21,8 @@ rustc --edition=2024 -D warnings --test "$LINUX_DIR/build.rs" -o "$TEST_BINARY"
 VERSION=0.5.0-dev.1
 PACKAGE_VARIANT=linux-x86_64-ubuntu24.04-glibc2.39
 SOURCE_COMMIT=0123456789ab
-MOQ_REVISION=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53
-MOQ_VIDEO_REVISION=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53
+MOQ_REVISION=615d166d246b04cde8d0449c80a556f22356f719
+MOQ_VIDEO_REVISION=615d166d246b04cde8d0449c80a556f22356f719
 DEPENDENCY_IDENTITY="moq-dev/moq@$MOQ_REVISION;vendored/moq-video@$MOQ_VIDEO_REVISION"
 BUILD_DATE=2026-09-13T00:00:00Z
 BUILD_DISTRO_ID=ubuntu
@@ -67,6 +67,8 @@ require_output_text "cargo:rustc-env=MOQCAST_EMBEDDED_BUILD_IDENTITY=$PACKAGE_VA
 require_output_text "cargo:rustc-env=MOQCAST_EMBEDDED_SOURCE_IDENTITY=$SOURCE_COMMIT"
 require_output_text "cargo:rustc-env=MOQCAST_EMBEDDED_DEPENDENCY_IDENTITY=$DEPENDENCY_IDENTITY"
 require_script_text 'source "$SCRIPT_DIR/build-info.sh"'
+require_script_text 'if [[ $MOQ_VIDEO_REVISION != "$MOQ_REVISION" ]]; then'
+require_script_text '"$LINUX_DIR/vendor/moq-video/Cargo.toml"'
 require_script_text 'MOQCAST_PROVENANCE_FILE="$BUILD_INFO_FILE" \'
 reject_script_text 'MOQCAST_BUILD_IDENTITY="$PACKAGE_VARIANT" \'
 reject_script_text 'MOQCAST_SOURCE_COMMIT="$SOURCE_COMMIT" \'

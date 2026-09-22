@@ -7,10 +7,151 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Import retained Vulkan RGBA8 slots into CUDA with explicit timeline synchronization.
+- `frame::cuda::Converter` converts imported Vulkan RGBA8/BGRA8 frames to NV12 on the GPU from a
+  bounded buffer pool, and `cuda::Frame::resize` scales them there; `vulkan::Image::bgra8` declares
+  the other channel order.
+
+### Changed
+
+- [**breaking**] OpenH264 is now the default `openh264` feature, rendering is
+  opt-in, and the deprecated `nvenc` and `nvdec` feature aliases are removed.
+- [**breaking**] `encode::Producer::finish` borrows (`&mut self`) instead of consuming, so a later
+  `abort(self)` can still run after a clean end.
+- [**breaking**] Frame resize and RGB/BGRA conversion each have one configured
+  operation: `resize(size, config)`, `to_rgba(config)`, and `to_bgra(config)`.
+- [**breaking**] `Surface::into_i420` returns typed `I420`, preserving its size,
+  color, and allocation. Use `I420::into_data` to extract packed bytes.
+- [**breaking**] `I420::new` and `I420::len` take `Size`; `Frame` and
+  `encode::Encoded` are non-exhaustive and remain constructible through `new`.
+- [**breaking**] `decode::Config` describes only the decoder: `kind`, a
+  native-or-CPU `output`, and a best-effort `scale_hint`. `decode::Consumer`
+  takes `decode::Options`, which carries the subscription's `start` and
+  `max_age` beside the decoder config. `gpu_frames` and
+  `resize::Acceleration` are replaced by `moq_video::Output`, which
+  `resize::Config::output` shares.
+- [**breaking**] `encode::Config::gop` is the non-exhaustive `encode::Gop`
+  enum (`Gop::Keyframe { interval }`, `Gop::keyframe_every(duration, rate)`)
+  instead of a bare `u32`; an interval of 0 is refused with `Error::InvalidGop`.
+- [**breaking**] `Encoder::keyframe` and `Sink::keyframe` are `cut()` and
+  return `Result`; a backend that cannot force a group boundary refuses at
+  open with `Error::CutUnsupported`.
+- [**breaking**] Frame rates are the reduced rational `moq_video::Rate`
+  (`encode::Config::new(width, height, rate)`, `capture::Config::framerate`),
+  and capture reads return timestamped `Frame`s stamped before queue
+  replacement rather than bare `Surface`s.
+- [**breaking**] `encode::rate::{Policy, Control}` moved to `moq_mux::rate`.
+- [**breaking**] The synchronous `encode::Encoder` and `decode::Decoder` are
+  `!Send` and `!Sync`; the async `Sink` and `Consumer` stay `Send` and own
+  codec execution.
+- [**breaking**] `RateError` is non-exhaustive.
+
+## [0.0.25](https://github.com/moq-dev/moq/compare/moq-video-v0.0.24...moq-video-v0.0.25) - 2026-09-17
+
+### Other
+
+- updated the following local packages: moq-net, moq-mux, hang
+
+## [0.0.24](https://github.com/moq-dev/moq/compare/moq-video-v0.0.23...moq-video-v0.0.24) - 2026-09-13
+
+### Added
+
+- *(moq-video)* convert a surface by reference, and to BGRA ([#3593](https://github.com/moq-dev/moq/pull/3593))
+- *(moq-video)* list the modes a V4L2 camera reports ([#3569](https://github.com/moq-dev/moq/pull/3569))
+
+### Fixed
+
+- *(moq-video)* cap NVENC keyframes with a single-frame VBV ([#3609](https://github.com/moq-dev/moq/pull/3609))
+- *(moq-video)* report backend selection, and name every backend publicly ([#3567](https://github.com/moq-dev/moq/pull/3567))
+- *(moq-video)* stop a dead codec session and a failed flush from spinning a reader ([#3568](https://github.com/moq-dev/moq/pull/3568))
+- *(moq-video,moq-audio)* open a decoder at the live edge ([#3565](https://github.com/moq-dev/moq/pull/3565))
+
+### Other
+
+- *(moq-video)* decode H.264 bitstreams this crate did not produce ([#3570](https://github.com/moq-dev/moq/pull/3570))
+
+### Added
+
+- *(moq-video)* `Surface::to_bgra` and `to_bgra_with`, the same conversion as
+  `to_rgba` with red and blue exchanged, for the toolkits that want that order
+- *(moq-video)* `Surface::to_rgba` and `to_rgba_with`, which borrow the surface
+  where `into_rgba` consumed it
+- *(moq-video)* `Surface::to_i420` is public, the borrowing counterpart to
+  `into_i420`
+
 ### Fixed
 
 - `encode::Producer` carries a rendition's `label` into the catalog. It copied the config into hints
   field by field and had no case for the new field.
+
+## [0.0.23](https://github.com/moq-dev/moq/compare/moq-video-v0.0.22...moq-video-v0.0.23) - 2026-09-09
+
+### Added
+
+- *(moq-video)* add the VAAPI H.264 decoder and import its pictures zero-copy ([#3331](https://github.com/moq-dev/moq/pull/3331))
+- *(moq-video)* add the Android MediaCodec encoder and decoder ([#3354](https://github.com/moq-dev/moq/pull/3354))
+- *(moq-video)* add the V4L2 stateful M2M hardware encoder and decoder ([#3332](https://github.com/moq-dev/moq/pull/3332))
+- *(audio,video)* compile the device, render, and VAAPI code by default ([#3353](https://github.com/moq-dev/moq/pull/3353))
+
+### Fixed
+
+- *(moq-video)* pick the V4L2 mode nearest the requested resolution ([#3355](https://github.com/moq-dev/moq/pull/3355))
+- *(moq-video)* stop openh264 leaking its picture pool, and survive a lost picture ([#3357](https://github.com/moq-dev/moq/pull/3357))
+- *(rs)* compile the lib tests at --no-default-features ([#3397](https://github.com/moq-dev/moq/pull/3397))
+- *(moq-audio)* treat a media gap as a hole rather than a splice ([#3386](https://github.com/moq-dev/moq/pull/3386))
+- *(moq-video)* end the stream when an AVFoundation camera goes away ([#3382](https://github.com/moq-dev/moq/pull/3382))
+- *(moq-video)* decode an avc1 track with no avcC as Annex-B ([#3388](https://github.com/moq-dev/moq/pull/3388))
+- *(video)* hold window capture through a minimize and settle a resize ([#3374](https://github.com/moq-dev/moq/pull/3374))
+- *(moq-video)* name the libspa transfer functions older headers lack ([#3387](https://github.com/moq-dev/moq/pull/3387))
+- *(moq-video)* print GPU-composited windows instead of copying a black DC ([#3370](https://github.com/moq-dev/moq/pull/3370))
+- *(moq-video)* compile the Windows test target, and gate it nightly ([#3391](https://github.com/moq-dev/moq/pull/3391))
+- *(moq-video)* end X11 window capture when the window is destroyed ([#3383](https://github.com/moq-dev/moq/pull/3383))
+
+### Other
+
+- make the agent guides minimal and situational ([#3469](https://github.com/moq-dev/moq/pull/3469))
+- take every feature that needs a library or libclang at build time off the defaults ([#3464](https://github.com/moq-dev/moq/pull/3464))
+- *(moq-audio,moq-cli)* assert publish_capture stays Send off macOS ([#3433](https://github.com/moq-dev/moq/pull/3433))
+
+## [0.0.22](https://github.com/moq-dev/moq/compare/moq-video-v0.0.21...moq-video-v0.0.22) - 2026-09-02
+
+### Fixed
+
+- *(video)* compile the PipeWire render test ([#3341](https://github.com/moq-dev/moq/pull/3341))
+
+## [0.0.21](https://github.com/moq-dev/moq/compare/moq-video-v0.0.20...moq-video-v0.0.21) - 2026-09-01
+
+### Added
+
+- *(video)* complete native screen capture ([#3244](https://github.com/moq-dev/moq/pull/3244))
+- *(video)* add packed RGBA surface exit ([#3236](https://github.com/moq-dev/moq/pull/3236))
+
+### Fixed
+
+- *(moq-video)* mark capture idle gaps ([#3214](https://github.com/moq-dev/moq/pull/3214))
+
+### Other
+
+- *(video)* exercise PipeWire DMA-BUF rendering ([#3228](https://github.com/moq-dev/moq/pull/3228))
+- *(rs)* point shared dependencies at [workspace.dependencies] ([#3098](https://github.com/moq-dev/moq/pull/3098))
+
+## [0.0.20](https://github.com/moq-dev/moq/compare/moq-video-v0.0.19...moq-video-v0.0.20) - 2026-08-26
+
+### Added
+
+- *(moq-gst)* select media container for sink pads ([#2997](https://github.com/moq-dev/moq/pull/2997))
+
+### Fixed
+
+- *(video)* warn when Auto selects software encoding ([#3054](https://github.com/moq-dev/moq/pull/3054))
+
+## [0.0.19](https://github.com/moq-dev/moq/compare/moq-video-v0.0.18...moq-video-v0.0.19) - 2026-08-24
+
+### Added
+
+- *(moq-ffi)* expose raw video track demand ([#3013](https://github.com/moq-dev/moq/pull/3013))
 
 ## [0.0.18](https://github.com/moq-dev/moq/compare/moq-video-v0.0.17...moq-video-v0.0.18) - 2026-08-20
 

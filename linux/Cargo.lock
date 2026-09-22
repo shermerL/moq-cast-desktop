@@ -118,15 +118,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "addr2line"
-version = "0.25.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b5d307320b3181d6d7954e663bd7c774a838b8220fe0593c86d9fb09f498b4b"
-dependencies = [
- "gimli",
-]
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -263,54 +254,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "anstream"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "824a212faf96e9acacdbd09febd34438f8f711fb84e09a8916013cd7815ca28d"
-dependencies = [
- "anstyle",
- "anstyle-parse",
- "anstyle-query",
- "anstyle-wincon",
- "colorchoice",
- "is_terminal_polyfill",
- "utf8parse",
-]
-
-[[package]]
 name = "anstyle"
 version = "1.0.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
-
-[[package]]
-name = "anstyle-parse"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52ce7f38b242319f7cabaa6813055467063ecdc9d355bbb4ce0c68908cd8130e"
-dependencies = [
- "utf8parse",
-]
-
-[[package]]
-name = "anstyle-query"
-version = "1.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
-dependencies = [
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "anstyle-wincon"
-version = "3.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
-dependencies = [
- "anstyle",
- "once_cell_polyfill",
- "windows-sys 0.61.2",
-]
 
 [[package]]
 name = "anyhow"
@@ -335,7 +282,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "windows-sys 0.60.2",
- "x11rb",
+ "x11rb 0.13.2",
 ]
 
 [[package]]
@@ -594,26 +541,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "audio-core"
-version = "0.2.1"
+name = "audio-codec-algorithms"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f93ebbf82d06013f4c41fe71303feb980cddd78496d904d06be627972de51a24"
+checksum = "1254ebf6529f3763c491acfb5ab6e960809e3c75a38584cc664f8c5667fb7107"
 
 [[package]]
 name = "audioadapter"
-version = "4.0.0"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c75c3943c6c7279bb25a449a8d1727480730ab2efd7b6fd5d6ca51927096e6e4"
-dependencies = [
- "audio-core",
- "num-traits",
-]
+checksum = "d1292ef9edf681b7426ed089004b021a42896492f58bd0c909ad44e5faec9ac4"
 
 [[package]]
 name = "audioadapter-buffers"
-version = "4.0.0"
+version = "5.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ece3390b6eb40379094843a1da5aaccc34bc0d85a8cbf68d09fe092fee6de29e"
+checksum = "46289a81a3bfa26d0f8b2415f8ca9decde9a66308a150568af5c102381b3c8ce"
 dependencies = [
  "audioadapter",
  "audioadapter-sample",
@@ -622,11 +565,11 @@ dependencies = [
 
 [[package]]
 name = "audioadapter-sample"
-version = "4.0.0"
+version = "5.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1592f90413568e259413c21a41a3d571feb1774255c209e7966d98f9db708c90"
+checksum = "5258faecf4edbe35ec483bda9b1f7438e6b391891819269c6b5461aeaa0e8d7d"
 dependencies = [
- "audio-core",
+ "audio-codec-algorithms",
  "num-traits",
 ]
 
@@ -658,21 +601,6 @@ dependencies = [
  "dunce",
  "fs_extra",
  "pkg-config",
-]
-
-[[package]]
-name = "backtrace"
-version = "0.3.76"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb531853791a215d7c62a30daf0dde835f381ab5de4589cfe7c649d2cbe92bd6"
-dependencies = [
- "addr2line",
- "cfg-if",
- "libc",
- "miniz_oxide",
- "object",
- "rustc-demangle",
- "windows-link",
 ]
 
 [[package]]
@@ -708,6 +636,26 @@ dependencies = [
  "shlex 1.3.0",
  "syn 2.0.119",
  "which",
+]
+
+[[package]]
+name = "bindgen"
+version = "0.70.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f49d8fed880d473ea71efb9bf597651e77201bdd4893efe54c9e5d65ae04ce6f"
+dependencies = [
+ "bitflags 2.13.1",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.13.0",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash 1.1.0",
+ "shlex 1.3.0",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -761,6 +709,12 @@ checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 dependencies = [
  "serde_core",
 ]
+
+[[package]]
+name = "bitstream-io"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6099cdc01846bc367c4e7dd630dc5966dccf36b652fae7a74e17b640411a91b2"
 
 [[package]]
 name = "block-buffer"
@@ -1015,46 +969,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "clap"
-version = "4.6.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "473c7e07f409a8d772161724aa8db6a765a2532a70f9667eeb7b49d3d02fbdca"
-dependencies = [
- "clap_builder",
- "clap_derive",
-]
-
-[[package]]
-name = "clap_builder"
-version = "4.6.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b48fea5a88e9ae728a2dcbedbfc0e730f7d60da42e1cb049a83c9fb8b789889"
-dependencies = [
- "anstream",
- "anstyle",
- "clap_lex",
- "strsim",
-]
-
-[[package]]
-name = "clap_derive"
-version = "4.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d012d2b9d65aca7f18f4d9878a045bc17899bba951561ba5ec3c2ba1eed9a061"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "syn 3.0.3",
-]
-
-[[package]]
-name = "clap_lex"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
-
-[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1097,12 +1011,6 @@ checksum = "2ec7c5eb7a16992b1904d76c517d170ab353b0e0b3d5a0c81a8a0cd1037893cf"
 dependencies = [
  "bytemuck",
 ]
-
-[[package]]
-name = "colorchoice"
-version = "1.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "combine"
@@ -1524,14 +1432,14 @@ dependencies = [
 
 [[package]]
 name = "dns-lookup"
-version = "3.0.1"
+version = "4.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e39034cee21a2f5bbb66ba0e3689819c4bb5d00382a282006e802a7ffa6c41d"
+checksum = "6120e7e5dcd1c90098e349def389e2797377cdbe6b465ad8fdd115c0c99d5cf2"
 dependencies = [
  "cfg-if",
  "libc",
  "socket2",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1569,10 +1477,11 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ebml-iterable"
-version = "0.6.3"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b5173ac3752f08b526a6991509615e1a345b221ec3c58c7633433e8c9582312"
+checksum = "152f8f4a13024011b26457b8b21040d9a9eb1222e693993ef037db391cd0c004"
 dependencies = [
+ "bytes",
  "ebml-iterable-specification",
  "ebml-iterable-specification-derive",
  "futures",
@@ -1939,21 +1848,15 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "fixed-resample"
-version = "0.12.1"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3505607cc0adc388ce98f59707477c02fbd05a2fa0c1b8c4cf42b71a3cb9c34"
+checksum = "4d1870ecdc0221202c6fb0c8205a6a38878231f13fc9d389c1d9f2b9d2906bd3"
 dependencies = [
  "audioadapter",
  "audioadapter-buffers",
  "ringbuf",
  "rubato",
 ]
-
-[[package]]
-name = "fixedbitset"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
 
 [[package]]
 name = "flate2"
@@ -2027,6 +1930,12 @@ checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
 ]
+
+[[package]]
+name = "four-cc"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "795cbfc56d419a7ce47ccbb7504dd9a5b7c484c083c356e797de08bd988d9629"
 
 [[package]]
 name = "fs_extra"
@@ -2186,10 +2095,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
- "js-sys",
  "libc",
  "wasi",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -2227,12 +2134,6 @@ dependencies = [
  "opaque-debug",
  "polyval",
 ]
-
-[[package]]
-name = "gimli"
-version = "0.32.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 
 [[package]]
 name = "gl_generator"
@@ -2370,9 +2271,22 @@ dependencies = [
 
 [[package]]
 name = "h264-parser"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "253b313319f7109de64e480ffb606f89475cd758bae82e096e00c5d95341d30e"
+checksum = "c16ee729d5d4a75be0f5181682a17cf0fce29497d0fa5273d57fe477409f02e6"
+
+[[package]]
+name = "h264-reader"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "036a78b2620d92f0ec57690bc792b3bb87348632ee5225302ba2e66a48021c6c"
+dependencies = [
+ "bitstream-io",
+ "hex-slice",
+ "log",
+ "memchr",
+ "rfc6381-codec",
+]
 
 [[package]]
 name = "half"
@@ -2388,8 +2302,8 @@ dependencies = [
 
 [[package]]
 name = "hang"
-version = "0.20.6"
-source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
+version = "0.20.13"
+source = "git+https://github.com/moq-dev/moq.git?rev=615d166d246b04cde8d0449c80a556f22356f719#615d166d246b04cde8d0449c80a556f22356f719"
 dependencies = [
  "bytes",
  "derive_more",
@@ -2461,6 +2375,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hex-slice"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5491a308e0214554f07a81d8944abe45f552871c12e3c3c6e7e5d354039a6c4c"
+
+[[package]]
 name = "hmac"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2522,16 +2442,6 @@ name = "humantime"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
-
-[[package]]
-name = "humantime-serde"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57a3db5ea5923d99402c94e9feb261dc5ee9b4efa158b0315f788cf549cc200c"
-dependencies = [
- "humantime",
- "serde",
-]
 
 [[package]]
 name = "hybrid-array"
@@ -2807,12 +2717,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
-name = "is_terminal_polyfill"
-version = "1.70.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
-
-[[package]]
 name = "itertools"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3019,12 +2923,11 @@ dependencies = [
 
 [[package]]
 name = "kio"
-version = "0.5.5"
-source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
+version = "0.5.9"
+source = "git+https://github.com/moq-dev/moq.git?rev=615d166d246b04cde8d0449c80a556f22356f719#615d166d246b04cde8d0449c80a556f22356f719"
 dependencies = [
  "loom",
  "smallvec",
- "web-async",
 ]
 
 [[package]]
@@ -3117,7 +3020,7 @@ dependencies = [
 
 [[package]]
 name = "libspa"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "bitflags 2.13.1",
  "cc",
@@ -3222,9 +3125,9 @@ dependencies = [
 
 [[package]]
 name = "mdns-sd"
-version = "0.20.3"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86dbb9f00c8c367f75ed3a775d3eb31d0375a72f58275ef64a1bc53c255a2ce2"
+checksum = "ba97b4c886eea3c2823388120d92063c011ac866919ffc4200a0e4b1642a54a5"
 dependencies = [
  "fastrand",
  "flume",
@@ -3289,8 +3192,8 @@ dependencies = [
 
 [[package]]
 name = "moq-audio"
-version = "0.0.18"
-source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
+version = "0.0.25"
+source = "git+https://github.com/moq-dev/moq.git?rev=615d166d246b04cde8d0449c80a556f22356f719#615d166d246b04cde8d0449c80a556f22356f719"
 dependencies = [
  "bytes",
  "cpal",
@@ -3304,6 +3207,18 @@ dependencies = [
  "tokio",
  "tracing",
  "unsafe-libopus",
+]
+
+[[package]]
+name = "moq-binary"
+version = "0.1.0"
+source = "git+https://github.com/moq-dev/moq.git?rev=615d166d246b04cde8d0449c80a556f22356f719#615d166d246b04cde8d0449c80a556f22356f719"
+dependencies = [
+ "bytes",
+ "kio 0.5.9",
+ "moq-flate",
+ "moq-net",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3330,8 +3245,8 @@ dependencies = [
 
 [[package]]
 name = "moq-flate"
-version = "0.1.1"
-source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
+version = "0.1.2"
+source = "git+https://github.com/moq-dev/moq.git?rev=615d166d246b04cde8d0449c80a556f22356f719#615d166d246b04cde8d0449c80a556f22356f719"
 dependencies = [
  "bytes",
  "flate2",
@@ -3340,12 +3255,12 @@ dependencies = [
 
 [[package]]
 name = "moq-json"
-version = "0.3.4"
-source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
+version = "0.3.12"
+source = "git+https://github.com/moq-dev/moq.git?rev=615d166d246b04cde8d0449c80a556f22356f719#615d166d246b04cde8d0449c80a556f22356f719"
 dependencies = [
  "bytes",
  "json-patch",
- "kio 0.5.5",
+ "kio 0.5.9",
  "moq-flate",
  "moq-net",
  "serde",
@@ -3357,8 +3272,8 @@ dependencies = [
 
 [[package]]
 name = "moq-loc"
-version = "0.2.1"
-source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
+version = "0.2.8"
+source = "git+https://github.com/moq-dev/moq.git?rev=615d166d246b04cde8d0449c80a556f22356f719#615d166d246b04cde8d0449c80a556f22356f719"
 dependencies = [
  "bytes",
  "moq-net",
@@ -3367,8 +3282,8 @@ dependencies = [
 
 [[package]]
 name = "moq-msf"
-version = "0.4.1"
-source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
+version = "0.4.2"
+source = "git+https://github.com/moq-dev/moq.git?rev=615d166d246b04cde8d0449c80a556f22356f719#615d166d246b04cde8d0449c80a556f22356f719"
 dependencies = [
  "serde",
  "serde_json",
@@ -3377,16 +3292,17 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.9.8"
-source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
+version = "0.9.16"
+source = "git+https://github.com/moq-dev/moq.git?rev=615d166d246b04cde8d0449c80a556f22356f719#615d166d246b04cde8d0449c80a556f22356f719"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
  "bytes",
  "h264-parser",
  "hang",
- "kio 0.5.5",
+ "kio 0.5.9",
  "memchr",
+ "moq-binary",
  "moq-json",
  "moq-loc",
  "moq-msf",
@@ -3409,15 +3325,18 @@ dependencies = [
 
 [[package]]
 name = "moq-net"
-version = "0.2.13"
-source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
+version = "0.2.22"
+source = "git+https://github.com/moq-dev/moq.git?rev=615d166d246b04cde8d0449c80a556f22356f719#615d166d246b04cde8d0449c80a556f22356f719"
 dependencies = [
+ "arrayvec",
  "bytes",
  "futures",
- "kio 0.5.5",
+ "kio 0.5.9",
+ "moq-pattern",
  "num_enum",
  "rand",
  "serde",
+ "slab",
  "thiserror 2.0.20",
  "tracing",
  "web-async",
@@ -3426,35 +3345,52 @@ dependencies = [
 
 [[package]]
 name = "moq-nvenc"
-version = "0.0.3"
-source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
+version = "0.0.5"
+source = "git+https://github.com/moq-dev/moq.git?rev=615d166d246b04cde8d0449c80a556f22356f719#615d166d246b04cde8d0449c80a556f22356f719"
 dependencies = [
  "cudarc",
- "lazy_static",
  "libloading 0.9.0",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "moq-pattern"
+version = "0.1.0"
+source = "git+https://github.com/moq-dev/moq.git?rev=615d166d246b04cde8d0449c80a556f22356f719#615d166d246b04cde8d0449c80a556f22356f719"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "moq-sock"
+version = "0.0.1"
+source = "git+https://github.com/moq-dev/moq.git?rev=615d166d246b04cde8d0449c80a556f22356f719#615d166d246b04cde8d0449c80a556f22356f719"
+dependencies = [
+ "core_affinity",
+ "libc",
+ "rand",
+ "socket2",
+ "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
 name = "moq-tokio"
 version = "0.19.11"
-source = "git+https://github.com/moq-dev/moq.git?rev=81d39f7bf04c82aae324a9ee4251b7f8aa08fb53#81d39f7bf04c82aae324a9ee4251b7f8aa08fb53"
+source = "git+https://github.com/moq-dev/moq.git?rev=615d166d246b04cde8d0449c80a556f22356f719#615d166d246b04cde8d0449c80a556f22356f719"
 dependencies = [
  "bytes",
- "clap",
- "core_affinity",
  "dns-lookup",
  "futures",
  "hex",
  "hmac",
  "humantime",
- "humantime-serde",
  "jni",
  "libc",
  "mdns-sd",
  "moq-net",
+ "moq-sock",
  "notify",
- "parking_lot",
- "quinn",
  "rand",
  "rcgen",
  "reqwest",
@@ -3464,32 +3400,51 @@ dependencies = [
  "serde",
  "serde_with",
  "sha2",
- "socket2",
  "subtle",
  "thiserror 2.0.20",
  "time",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "url",
+ "usage-rs",
  "web-transport-noq",
- "web-transport-quinn",
  "web-transport-trait",
  "webpki-roots",
  "x509-parser",
 ]
 
 [[package]]
-name = "moq-video"
-version = "0.0.18"
+name = "moq-vaapi"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "091df44de531fc6e5346da91f2dd7d1ebbb4a2e741ddadaf49aef017e659cb57"
 dependencies = [
  "anyhow",
+ "bindgen 0.70.1",
+ "bitflags 2.13.1",
+ "libloading 0.8.9",
+ "log",
+ "regex",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "moq-video"
+version = "0.0.25"
+dependencies = [
+ "anyhow",
+ "ash",
  "ashpd",
  "block2 0.6.2",
+ "bytemuck",
  "bytes",
  "cudarc",
  "dispatch2",
  "fast_image_resize",
+ "futures",
+ "h264-reader",
  "hang",
  "libc",
  "libloading 0.9.0",
@@ -3497,6 +3452,8 @@ dependencies = [
  "moq-mux",
  "moq-net",
  "moq-nvenc",
+ "moq-vaapi",
+ "ndk",
  "objc2 0.6.4",
  "objc2-av-foundation",
  "objc2-core-foundation",
@@ -3504,17 +3461,21 @@ dependencies = [
  "objc2-core-media",
  "objc2-core-video",
  "objc2-foundation 0.3.2",
+ "objc2-metal 0.3.2",
  "objc2-screen-capture-kit",
  "objc2-video-toolbox",
  "openh264",
  "openh264-sys2",
  "pipewire",
+ "pollster 1.0.1",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "tracing-test",
  "v4l",
+ "wgpu",
  "windows",
- "x11rb",
+ "x11rb 0.14.0",
  "yuv",
  "zune-jpeg",
 ]
@@ -3567,10 +3528,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "mp4ra-rust"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdbc3d3867085d66ac6270482e66f3dd2c5a18451a3dc9ad7269e94844a536b7"
+dependencies = [
+ "four-cc",
+]
+
+[[package]]
 name = "mpeg2ts"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7541fc1a42604cbd10e8607a4e6d4b231db982888fe8065ccb191b751d6368d6"
+
+[[package]]
+name = "mpeg4-audio-const"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96a1fe2275b68991faded2c80aa4a33dba398b77d276038b8f50701a22e55918"
 
 [[package]]
 name = "naga"
@@ -4259,7 +4235,9 @@ checksum = "a0125f776a10d00af4152d74616409f0d4a2053a6f57fa5b7d6aa2854ac04794"
 dependencies = [
  "bitflags 2.13.1",
  "block2 0.6.2",
+ "dispatch2",
  "objc2 0.6.4",
+ "objc2-core-foundation",
  "objc2-foundation 0.3.2",
 ]
 
@@ -4404,15 +4382,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "object"
-version = "0.37.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "oid-registry"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4426,12 +4395,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "once_cell_polyfill"
-version = "1.70.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opaque-debug"
@@ -4517,10 +4480,8 @@ version = "0.9.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
 dependencies = [
- "backtrace",
  "cfg-if",
  "libc",
- "petgraph",
  "redox_syscall 0.5.18",
  "smallvec",
  "windows-link",
@@ -4556,16 +4517,6 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
-
-[[package]]
-name = "petgraph"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4c5cc86750666a3ed20bdaf5ca2a0344f9c67674cae0515bec2da16fbaa47db"
-dependencies = [
- "fixedbitset",
- "indexmap 2.14.0",
-]
 
 [[package]]
 name = "phf"
@@ -4842,65 +4793,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quinn"
-version = "0.11.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c1a41e437b6bbd489372cd4971de128e85c855f56c57f283d20ff016cf7c0a8"
-dependencies = [
- "bytes",
- "cfg_aliases",
- "pin-project-lite",
- "quinn-proto",
- "quinn-udp",
- "rustc-hash 2.1.3",
- "rustls",
- "socket2",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "quinn-proto"
-version = "0.11.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f4bfc015262b9df63c8845072ce59068853ff5872180c2ce2f13038b970e560"
-dependencies = [
- "aws-lc-rs",
- "bytes",
- "fastbloom",
- "getrandom 0.4.3",
- "lru-slab",
- "rand",
- "rand_pcg",
- "ring",
- "rustc-hash 2.1.3",
- "rustls",
- "rustls-pki-types",
- "rustls-platform-verifier",
- "slab",
- "thiserror 2.0.20",
- "tinyvec",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "quinn-udp"
-version = "0.5.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35a133f956daabe89a61a685c2649f13d82d5aa4bd5d12d1277e1072a21c0694"
-dependencies = [
- "cfg_aliases",
- "libc",
- "once_cell",
- "socket2",
- "tracing",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5107,6 +4999,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rfc6381-codec"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed54c20f5c3ec82eab6d998b313dc75ec5d5650d4f57675e61d72489040297fd"
+dependencies = [
+ "mp4ra-rust",
+ "mpeg4-audio-const",
+]
+
+[[package]]
 name = "rfd"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5174,9 +5076,9 @@ dependencies = [
 
 [[package]]
 name = "rubato"
-version = "4.0.0"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f57c655d11e929f05a8663b323ff553f8d9773be05dfdc087795955bedeb8d92"
+checksum = "a7cb1ffaf8738df50aab642a7f6465df81c6ba9e2818268053487165298114be"
 dependencies = [
  "audioadapter",
  "audioadapter-buffers",
@@ -5185,12 +5087,6 @@ dependencies = [
  "visibility",
  "windowfunctions",
 ]
-
-[[package]]
-name = "rustc-demangle"
-version = "0.1.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b74b56ffa8bb2830709a538c2cbcae9aa062db0d2a42563bfb09bdaae44020eb"
 
 [[package]]
 name = "rustc-hash"
@@ -6271,6 +6167,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-test"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19a4c448db514d4f24c5ddb9f73f2ee71bfb24c526cf0c570ba142d1119e0051"
+dependencies = [
+ "tracing-core",
+ "tracing-subscriber",
+ "tracing-test-macro",
+]
+
+[[package]]
+name = "tracing-test-macro"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad06847b7afb65c7866a36664b75c40b895e318cea4f71299f013fb22965329d"
+dependencies = [
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6391,16 +6308,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "usage-argv"
+version = "6.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e110b955e659550764e492124a3384b6b2c622a967e263f98674b37cbc6e9366"
+
+[[package]]
+name = "usage-config"
+version = "6.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a718a143e0d5226321b63128b76eb8af658d40131f9c9be93f5d72a546acc8b3"
+
+[[package]]
+name = "usage-derive"
+version = "6.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97cd4e6e833bd1f8765ac31bcd51c3d35caacc717a1a7831500f06db8b8d0270"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
+name = "usage-rs"
+version = "6.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9780b341820a3ce0769e4de8c1ff476640512c45a76b02c66a5129190c3305af"
+dependencies = [
+ "usage-argv",
+ "usage-config",
+ "usage-derive",
+]
+
+[[package]]
 name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
-
-[[package]]
-name = "utf8parse"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
@@ -6794,27 +6739,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "web-transport-quinn"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b494e7a90c7c576bac11d7506128cea266d63ed9a8b0be39269c7b9ea402a5e"
-dependencies = [
- "bytes",
- "futures",
- "http",
- "kio 0.5.4",
- "quinn",
- "rustls",
- "rustls-native-certs",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "url",
- "web-transport-proto",
- "web-transport-trait",
-]
-
-[[package]]
 name = "web-transport-trait"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6825,9 +6749,9 @@ dependencies = [
 
 [[package]]
 name = "webm-iterable"
-version = "0.6.4"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd9fbf173b4b38f2f8bbb0082a0d4cb21f263a70811f5fccb1663c421c66d9f9"
+checksum = "2b1f0c637f1c2b46d58a1b42b150135f8a31b024bfdcd56cc82febfbb20ba4c0"
 dependencies = [
  "ebml-iterable",
 ]
@@ -7423,7 +7347,7 @@ dependencies = [
  "web-time",
  "windows-sys 0.52.0",
  "x11-dl",
- "x11rb",
+ "x11rb 0.13.2",
  "xkbcommon-dl",
 ]
 
@@ -7471,7 +7395,18 @@ dependencies = [
  "libloading 0.8.9",
  "once_cell",
  "rustix 1.1.4",
- "x11rb-protocol",
+ "x11rb-protocol 0.13.2",
+]
+
+[[package]]
+name = "x11rb"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a8885a854a8bfdf87a301e53e41b17c5f8f33639903131338b997b1eb614f44"
+dependencies = [
+ "gethostname",
+ "rustix 1.1.4",
+ "x11rb-protocol 0.14.0",
 ]
 
 [[package]]
@@ -7479,6 +7414,12 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
+
+[[package]]
+name = "x11rb-protocol"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acf4d1bc32aa46eec18caa634ec3cf4c05bfa151f12b93b510b15190f69a1ca8"
 
 [[package]]
 name = "x509-parser"

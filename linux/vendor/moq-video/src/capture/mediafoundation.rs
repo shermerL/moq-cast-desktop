@@ -13,6 +13,7 @@ use std::ffi::c_void;
 use std::ptr;
 use std::slice;
 
+use windows::Win32::Foundation::E_ACCESSDENIED;
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 use windows::Win32::Media::MediaFoundation::{
 	IMF2DBuffer, IMFActivate, IMFAttributes, IMFDXGIDeviceManager, IMFMediaSource, IMFSample, IMFSourceReader,
@@ -28,7 +29,7 @@ use windows::core::{GUID, Interface, PWSTR};
 
 use super::channel::FrameChannel;
 use super::pump::{self, Geometry};
-use super::{Config, FrameStream};
+use super::{Config, Stream};
 use crate::Error;
 use crate::frame::d3d11::Texture;
 use crate::frame::{I420, Surface};
@@ -46,7 +47,7 @@ pub(super) fn cameras() -> Result<Vec<super::Camera>, Error> {
 }
 
 /// Open a Media Foundation camera and stream its frames over a pump thread.
-pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameStream, Error> {
+pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream, Error> {
 	let config = config.clone();
 	// The device opens on the pump thread, so the selector has to be owned.
 	let device = device.map(str::to_string);
@@ -59,7 +60,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 				width: camera.width,
 				height: camera.height,
 				framerate: camera.framerate,
-				device: camera.device_name.clone(),
+				label: camera.device_name.clone(),
 			};
 			Ok((camera, geometry))
 		},
@@ -67,12 +68,12 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 	)
 	.await?;
 
-	Ok(FrameStream::new(
+	Ok(Stream::new(
 		chan,
 		geo.width,
 		geo.height,
 		geo.framerate,
-		geo.device,
+		geo.label,
 		None,
 		Box::new(guard),
 	))
@@ -88,7 +89,7 @@ struct Camera {
 	device: Option<ID3D11Device>,
 	width: u32,
 	height: u32,
-	framerate: Option<u32>,
+	framerate: Option<crate::Rate>,
 	device_name: String,
 	// Keep the DXGI manager alive for the reader's lifetime (the reader holds its
 	// own ref, but we own the pairing). Drops before `_com`.
@@ -153,7 +154,7 @@ impl Camera {
 					.map_err(|e| mf_err("set frame size", e))?;
 			}
 			if let Some(fps) = config.framerate {
-				want.SetUINT64(&MF_MT_FRAME_RATE, pack_2x32(fps, 1))
+				want.SetUINT64(&MF_MT_FRAME_RATE, pack_2x32(fps.numerator(), fps.denominator()))
 					.map_err(|e| mf_err("set frame rate", e))?;
 			}
 			reader
@@ -181,7 +182,7 @@ impl Camera {
 		}
 		let framerate = unsafe { current.GetUINT64(&MF_MT_FRAME_RATE).ok() }.and_then(|packed| {
 			let (num, den) = unpack_2x32(packed);
-			(den != 0).then(|| (num / den).max(1))
+			crate::Rate::new(num, den).ok()
 		});
 
 		let (device, manager) = match gpu {
@@ -260,12 +261,15 @@ impl Camera {
 			data
 		};
 
-		Ok(Surface::I420(I420::from_nv12(&nv12, self.width, self.height)?))
+		Ok(Surface::I420(I420::from_nv12(
+			&nv12,
+			crate::Size::new(self.width, self.height),
+		)?))
 	}
 
 	/// Pull the next frame. Blocks per frame; the pump thread calls this in a loop
 	/// and checks its stop flag between calls.
-	fn read(&mut self) -> Result<Option<Surface>, Error> {
+	fn read(&mut self) -> Result<pump::Read, Error> {
 		loop {
 			let mut flags: u32 = 0;
 			let mut sample: Option<IMFSample> = None;
@@ -279,11 +283,11 @@ impl Camera {
 						None,
 						Some(&mut sample),
 					)
-					.map_err(|e| mf_err("read sample", e))?;
+					.map_err(|error| capture_error(&format!("camera {}: read sample", self.device_name), error))?;
 			}
 
 			if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-				return Ok(None);
+				return Ok(pump::Read::Done);
 			}
 			// A null sample with no end-of-stream is a gap / stream tick (e.g. a
 			// mid-stream format change); keep reading until a real frame arrives.
@@ -294,7 +298,13 @@ impl Camera {
 				Some(device) => self.sample_to_texture(device, &sample)?,
 				None => self.sample_to_i420(&sample)?,
 			};
-			return Ok(Some(frame));
+			let timestamp = unsafe { sample.GetSampleTime().ok() }
+				.and_then(|ticks| u64::try_from(ticks).ok())
+				.and_then(|ticks| moq_net::Timestamp::from_micros(ticks / 10).ok());
+			return Ok(match timestamp {
+				Some(timestamp) => pump::Read::FrameAt(frame, timestamp),
+				None => pump::Read::Frame(frame),
+			});
 		}
 	}
 }
@@ -349,17 +359,25 @@ fn open_source(selector: Option<&str>) -> Result<(IMFMediaSource, String), Error
 		.map(|(_, source)| source);
 
 	let source = chosen.ok_or_else(|| match &selector {
-		Selector::Index(i) => Error::Codec(anyhow::anyhow!("camera index {i} out of range ({count} found)")),
-		Selector::IdOrName(value) => Error::Codec(anyhow::anyhow!("no camera matching {value:?} ({count} found)")),
+		Selector::Index(i) => Error::SourceUnavailable(format!("camera index {i} out of range ({count} found)")),
+		Selector::IdOrName(value) => Error::SourceUnavailable(format!("no camera matching {value:?} ({count} found)")),
 	})?;
 
 	let media: IMFMediaSource = unsafe {
 		source
 			.activate
 			.ActivateObject()
-			.map_err(|e| mf_err("activate device", e))?
+			.map_err(|error| capture_error("activate camera", error))?
 	};
 	Ok((media, source.name))
+}
+
+fn capture_error(context: &str, error: windows::core::Error) -> Error {
+	if error.code() == E_ACCESSDENIED {
+		Error::PermissionDenied(format!("{context}: {error}"))
+	} else {
+		Error::SourceUnavailable(format!("{context}: {error}"))
+	}
 }
 
 /// One Media Foundation capture source and the metadata exposed publicly.

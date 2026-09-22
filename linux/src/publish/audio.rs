@@ -35,11 +35,7 @@ pub(super) async fn publish(
     let capture = Capture::open(clock).await?;
     let queue = capture.queue.clone();
 
-    let input = moq_audio::encode::Input {
-        format: moq_audio::Format::F32,
-        sample_rate: SAMPLE_RATE,
-        channels: CHANNELS,
-    };
+    let input = moq_audio::encode::Input::new(SAMPLE_RATE, moq_audio::Layout::Stereo);
     let options = moq_audio::encode::Options::default();
     let mut producer = moq_audio::encode::Producer::new(&mut broadcast, catalog, input, &options)
         .context("open Opus system-audio producer")?;
@@ -53,10 +49,10 @@ pub(super) async fn publish(
             producer.reset_epoch();
             tracing::debug!(stage = "audio", "system-audio capture gap reset the epoch");
         }
-        let frame = moq_audio::Frame {
-            timestamp: moq_net::Timestamp::from_micros(chunk.timestamp_us)?,
-            data: chunk.data.into(),
-        };
+        let frame = moq_audio::Frame::new(
+            chunk.data.into(),
+            moq_net::Timestamp::from_micros(chunk.timestamp_us)?,
+        );
         producer.write(&frame)?;
     }
 }
@@ -233,7 +229,10 @@ fn run_pipewire(
                 let Some(bytes) = bytes.get(offset..offset.saturating_add(size)) else {
                     return;
                 };
-                queue.push(clock.micros(), bytes.to_vec());
+                queue.push(
+                    u64::try_from(clock.now().as_micros()).unwrap_or(u64::MAX),
+                    bytes.to_vec(),
+                );
             }
         })
         .register()

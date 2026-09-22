@@ -15,7 +15,7 @@ pub(crate) struct Publication {
     #[cfg(target_os = "linux")]
     catalog: moq_mux::catalog::Producer,
     #[cfg(target_os = "linux")]
-    bandwidth: Option<moq_net::bandwidth::Consumer>,
+    clock: moq_mux::Clock,
     #[cfg(target_os = "linux")]
     system_audio: bool,
 }
@@ -25,26 +25,29 @@ impl Publication {
     pub(crate) fn prepare(
         origin: &moq_net::origin::Producer,
         local_peer_id: &str,
-        bandwidth: Option<moq_net::bandwidth::Consumer>,
         system_audio: bool,
     ) -> anyhow::Result<Self> {
         #[cfg(target_os = "linux")]
         {
             let path = screen_path::for_peer(local_peer_id);
-            let mut broadcast = origin
-                .create_broadcast(path, moq_net::broadcast::Route::new().with_announce(true))?;
-            let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+            let mut broadcast = origin.create_broadcast(&path)?;
+            let clock = moq_mux::Clock::new();
+            let catalog = moq_mux::catalog::Producer::new(
+                &mut broadcast,
+                moq_mux::catalog::Config::default().with_clock(clock),
+            )?;
+            broadcast.announce(moq_net::origin::Route::default())?;
             Ok(Self {
                 broadcast,
                 catalog,
-                bandwidth,
+                clock,
                 system_audio,
             })
         }
 
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (origin, local_peer_id, bandwidth, system_audio);
+            let _ = (origin, local_peer_id, system_audio);
             anyhow::bail!("screen sharing is available only on Linux")
         }
     }
@@ -55,7 +58,7 @@ impl Publication {
         {
             let mut capture = moq_video::capture::Config::default();
             capture.source = moq_video::capture::Source::Display(None);
-            capture.framerate = Some(30);
+            capture.framerate = Some(moq_video::Rate::new(30, 1).expect("valid frame rate"));
             let cleanup = moq_video::capture::cleanup::Owner::default();
             capture.cleanup = Some(cleanup.handle());
 
@@ -63,8 +66,7 @@ impl Publication {
             encode.codec = moq_video::encode::Codec::H264;
             encode.kind = moq_video::encode::Kind::Auto;
             encode.max_size = Some(moq_video::Size::new(1920, 1080));
-            encode.bandwidth = self.bandwidth.clone();
-            let clock = moq_mux::Clock::new();
+            let clock = self.clock;
             let result = {
                 let media = async {
                     let video = moq_video::encode::publish_capture(

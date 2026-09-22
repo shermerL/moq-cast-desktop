@@ -8,10 +8,9 @@
 //! format description.
 //!
 //! Hand-written on the raw `objc2-video-toolbox` bindings; there's no
-//! higher-level crate we trust. The capture loop drives it inline and always
-//! sequentially, so the `!Send` CoreFoundation handles are wrapped in a `Send`
-//! type (safe to move between tokio workers between frames, never used
-//! concurrently).
+//! higher-level crate we trust. The backend is `!Send` and a direct `Encoder` is
+//! thread-bound with it; only the macOS `Sink::Inner` keeps the serialized
+//! `Send` wrapper, safe because `Sink` serializes every call.
 
 use std::ffi::{c_int, c_void};
 use std::ptr::{self, NonNull};
@@ -40,7 +39,7 @@ use objc2_video_toolbox::{
 	kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
 };
 
-use super::super::encoder::{Codec, Config};
+use super::super::encoder::{Codec, Config, Gop};
 use super::{Backend, Encoded};
 use crate::frame::Surface;
 use crate::{Color, Error, Frame};
@@ -61,15 +60,10 @@ pub(crate) struct VideoToolbox {
 	sink: Box<Sink>,
 	/// `{ ForceKeyFrame: true }`, built once and reused for forced IDRs.
 	force_keyframe: CFRetained<CFDictionary>,
-	framerate: i32,
+	framerate_numerator: i32,
+	framerate_denominator: i64,
 	frame_index: i64,
 }
-
-// The capture loop drives this inline (macOS skips the dedicated encode thread),
-// always sequentially. Core Foundation handles are safe to use from a different
-// thread as long as never concurrently, so `Send` (which just lets the encoder
-// move between tokio workers between frames) is sound.
-unsafe impl Send for VideoToolbox {}
 
 impl VideoToolbox {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
@@ -124,17 +118,18 @@ impl VideoToolbox {
 		set_number(
 			&session,
 			unsafe { kVTCompressionPropertyKey_AverageBitRate },
-			clamp_i32(config.resolved_bitrate()),
+			clamp_i32(config.resolved_bitrate().as_bps()),
 		)?;
+		let Gop::Keyframe { interval } = config.gop;
 		set_number(
 			&session,
 			unsafe { kVTCompressionPropertyKey_MaxKeyFrameInterval },
-			config.gop as i32,
+			clamp_i32(interval.into()),
 		)?;
 		set_number(
 			&session,
 			unsafe { kVTCompressionPropertyKey_ExpectedFrameRate },
-			config.framerate as i32,
+			config.framerate.rounded() as i32,
 		)?;
 
 		// State the color space in the SPS so a decoder doesn't fall back to
@@ -174,18 +169,21 @@ impl VideoToolbox {
 			height = config.height,
 			"opened video encoder"
 		);
+		let framerate_numerator = i32::try_from(config.framerate.numerator())
+			.map_err(|_| Error::Codec(anyhow::anyhow!("VideoToolbox frame-rate numerator exceeds i32")))?;
 		Ok(Box::new(Self {
 			session,
 			sink,
 			force_keyframe,
-			framerate: config.framerate as i32,
+			framerate_numerator,
+			framerate_denominator: i64::from(config.framerate.denominator()),
 			frame_index: 0,
 		}))
 	}
 }
 
 impl Backend for VideoToolbox {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
 		self.sink.packets.clear();
 		self.sink.error = None;
 
@@ -199,10 +197,15 @@ impl Backend for VideoToolbox {
 		// Presentation timestamps must strictly increase; the moq timestamp is
 		// attached downstream, so a monotonic frame index over the framerate is
 		// all VideoToolbox needs.
-		let pts = unsafe { CMTime::new(self.frame_index, self.framerate.max(1)) };
+		let pts = unsafe {
+			CMTime::new(
+				self.frame_index.saturating_mul(self.framerate_denominator),
+				self.framerate_numerator,
+			)
+		};
 		self.frame_index += 1;
 
-		let frame_properties = keyframe.then_some(&*self.force_keyframe);
+		let frame_properties = cut.then_some(&*self.force_keyframe);
 
 		let status = unsafe {
 			self.session.encode_frame(
@@ -261,7 +264,11 @@ impl Backend for VideoToolbox {
 		)
 	}
 
-	fn name(&self) -> &str {
+	fn can_cut(&self) -> bool {
+		true
+	}
+
+	fn name(&self) -> &'static str {
 		NAME
 	}
 }

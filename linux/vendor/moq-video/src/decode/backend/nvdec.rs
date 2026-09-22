@@ -11,15 +11,15 @@
 //! (surfaces come from a small fixed pool, so holding them across calls would
 //! stall the decoder), which the NVENC encode backend then registers directly:
 //! the decode -> scale -> encode transcode path never touches the CPU. Scaling
-//! rides the decoder itself: [`Config::resize`] maps to cuvid's target size, so
+//! rides the decoder itself: [`Config::scale_hint`] maps to cuvid's target size, so
 //! the hardware emits frames already at the output resolution.
 //!
-//! The cuvid parser is driven synchronously: each access unit is pushed with
-//! `CUVID_PKT_ENDOFPICTURE` and zero display delay, so its callbacks (sequence /
-//! decode / display) all fire inside `cuvidParseVideoData` on the calling
-//! thread, and the display queue is drained before `decode` returns. Timestamps
-//! are threaded through the parser (`ulClockRate` is set to microseconds), so
-//! output frames keep correct presentation times even across reordering.
+//! The cuvid parser is driven synchronously: callbacks (sequence / decode /
+//! display) fire inside `cuvidParseVideoData` on the calling thread. Each access
+//! unit uses `CUVID_PKT_ENDOFPICTURE`, and an explicit end-of-stream packet drains
+//! any pictures the display queue still holds. Timestamps are threaded through
+//! the parser (`ulClockRate` is set to microseconds), so output frames keep
+//! correct presentation times even across reordering.
 
 use core::ffi::{c_int, c_uint, c_ulong, c_ulonglong, c_void};
 use std::ptr;
@@ -52,11 +52,9 @@ pub(crate) struct Nvdec {
 	/// Boxed so its address is stable: the parser holds a raw pointer to it for
 	/// the lifetime of the parser (callbacks dereference it during parse).
 	state: Box<State>,
+	/// Mark the first access unit after a drain as a new parser epoch.
+	discontinuity: bool,
 }
-
-// Used from one thread at a time (the decode loop); the CUDA context is rebound
-// to the current thread on every call.
-unsafe impl Send for Nvdec {}
 
 /// State shared with the parser's C callbacks via the user-data pointer.
 struct State {
@@ -108,11 +106,6 @@ impl Nvdec {
 		}
 		let api = cuvid::Api::get().map_err(|e| codec_err(format!("NVDEC unavailable: {e}")))?;
 
-		// NV12 output: chroma is 2x2 subsampled, so the target must be even.
-		if let Some(size) = config.resize {
-			size.validate("NVDEC resize to")?;
-		}
-
 		let cuda_codec = match codec {
 			Codec::H264 => cudaVideoCodec::cudaVideoCodec_H264,
 			Codec::H265 => cudaVideoCodec::cudaVideoCodec_HEVC,
@@ -126,7 +119,7 @@ impl Nvdec {
 		let mut state = Box::new(State {
 			api,
 			ctx,
-			resize: config.resize,
+			resize: config.scale_hint,
 			decoder: None,
 			ready: Vec::new(),
 			error: None,
@@ -156,44 +149,75 @@ impl Nvdec {
 			return Err(codec_err(format!("cuvidCreateVideoParser: {result:?}")));
 		}
 
-		tracing::info!(decoder = NAME, codec = ?codec, resize = ?config.resize, "opened video decoder");
-		Ok(Box::new(Self { parser, state }))
+		tracing::info!(decoder = NAME, codec = ?codec, resize = ?config.scale_hint, "opened video decoder");
+		Ok(Box::new(Self {
+			parser,
+			state,
+			discontinuity: false,
+		}))
 	}
-}
 
-impl Backend for Nvdec {
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
-		// The parser callbacks (decoder create, decode) and the map/copy below
-		// all need the CUDA context current on this thread.
+	/// Submit one parser packet and copy every picture its display callback made
+	/// ready before returning.
+	fn parse(&mut self, packet: &mut CUVIDSOURCEDATAPACKET) -> Result<Vec<Frame>, Error> {
+		// Parser callbacks and the map/copy below all need the CUDA context current
+		// on this thread.
 		self.state
 			.ctx
 			.bind_to_thread()
 			.map_err(|e| codec_err(format!("CUDA bind: {e:?}")))?;
 
+		// SAFETY: parser and packet are valid. A non-null payload is owned by the
+		// caller for the duration of this synchronous call.
+		let result = unsafe { (self.state.api.parse_video_data)(self.parser, packet) };
+		if let Some(error) = self.state.error.take() {
+			self.state.ready.clear();
+			return Err(codec_err(error));
+		}
+		if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+			self.state.ready.clear();
+			return Err(codec_err(format!("cuvidParseVideoData: {result:?}")));
+		}
+
+		let ready = std::mem::take(&mut self.state.ready);
+		ready.iter().map(|disp| self.state.map_frame(disp)).collect()
+	}
+}
+
+impl Backend for Nvdec {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+		let mut flags = (CUvideopacketflags::CUVID_PKT_TIMESTAMP as c_ulong)
+			| (CUvideopacketflags::CUVID_PKT_ENDOFPICTURE as c_ulong);
+		if self.discontinuity {
+			flags |= CUvideopacketflags::CUVID_PKT_DISCONTINUITY as c_ulong;
+		}
 		let mut packet = CUVIDSOURCEDATAPACKET {
 			// ENDOFPICTURE: each payload is one complete access unit, so the
-			// parser emits it immediately instead of waiting for the next AU to
-			// detect the picture boundary (one-in one-out latency).
-			flags: (CUvideopacketflags::CUVID_PKT_TIMESTAMP as c_ulong)
-				| (CUvideopacketflags::CUVID_PKT_ENDOFPICTURE as c_ulong),
+			// parser sees the picture boundary without waiting for the next AU.
+			flags,
 			payload_size: access_unit.len() as c_ulong,
 			payload: access_unit.as_ptr(),
 			// cuvid's clock rate is microseconds (set at parser creation).
 			timestamp: timestamp.as_micros() as i64,
 		};
 
-		// SAFETY: parser and packet are valid; the payload outlives the call
-		// (the parser copies what it needs before returning).
-		let result = unsafe { (self.state.api.parse_video_data)(self.parser, &mut packet) };
-		if let Some(error) = self.state.error.take() {
-			return Err(codec_err(error));
-		}
-		if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-			return Err(codec_err(format!("cuvidParseVideoData: {result:?}")));
-		}
+		let frames = self.parse(&mut packet)?;
+		self.discontinuity = false;
+		Ok(frames)
+	}
 
-		let ready = std::mem::take(&mut self.state.ready);
-		ready.iter().map(|disp| self.state.map_frame(disp)).collect()
+	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		let mut packet = CUVIDSOURCEDATAPACKET {
+			// NVIDIA requires an explicit EOS packet to release every picture still
+			// waiting in display order, even with zero display delay.
+			flags: CUvideopacketflags::CUVID_PKT_ENDOFSTREAM as c_ulong,
+			payload_size: 0,
+			payload: ptr::null(),
+			timestamp: 0,
+		};
+		let frames = self.parse(&mut packet)?;
+		self.discontinuity = true;
+		Ok(frames)
 	}
 
 	fn name(&self) -> &str {
@@ -474,10 +498,10 @@ mod tests {
 		assert!(Nvdec::open(Codec::H264, &decode_config(None)).is_err());
 	}
 
-	fn decode_config(resize: Option<crate::Size>) -> DecodeConfig {
+	fn decode_config(scale_hint: Option<crate::Size>) -> DecodeConfig {
 		DecodeConfig {
 			kind: DecodeKind::Named(NAME.into()),
-			resize,
+			scale_hint,
 			..DecodeConfig::new()
 		}
 	}
@@ -518,7 +542,7 @@ mod tests {
 		let mut out = Vec::new();
 		for i in 0..10u64 {
 			if i == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			for encoded in encoder.encode(&gradient_frame(&rgba, w, h, i)).unwrap() {
 				for decoded in decoder.decode(encoded.payload, encoded.timestamp, i == 0).unwrap() {
@@ -526,6 +550,10 @@ mod tests {
 					out.push((decoded.timestamp.as_micros() as u64, i420));
 				}
 			}
+		}
+		for decoded in decoder.flush().unwrap() {
+			let i420 = decoded.surface.to_i420().unwrap().into_owned();
+			out.push((decoded.timestamp.as_micros() as u64, i420));
 		}
 		assert!(!out.is_empty(), "NVDEC produced no frames");
 		out
@@ -543,12 +571,12 @@ mod tests {
 		let (w, h) = (320u32, 240u32);
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(w, h, 30)
+			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		let decoder = Nvdec::open(Codec::H264, &decode_config(None)).expect("NVDEC H.264 decoder");
 
-		let expected = I420::from_rgba(&gradient_rgba(w, h), w * 4, w, h).unwrap();
+		let expected = I420::from_rgba(&gradient_rgba(w, h), w * 4, crate::Size::new(w, h)).unwrap();
 		let decoded = round_trip(encoder, decoder, w, h);
 
 		for (i, (timestamp, i420)) in decoded.iter().enumerate() {
@@ -572,14 +600,14 @@ mod tests {
 		let (w, h) = (320u32, 240u32);
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(w, h, 30)
+			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		let decoder =
 			Nvdec::open(Codec::H264, &decode_config(Some(crate::Size::new(160, 120)))).expect("NVDEC H.264 decoder");
 
 		// Nearest-neighbor reference downscale of the expected picture.
-		let full = I420::from_rgba(&gradient_rgba(w, h), w * 4, w, h).unwrap();
+		let full = I420::from_rgba(&gradient_rgba(w, h), w * 4, crate::Size::new(w, h)).unwrap();
 		let sample = |plane: &[u8], pw: usize, x: usize, y: usize| plane[y * 2 * pw + x * 2];
 		let mut expected_y = vec![0u8; 160 * 120];
 		for y in 0..120 {
@@ -606,14 +634,14 @@ mod tests {
 		let Ok(encoder) = Encoder::new(&EncodeConfig {
 			codec: EncodeCodec::H265,
 			kind: EncodeKind::Named("nvenc".into()),
-			..EncodeConfig::new(w, h, 30)
+			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
 		}) else {
 			// Driver present but NVENC unusable (e.g. GPU busy); don't fail.
 			return;
 		};
 		let decoder = Nvdec::open(Codec::H265, &decode_config(None)).expect("NVDEC H.265 decoder");
 
-		let expected = I420::from_rgba(&gradient_rgba(w, h), w * 4, w, h).unwrap();
+		let expected = I420::from_rgba(&gradient_rgba(w, h), w * 4, crate::Size::new(w, h)).unwrap();
 		let decoded = round_trip(encoder, decoder, w, h);
 		for (_, i420) in &decoded {
 			assert_eq!((i420.width, i420.height), (w, h));
@@ -636,7 +664,7 @@ mod tests {
 		// Source stream: software-encoded gradient.
 		let source = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(w, h, 30)
+			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		// Decode at half size so the hardware scaler is in the loop too.
@@ -645,7 +673,7 @@ mod tests {
 
 		let mut nvenc = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("nvenc".into()),
-			..EncodeConfig::new(160, 120, 30)
+			..EncodeConfig::new(160, 120, crate::Rate::new(30, 1).unwrap())
 		})
 		.expect("NVENC encoder");
 
@@ -657,7 +685,7 @@ mod tests {
 			let mut frames = Vec::new();
 			for i in 0..10u64 {
 				if i == 0 {
-					source.keyframe();
+					source.cut().unwrap();
 				}
 				for encoded in source.encode(&gradient_frame(&rgba, w, h, i)).unwrap() {
 					frames.extend(decoder.decode(encoded.payload, encoded.timestamp, i == 0).unwrap());
@@ -674,7 +702,7 @@ mod tests {
 				"NVDEC produced a non-CUDA frame; the zero-copy path is not exercised"
 			);
 			if i == 0 {
-				nvenc.keyframe();
+				nvenc.cut().unwrap();
 			}
 			packets.extend(nvenc.encode(&out).unwrap());
 		}
@@ -683,7 +711,7 @@ mod tests {
 
 		// Decode the re-encoded stream in software and compare to the source.
 		let expected = {
-			let full = I420::from_rgba(&gradient_rgba(w, h), w * 4, w, h).unwrap();
+			let full = I420::from_rgba(&gradient_rgba(w, h), w * 4, crate::Size::new(w, h)).unwrap();
 			let mut y = vec![0u8; 160 * 120];
 			for row in 0..120 {
 				for col in 0..160 {

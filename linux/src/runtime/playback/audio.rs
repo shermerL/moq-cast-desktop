@@ -171,11 +171,10 @@ impl Playback {
         let engine = engine
             .get_or_try_init(|| moq_audio::playback::Engine::open(Default::default()))
             .await?;
-        let sink = engine.sink(moq_audio::playback::Input {
-            format: moq_audio::Format::F32,
-            sample_rate: consumer.sample_rate(),
-            channels: consumer.channels(),
-        })?;
+        let mut input = moq_audio::playback::Input::default();
+        input.sample_rate = consumer.sample_rate();
+        input.layout = consumer.layout();
+        let sink = engine.sink(input)?;
         Ok(Self { consumer, sink })
     }
 
@@ -185,7 +184,7 @@ impl Playback {
             track: Some(track.to_owned()),
             codec: Some(codec.to_owned()),
             sample_rate: Some(self.consumer.sample_rate()),
-            channels: Some(self.consumer.channels()),
+            channels: Some(self.consumer.layout().channels()),
             last_error: None,
         }
     }
@@ -375,7 +374,7 @@ async fn run(
         track = %name,
         codec = %codec,
         sample_rate = playback.consumer.sample_rate(),
-        channels = playback.consumer.channels(),
+        channels = playback.consumer.layout().channels(),
         live_edge_budget_ms = REMOTE_AUDIO_LIVE_EDGE_BUDGET.as_millis() as u64,
         audio_generation = events.generation,
         "remote audio decoder and output sink opened with a live-edge budget"
@@ -384,10 +383,11 @@ async fn run(
     let mut decoded = false;
     let mut submitted = false;
     let sample_rate = playback.consumer.sample_rate();
-    let channels = playback.consumer.channels();
+    let channels = playback.consumer.layout().channels();
     let stride = channels as usize * size_of::<f32>();
     // A PCM frame may exceed the sink capacity, so pace one aligned second at a time.
     let chunk = (sample_rate as usize * stride).max(stride);
+    let mut awaiting_sink_drain = false;
     loop {
         let frame = match playback.consumer.read().await {
             Ok(Some(frame)) => frame,
@@ -439,6 +439,10 @@ async fn run(
                 .await;
         }
         let end = timing.end();
+        if awaiting_sink_drain && playback.sink.buffered().is_zero() {
+            awaiting_sink_drain = false;
+        }
+        let mut frame_fully_accepted = true;
         for part in frame.data.chunks(chunk) {
             let buffered = playback.sink.buffered();
             continuity.observe_buffered(buffered);
@@ -446,44 +450,60 @@ async fn run(
                 continuity.observe_pacing_delay_requested(delay);
                 tokio::time::sleep(delay).await;
             }
-            if let Err(error) = playback.sink.write(part) {
-                let _ = continuity.observe_write(
-                    part.len(),
-                    sample_rate,
-                    channels,
-                    false,
-                    Instant::now,
-                );
-                tracing::warn!(
-                    broadcast = %events.path,
-                    track = %name,
-                    audio_generation = events.generation,
-                    error = %error,
-                    "remote PCM submission failed; video continues"
-                );
-                events
-                    .send(failed_snapshot(
-                        &playback,
-                        &name,
-                        &codec,
-                        "Remote PCM submission failed; video is continuing.",
-                    ))
-                    .await;
-                continuity.finish(TeardownReason::SinkError);
-                return;
+            let write = match playback.sink.write(part) {
+                Ok(write) => write,
+                Err(error) => {
+                    let _ = continuity.observe_write(
+                        part.len(),
+                        sample_rate,
+                        channels,
+                        Err(()),
+                        Instant::now,
+                    );
+                    tracing::warn!(
+                        broadcast = %events.path,
+                        track = %name,
+                        audio_generation = events.generation,
+                        error = %error,
+                        "remote PCM submission failed; video continues"
+                    );
+                    events
+                        .send(failed_snapshot(
+                            &playback,
+                            &name,
+                            &codec,
+                            "Remote PCM submission failed; video is continuing.",
+                        ))
+                        .await;
+                    continuity.finish(TeardownReason::SinkError);
+                    return;
+                }
+            };
+            let accepted = write.accepted_sample_frames.min(part.len() / stride);
+            let _ = continuity.observe_write(
+                part.len(),
+                sample_rate,
+                channels,
+                Ok(accepted),
+                Instant::now,
+            );
+            if accepted < part.len() / stride {
+                frame_fully_accepted = false;
+                awaiting_sink_drain = true;
+                clock.invalidate();
             }
-            // Success only means Sink::write returned Ok; output readiness is not exposed.
-            let _ = continuity.observe_write(part.len(), sample_rate, channels, true, Instant::now);
+            if accepted > 0 && !submitted {
+                submitted = true;
+                events
+                    .send(playback.snapshot(RemoteAudioPhase::PcmSubmitted, &name, &codec))
+                    .await;
+            }
         }
         let buffered = playback.sink.buffered();
         continuity.observe_buffered(buffered);
         let frame_end_now = Instant::now();
-        clock.anchor(end, buffered, frame_end_now);
-        if !submitted {
-            submitted = true;
-            events
-                .send(playback.snapshot(RemoteAudioPhase::PcmSubmitted, &name, &codec))
-                .await;
+        if frame_fully_accepted && !awaiting_sink_drain && submitted {
+            clock.anchor(end, buffered, frame_end_now);
         }
         continuity.maybe_log_summary(frame_end_now);
     }

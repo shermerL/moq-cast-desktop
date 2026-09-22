@@ -224,21 +224,22 @@ objc2-core-media = "..."
 objc2-core-video = "..."
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# Hardware encoders are always-on for Linux (cfg-gated, no feature). Both
-# dlopen their drivers at runtime, so they link on a GPU-less builder.
-moq-nvenc = { path = "../moq-nvenc" }  # in-tree fork, dlopen-only
-moq-vaapi = "0.0.2"                 # standalone; vendored cros-libva + cros-codecs
+# NVENC rides the default-on `nvidia` feature and VAAPI the opt-in `vaapi`
+# feature. Both dlopen their drivers at runtime, so they link on a GPU-less builder.
+moq-nvenc = { path = "../moq-nvenc", optional = true }  # in-tree fork, dlopen-only
+moq-vaapi = { version = "0.0.2", optional = true }      # standalone; vendored cros-libva + cros-codecs
 
 [dependencies]
-openh264 = "..."   # always-on software fallback
+openh264 = { version = "...", optional = true } # default software fallback
 ```
 
-Hardware encoders are always-on (VideoToolbox on macOS, Media Foundation on
-Windows, NVENC + VAAPI on Linux); the runtime fallback chain skips whichever
+Hardware encoders are cfg-gated on macOS and Windows (VideoToolbox, Media
+Foundation) and feature-gated on Linux (NVENC behind the default-on `nvidia`,
+VAAPI behind the opt-in `vaapi`); the runtime fallback chain skips whichever
 driver is absent. None is a build-time hard dep on the driver, so the binary
-still builds and runs on a box with no GPU. openh264 is always compiled in as
-the software fallback, so a GPU-less box still encodes (it's also what moq-boy
-uses for its tiny 160x144 frames, which hardware encoders may reject).
+still builds and runs on a box with no GPU. The default `openh264` feature
+provides the software fallback, so a GPU-less box still encodes (it's also what
+moq-boy uses for its tiny 160x144 frames, which hardware encoders may reject).
 
 ### Selection / fallback (`Kind` mapping)
 
@@ -264,7 +265,7 @@ A backend "fails to open" (driver missing, no device) the same way an ffmpeg
   - `dlopen`s `libva` for Intel/AMD (no build dep on libva-dev) — *intended*;
     moq-vaapi 0.0.2 currently links libva instead, so this isn't realized yet
     (see #1837),
-  - falls back to the always-compiled-in openh264 when no GPU encoder is usable.
+  - falls back to OpenH264 when its default feature is enabled and no GPU encoder is usable.
 
   That single artifact runs across Ubuntu 20.04 -> 24.04, Debian, Fedora, etc.,
   which is the whole reason for the change.
@@ -343,10 +344,11 @@ Where the implementation differs from the plan above:
   publish time, so a buffering backend and the `finish()` tail stay in step. The
   separate `encode_rgba` / `encode_i420` entry points collapsed into
   `Surface::rgba` plus the single `Encoder::encode`.
-- **Keyframes are the encoder's, not the application's.** `Config::gop` keys the
-  stream on its own and `encode` takes no per-frame flag; `Encoder::keyframe()`
-  requests one at the next frame for the callers that genuinely need a decodable
-  starting point (a new output group, a resume after idle).
+- **Group boundaries are the encoder's, not the application's.** `Config::gop`
+  (a `Gop` enum, keyframes at an interval today) places them on its own and
+  `encode` takes no per-frame flag; `Encoder::cut()` opens one at the next frame
+  for the callers that genuinely need a decodable starting point (a new output
+  group), and refuses on a backend that cannot force one.
 - **Capture is per-platform native (nokhwa fully removed).** Each platform's
   `Camera::read` yields a `Frame` the encoder can take: macOS hands VideoToolbox a
   zero-copy `CVPixelBuffer` surface, Linux V4L2 and Windows Media Foundation hand
@@ -435,7 +437,7 @@ licenses (drm, drm-fourcc, etc.) once the vaapi graph resolves.
 For the "single binary reaches the GPU at runtime" goal, NVENC must not hard-link
 the driver. The stock `nvidia-video-codec-sdk` emits
 `cargo:rustc-link-lib=nvidia-encode` / `nvcuvid`, which would make an
-`--features nvenc` binary (a) impossible to link on a GPU-less builder and (b)
+`--features nvidia` binary (a) impossible to link on a GPU-less builder and (b)
 fail to even load on a machine without the NVIDIA driver (`DT_NEEDED
 libnvidia-encode.so.1`), before `backend::open`'s software fallback could run.
 
@@ -449,7 +451,7 @@ So `nvenc` dlopens everything at runtime, like `cudarc` does for CUDA:
   `GetMaxSupportedVersion`), and the fork resolves those two via `dlopen` instead
   of linking them (there is no `build.rs`, so nothing links).
 
-Result, verified on a GPU-less Linux box: `--features nvenc` builds, links, and the
+Result, verified on a GPU-less Linux box: `--features nvidia` builds, links, and the
 test suite runs and passes (NVENC unavailable -> falls back to openh264), and the
 binary has no `libnvidia-encode` / `libcuda` `DT_NEEDED`. So one portable `moq-cli`
 can carry NVENC and use it only where the driver is present.

@@ -57,7 +57,11 @@ if [[ ! $MOQ_VIDEO_REVISION =~ ^[0-9a-fA-F]{7,64}$ ]]; then
     echo "Invalid vendored moq-video revision: $MOQ_VIDEO_REVISION" >&2
     exit 1
 fi
-for revision in $(sed -n 's/.*git = "https:\/\/github.com\/moq-dev\/moq.git".*rev = "\([^"]*\)".*/\1/p' "$LINUX_DIR/Cargo.toml"); do
+if [[ $MOQ_VIDEO_REVISION != "$MOQ_REVISION" ]]; then
+    echo "Vendored moq-video does not match MoQ revision: $MOQ_VIDEO_REVISION != $MOQ_REVISION" >&2
+    exit 1
+fi
+for revision in $(sed -n 's/.*git = "https:\/\/github.com\/moq-dev\/moq.git".*rev = "\([^"]*\)".*/\1/p' "$LINUX_DIR/Cargo.toml" "$LINUX_DIR/vendor/moq-video/Cargo.toml"); do
     if [[ $revision != "$MOQ_REVISION" ]]; then
         echo "MoQ dependencies do not share one revision: $revision != $MOQ_REVISION" >&2
         exit 1
