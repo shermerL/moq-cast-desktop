@@ -53,11 +53,11 @@ url = { version = "2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6.2", optional = true }
-hang = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", optional = true }
-moq-audio = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, optional = true }
-moq-mux = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", optional = true }
-moq-tokio = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, features = ["aws-lc-rs", "mdns", "quinn"], optional = true }
-moq-video = { git = "https://github.com/moq-dev/moq", rev = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53", default-features = false, optional = true }
+hang = { git = "https://github.com/moq-dev/moq", rev = "615d166d246b04cde8d0449c80a556f22356f719", optional = true }
+moq-audio = { git = "https://github.com/moq-dev/moq", rev = "615d166d246b04cde8d0449c80a556f22356f719", default-features = false, optional = true }
+moq-mux = { git = "https://github.com/moq-dev/moq", rev = "615d166d246b04cde8d0449c80a556f22356f719", optional = true }
+moq-tokio = { git = "https://github.com/moq-dev/moq", rev = "615d166d246b04cde8d0449c80a556f22356f719", default-features = false, features = ["aws-lc-rs", "mdns", "noq"], optional = true }
+moq-video = { git = "https://github.com/moq-dev/moq", rev = "615d166d246b04cde8d0449c80a556f22356f719", default-features = false, features = ["openh264"], optional = true }
 objc2 = { version = "0.6.4", optional = true }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWorkspace"], optional = true }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGDirectDisplay", "CGWindow"], optional = true }

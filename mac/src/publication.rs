@@ -207,6 +207,7 @@ struct Publication {
     path: String,
     broadcast: moq_net::broadcast::Producer,
     catalog: moq_mux::catalog::Producer,
+    clock: moq_mux::Clock,
     source: moq_video::capture::Source,
     audio: AudioPlan,
 }
@@ -226,14 +227,14 @@ impl Publication {
     ) -> Result<(), Failure> {
         let mut capture = moq_video::capture::Config::default();
         capture.source = self.source.clone();
-        capture.framerate = Some(30);
+        capture.framerate = Some(moq_video::Rate::new(30, 1).expect("valid frame rate"));
         capture.cursor = true;
 
         let mut encode = moq_video::encode::Options::default();
         encode.codec = moq_video::encode::Codec::H264;
         encode.kind = moq_video::encode::Kind::Auto;
 
-        let clock = moq_mux::Clock::new();
+        let clock = self.clock;
         let video_broadcast = self.broadcast.clone();
         let video_catalog = self.catalog.clone();
         let video: Running = Box::pin(async move {
@@ -260,26 +261,24 @@ impl Publication {
                 capture.channels = Some(2);
 
                 let mut encode = moq_audio::encode::Options::default();
-                encode.codec = moq_audio::encode::Codec::Opus;
-                encode.sample_rate = Some(48_000);
-                encode.channels = Some(2);
+                encode.settings.codec = moq_audio::encode::Codec::Opus;
+                encode.settings.sample_rate = 48_000;
+                encode.settings.layout = moq_audio::Layout::Stereo;
+                let mut options = moq_audio::encode::PublicationOptions::default();
+                options.capture = capture;
+                options.encode = encode;
+                options.clock = clock;
 
                 let audio_broadcast = self.broadcast.clone();
                 let audio_catalog = self.catalog.clone();
                 Some(Box::pin(async move {
                     tracing::info!(codec = "Opus", "system audio publication requested");
-                    moq_audio::encode::publish_capture(
-                        audio_broadcast,
-                        audio_catalog,
-                        capture,
-                        encode,
-                        clock,
-                    )
-                    .await
-                    .map_err(|error| {
-                        tracing::warn!(%error, "system audio publication ended");
-                        "System audio is unavailable. Video sharing continues.".to_owned()
-                    })
+                    moq_audio::encode::publish_capture(audio_broadcast, audio_catalog, options)
+                        .await
+                        .map_err(|error| {
+                            tracing::warn!(%error, "system audio publication ended");
+                            "System audio is unavailable. Video sharing continues.".to_owned()
+                        })
                 }) as AudioRunning)
             }
             AudioPlan::Off | AudioPlan::Unavailable(_) => None,
@@ -333,21 +332,31 @@ async fn prepare(
     let source = resolve(selection).await?;
     let audio = audio_plan(system_audio, supports_system_audio, &source);
     let path = canonical_path(&local_peer_id)?;
-    let mut broadcast = origin
-        .create_broadcast(&path, moq_net::broadcast::Route::new().with_announce(true))
-        .map_err(|error| {
-            tracing::warn!(%error, "could not create screen broadcast");
-            Failure::pipeline("Screen sharing could not create its local broadcast.")
-        })?;
-    let catalog = moq_mux::catalog::Producer::new(&mut broadcast).map_err(|error| {
+    let mut broadcast = origin.create_broadcast(&path).map_err(|error| {
+        tracing::warn!(%error, "could not create screen broadcast");
+        Failure::pipeline("Screen sharing could not create its local broadcast.")
+    })?;
+    let clock = moq_mux::Clock::new();
+    let catalog = moq_mux::catalog::Producer::new(
+        &mut broadcast,
+        moq_mux::catalog::Config::default().with_clock(clock),
+    )
+    .map_err(|error| {
         tracing::warn!(%error, "could not create screen catalog");
         Failure::pipeline("Screen sharing could not create its media catalog.")
     })?;
+    broadcast
+        .announce(moq_net::origin::Route::default())
+        .map_err(|error| {
+            tracing::warn!(%error, "could not announce screen broadcast");
+            Failure::pipeline("Screen sharing could not announce its local broadcast.")
+        })?;
     tracing::info!(?source_kind, "screen source prepared");
     Ok(Publication {
         path,
         broadcast,
         catalog,
+        clock,
         source,
         audio,
     })

@@ -13,7 +13,7 @@
 - 固定 `_moq._udp.local.`、`/.cluster/<credential>` 与 `moqcast.screen/<peer-id>` 契约。
 - 一个本地 publish Origin 与独立 remote receive Origin。健康 session 不因 mDNS Lost 被拆除。
 - 按冻结原型实现的 Nearby、Screen Share 不可用页和 Settings。普通 UI 只显示语言与公开版本。
-- 固定 moq-dev revision `81d39f7bf04c82aae324a9ee4251b7f8aa08fb53`，`network` 与 `foundation` feature 分开锁定依赖。
+- 固定 moq-dev revision `615d166d246b04cde8d0449c80a556f22356f719`，`network` 与 `foundation` feature 分开锁定依赖。
 - 结构化且不含内部身份的普通日志，以及仅供应用内部消费的 typed snapshot。
 - macOS 14.2 deployment target、bundle ID `dev.moq.moqcast.macos` 和 ad hoc 签名 Universal 2 `.app` 打包。
 

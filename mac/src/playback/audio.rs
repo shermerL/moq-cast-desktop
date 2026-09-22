@@ -99,11 +99,11 @@ fn supported_audio(config: &hang::catalog::AudioConfig) -> bool {
     config.broadcast.is_none() && matches!(&config.codec, hang::catalog::AudioCodec::Opus)
 }
 
-fn decode_config() -> moq_audio::decode::Config {
-    let mut config = moq_audio::decode::Config::new();
-    config.format = moq_audio::Format::F32;
-    config.max_age = LIVE_EDGE_BUDGET;
-    config
+fn decode_config() -> moq_audio::decode::Options {
+    let mut options = moq_audio::decode::Options::new();
+    options.output.format = moq_audio::Format::F32;
+    options.max_age = LIVE_EDGE_BUDGET;
+    options
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,6 +167,56 @@ impl Drop for VolumeListener {
     }
 }
 
+struct OutputClock {
+    media: Arc<MediaClock>,
+    generation: u64,
+    lease: Option<AudioLease>,
+    dropped: bool,
+}
+
+impl OutputClock {
+    fn new(media: Arc<MediaClock>, generation: u64) -> Self {
+        let lease = Some(media.audio(generation));
+        Self {
+            media,
+            generation,
+            lease,
+            dropped: false,
+        }
+    }
+
+    fn observe_write(
+        &mut self,
+        buffered_before: Duration,
+        accepted_sample_frames: usize,
+        dropped_sample_frames: usize,
+    ) -> bool {
+        if dropped_sample_frames > 0 {
+            self.lease.take();
+            self.dropped = true;
+            return false;
+        }
+        if accepted_sample_frames == 0 {
+            return false;
+        }
+        if self.dropped {
+            if !buffered_before.is_zero() {
+                return false;
+            }
+            // The playback owner awaits this task's stop before replacing its generation.
+            self.lease = Some(self.media.audio(self.generation));
+            self.dropped = false;
+        }
+        true
+    }
+
+    fn anchor(&self, end: Duration, buffered: Duration, now: Instant) -> bool {
+        self.lease
+            .as_ref()
+            .is_some_and(|lease| lease.anchor(end, buffered, now))
+    }
+}
+
 fn volume_scalar(percent: u8) -> f32 {
     f32::from(percent.min(100)) / 100.0
 }
@@ -178,7 +228,7 @@ impl Playback {
             track: Some(track.to_owned()),
             codec: Some(codec.to_owned()),
             sample_rate: Some(self.consumer.sample_rate()),
-            channels: Some(self.consumer.channels()),
+            channels: Some(self.consumer.layout().channels()),
             last_error: None,
         }
     }
@@ -223,7 +273,7 @@ impl Task {
             sender: updates.clone(),
         };
         let engine = engine.clone();
-        let clock = clock.audio(generation);
+        let clock = OutputClock::new(clock.clone(), generation);
         let handle = tokio::spawn(async move {
             run(broadcast, selection, events, engine, clock, volume).await;
         });
@@ -266,7 +316,7 @@ async fn run(
     selection: Selection,
     events: Events,
     engine: Arc<OnceCell<moq_audio::playback::Engine>>,
-    clock: AudioLease,
+    mut clock: OutputClock,
     volume: watch::Receiver<u8>,
 ) {
     events.send(AudioSnapshot::pending()).await;
@@ -352,7 +402,7 @@ async fn run(
                     track: Some(name),
                     codec: Some(codec),
                     sample_rate: Some(consumer.sample_rate()),
-                    channels: Some(consumer.channels()),
+                    channels: Some(consumer.layout().channels()),
                     last_error: Some(
                         "Remote audio could not start on the default output device.".into(),
                     ),
@@ -364,7 +414,8 @@ async fn run(
     let sink = match output.sink(moq_audio::playback::Input {
         format: moq_audio::Format::F32,
         sample_rate: consumer.sample_rate(),
-        channels: consumer.channels(),
+        layout: consumer.layout(),
+        ..Default::default()
     }) {
         Ok(sink) => sink,
         Err(error) => {
@@ -381,7 +432,7 @@ async fn run(
                     track: Some(name),
                     codec: Some(codec),
                     sample_rate: Some(consumer.sample_rate()),
-                    channels: Some(consumer.channels()),
+                    channels: Some(consumer.layout().channels()),
                     last_error: Some(
                         "Remote audio could not use the default output device.".into(),
                     ),
@@ -398,7 +449,7 @@ async fn run(
         track = %name,
         codec = %codec,
         sample_rate = playback.consumer.sample_rate(),
-        channels = playback.consumer.channels(),
+        channels = playback.consumer.layout().channels(),
         live_edge_budget_ms = LIVE_EDGE_BUDGET.as_millis() as u64,
         audio_generation = events.generation,
         "remote audio decoder and output sink opened with a live-edge freshness budget"
@@ -410,7 +461,7 @@ async fn run(
     let mut expected_end: Option<Duration> = None;
     let mut discontinuity_reported = false;
     let sample_rate = playback.consumer.sample_rate();
-    let channels = playback.consumer.channels();
+    let channels = playback.consumer.layout().channels();
     let stride = (channels as usize * size_of::<f32>()).max(size_of::<f32>());
     // This limits how far a writer can run ahead. It is not startup prebuffering.
     let chunk = (sample_rate as usize * stride).max(stride);
@@ -501,33 +552,56 @@ async fn run(
         }
         expected_end = Some(end);
 
+        let mut consumed_frames = 0_usize;
+        let mut accepted_end = None;
+        let mut output_trusted = true;
         for part in frame.data.chunks(chunk) {
             let buffered = playback.sink.buffered();
             if buffered > sync::AUDIO_PACING_CEILING {
                 tokio::time::sleep(buffered - sync::AUDIO_PACING_CEILING).await;
             }
-            if let Err(error) = playback.sink.write(part) {
-                tracing::warn!(
-                    broadcast = %events.path,
-                    track = %name,
-                    audio_generation = events.generation,
-                    error = %error,
-                    teardown_reason = "sink_error",
-                    "remote PCM submission failed; video continues"
-                );
-                events
-                    .send(failed_snapshot(
-                        &playback,
-                        &name,
-                        &codec,
-                        "Remote PCM submission failed; video is continuing.",
-                    ))
-                    .await;
-                return;
+            let buffered_before = playback.sink.buffered();
+            let write = match playback.sink.write(part) {
+                Ok(write) => write,
+                Err(error) => {
+                    tracing::warn!(
+                        broadcast = %events.path,
+                        track = %name,
+                        audio_generation = events.generation,
+                        error = %error,
+                        teardown_reason = "sink_error",
+                        "remote PCM submission failed; video continues"
+                    );
+                    events
+                        .send(failed_snapshot(
+                            &playback,
+                            &name,
+                            &codec,
+                            "Remote PCM submission failed; video is continuing.",
+                        ))
+                        .await;
+                    return;
+                }
+            };
+            output_trusted &= clock.observe_write(
+                buffered_before,
+                write.accepted_sample_frames,
+                write.dropped_sample_frames,
+            );
+            if write.accepted_sample_frames > 0 {
+                accepted_end = Some(accepted_pcm_end(
+                    start,
+                    consumed_frames.saturating_add(write.accepted_sample_frames),
+                    sample_rate,
+                ));
             }
+            consumed_frames = consumed_frames.saturating_add(part.len() / stride);
         }
+        let Some(accepted_end) = accepted_end else {
+            continue;
+        };
         let buffered = playback.sink.buffered();
-        if clock.anchor(end, buffered, Instant::now()) && !anchored {
+        if output_trusted && clock.anchor(accepted_end, buffered, Instant::now()) && !anchored {
             anchored = true;
             tracing::info!(
                 broadcast = %events.path,
@@ -544,6 +618,16 @@ async fn run(
                 .await;
         }
     }
+}
+
+fn accepted_pcm_end(start: Duration, frames: usize, sample_rate: u32) -> Duration {
+    let micros = (frames as u128)
+        .saturating_mul(1_000_000)
+        .checked_div(u128::from(sample_rate))
+        .unwrap_or_default();
+    start.saturating_add(Duration::from_micros(
+        micros.min(u128::from(u64::MAX)) as u64
+    ))
 }
 
 fn failed_snapshot(playback: &Playback, track: &str, codec: &str, error: &str) -> AudioSnapshot {
@@ -575,6 +659,36 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
+
+    #[test]
+    fn playback_clock_uses_only_pcm_accepted_by_the_sink() {
+        let start = Duration::from_millis(10);
+        assert_eq!(
+            accepted_pcm_end(start, 480, 48_000),
+            Duration::from_millis(20)
+        );
+        assert_eq!(
+            accepted_pcm_end(start, 240, 48_000),
+            Duration::from_millis(15)
+        );
+    }
+
+    #[test]
+    fn sink_drop_revokes_audio_master_until_the_output_queue_drains() {
+        let media = Arc::new(MediaClock::default());
+        let mut clock = OutputClock::new(media.clone(), 1);
+        let now = Instant::now();
+        assert!(clock.anchor(Duration::from_millis(20), Duration::from_millis(5), now));
+        assert!(media.audio_anchor().is_some());
+
+        assert!(!clock.observe_write(Duration::from_millis(5), 240, 240));
+        assert!(media.audio_anchor().is_none());
+        assert!(!clock.observe_write(Duration::from_millis(2), 0, 480));
+        assert!(!clock.observe_write(Duration::from_millis(2), 480, 0));
+        assert!(clock.observe_write(Duration::ZERO, 480, 0));
+        assert!(clock.anchor(Duration::from_millis(40), Duration::from_millis(5), now));
+        assert!(media.audio_anchor().is_some());
+    }
 
     #[test]
     fn playback_volume_percent_maps_to_the_sink_gain_range() {
@@ -616,7 +730,7 @@ mod tests {
     fn decode_policy_uses_f32_and_live_edge_freshness_budget() {
         let config = decode_config();
 
-        assert_eq!(config.format, moq_audio::Format::F32);
+        assert_eq!(config.output.format, moq_audio::Format::F32);
         assert_eq!(config.max_age, Duration::from_millis(80));
     }
 

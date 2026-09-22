@@ -53,7 +53,7 @@ package_version=$package_version
 build_identity=macos-universal2-adhoc
 source_commit=$source_commit
 minimum_macos=14.2
-moq_dependency=moq-dev/moq@81d39f7bf04c82aae324a9ee4251b7f8aa08fb53
+moq_dependency=moq-dev/moq@615d166d246b04cde8d0449c80a556f22356f719
 EOF
 
 plutil -lint "$app_directory/Contents/Info.plist"

@@ -257,9 +257,9 @@ impl VideoSelection {
         broadcast: &moq_tokio::moq_net::broadcast::Consumer,
         max_age: Duration,
     ) -> anyhow::Result<moq_video::decode::Consumer> {
-        let mut config = moq_video::decode::Config::new();
-        config.max_age = max_age;
-        moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), config)
+        let mut options = moq_video::decode::Options::new();
+        options.max_age = max_age;
+        moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), options)
             .await
             .map_err(Into::into)
     }

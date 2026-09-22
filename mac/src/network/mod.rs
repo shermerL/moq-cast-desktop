@@ -87,7 +87,8 @@ impl Services {
         let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
         let bound = SessionFoundation::bind("[::]:0".parse().expect("valid listener bind"))?;
         let advertisement = bound.advertisement().clone();
-        let discovery = mdns::Config::new(advertisement.addr.port())
+        let app = "moqcast".parse::<mdns::App>().expect("valid LAN app name");
+        let discovery = mdns::Config::new(app, advertisement.addr.port())
             .with_fingerprint(advertisement.fingerprint)
             .advertise()
             .await?;

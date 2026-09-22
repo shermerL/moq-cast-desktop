@@ -1,8 +1,8 @@
 //! Internal build and dependency provenance for local verification.
 
-const MOQ_DEV_REVISION: &str = "81d39f7bf04c82aae324a9ee4251b7f8aa08fb53";
-const MOQ_BASELINE: &str = "moq-dev dev@81d39f7b";
-const MOQ_DEPENDENCY_IDENTITY: &str = "moq-dev/moq@81d39f7bf04c82aae324a9ee4251b7f8aa08fb53";
+const MOQ_DEV_REVISION: &str = "615d166d246b04cde8d0449c80a556f22356f719";
+const MOQ_BASELINE: &str = "moq-dev main@615d166d";
+const MOQ_DEPENDENCY_IDENTITY: &str = "moq-dev/moq@615d166d246b04cde8d0449c80a556f22356f719";
 pub(crate) const MINIMUM_MACOS: &str = "14.2";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,7 +45,7 @@ mod tests {
     #[test]
     fn displayed_provenance_matches_every_locked_moq_dependency() {
         let build = BuildInfo::current();
-        assert_eq!(build.moq_baseline, "moq-dev dev@81d39f7b");
+        assert_eq!(build.moq_baseline, "moq-dev main@615d166d");
         assert!(build.dependency_identity.ends_with(MOQ_DEV_REVISION));
 
         let manifest = MANIFEST

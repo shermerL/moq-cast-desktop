@@ -47,7 +47,7 @@ impl BoundServer {
 
 pub(crate) fn bind(bind: SocketAddr) -> Result<BoundServer, StartError> {
     let mut config = moq_tokio::listen::Config::default();
-    config.bind = Some(bind.to_string());
+    config.bind = Some(moq_tokio::listen::Bind::Addr(bind));
     config.tls.generate = vec!["moq-cast-macos".to_owned()];
     let server = config.init(moq_tokio::quic::Config::default())?;
     let addr = server.local_addr()?;
@@ -69,7 +69,7 @@ pub(super) async fn accept(
     origins: SessionOrigins,
 ) -> Result<moq_tokio::moq_net::Session, AcceptError> {
     if !authorized(request.path(), credential) {
-        request.close(403).await?;
+        request.reject(moq_tokio::server::Reject::Forbidden).await?;
         return Err(AcceptError::Unauthorized);
     }
 
