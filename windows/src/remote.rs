@@ -44,16 +44,27 @@ impl Directory {
         let task = tokio::spawn(async move {
             let mut announcements = origin.consume().announced();
             while let Some(update) = announcements.next().await {
-                let path = update.path.to_string();
+                let path = update.prefix.to_string();
                 let Some(peer_id) = announcement_peer(&path, &local_peer_id).map(str::to_owned)
                 else {
                     continue;
+                };
+                let broadcast = if update.kind.is_active() {
+                    match origin.consume().request_broadcast(path.as_str()).await {
+                        Ok(broadcast) => Some(broadcast),
+                        Err(error) => {
+                            tracing::warn!(%error, "remote screen announcement could not resolve");
+                            continue;
+                        }
+                    }
+                } else {
+                    None
                 };
                 if events_tx
                     .send(Event {
                         path,
                         peer_id,
-                        broadcast: update.broadcast,
+                        broadcast,
                     })
                     .await
                     .is_err()
@@ -103,7 +114,9 @@ fn announcement_peer<'a>(path: &'a str, local_peer_id: &str) -> Option<&'a str> 
 
 #[cfg(test)]
 mod tests {
-    use super::announcement_peer;
+    use std::time::Duration;
+
+    use super::{Directory, ScreenAvailability, announcement_peer};
 
     #[test]
     fn directory_accepts_only_canonical_remote_screen_paths() {
@@ -117,5 +130,33 @@ mod tests {
             None
         );
         assert_eq!(announcement_peer("other/peer", "local"), None);
+    }
+
+    #[tokio::test]
+    async fn announced_broadcast_resolves_and_withdraws() {
+        let origin = moq_tokio::origin::spawn();
+        let mut directory = Directory::start(origin.clone(), "local".to_owned());
+        let broadcast = origin
+            .create_broadcast("moqcast.screen/remote")
+            .expect("broadcast");
+        broadcast
+            .announce(moq_tokio::moq_net::origin::Route::default())
+            .expect("announcement");
+
+        let available = tokio::time::timeout(Duration::from_secs(3), directory.recv())
+            .await
+            .expect("announcement bounded")
+            .expect("available");
+        assert_eq!(available.view.availability, ScreenAvailability::Available);
+        assert!(directory.broadcast(&available.path).is_some());
+
+        broadcast.finish();
+        let withdrawn = tokio::time::timeout(Duration::from_secs(3), directory.recv())
+            .await
+            .expect("retraction bounded")
+            .expect("withdrawn");
+        assert_eq!(withdrawn.view.availability, ScreenAvailability::Withdrawn);
+        assert!(directory.broadcast(&withdrawn.path).is_none());
+        directory.stop().await;
     }
 }

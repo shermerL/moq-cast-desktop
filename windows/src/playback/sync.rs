@@ -36,6 +36,45 @@ impl AudioTimeline {
     }
 }
 
+#[derive(Default)]
+pub(super) struct AudioOutputTrust {
+    dropped: bool,
+}
+
+impl AudioOutputTrust {
+    pub(super) fn observe(
+        &mut self,
+        buffered_before: Duration,
+        accepted_sample_frames: usize,
+        dropped_sample_frames: usize,
+    ) -> bool {
+        if dropped_sample_frames > 0 {
+            self.dropped = true;
+            return false;
+        }
+        if accepted_sample_frames == 0 {
+            return false;
+        }
+        if self.dropped {
+            if !buffered_before.is_zero() {
+                return false;
+            }
+            self.dropped = false;
+        }
+        true
+    }
+}
+
+pub(super) fn accepted_pcm_end(start: Duration, frames: usize, sample_rate: u32) -> Duration {
+    let micros = (frames as u128)
+        .saturating_mul(1_000_000)
+        .checked_div(u128::from(sample_rate))
+        .unwrap_or_default();
+    start.saturating_add(Duration::from_micros(
+        micros.min(u128::from(u64::MAX)) as u64
+    ))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct AudioAnchor {
     position: Duration,
@@ -89,6 +128,19 @@ pub(super) fn audio_clock() -> (AudioClockWriter, AudioClockReader) {
 impl AudioClockWriter {
     pub(super) fn update(&self, anchor: Option<AudioAnchor>) {
         self.0.send_replace(anchor);
+    }
+
+    pub(super) fn observe_source(
+        &self,
+        timeline: &mut AudioTimeline,
+        pts: Duration,
+        duration: Duration,
+    ) -> bool {
+        let broken = timeline.observe(pts, duration);
+        if broken {
+            self.update(None);
+        }
+        broken
     }
 }
 
@@ -259,6 +311,55 @@ mod tests {
             assert!(!timeline.observe(next + ms(10), ms(10)));
             assert!(AudioTimeline::default().is_continuous());
         }
+    }
+
+    #[test]
+    fn output_drop_uses_video_fallback_until_the_sink_drains() {
+        let mut output = AudioOutputTrust::default();
+        assert!(output.observe(ms(20), 480, 0));
+        assert!(!output.observe(ms(30), 240, 240));
+        assert!(!output.observe(ms(20), 0, 480));
+        assert!(!output.observe(ms(10), 480, 0));
+        assert!(output.observe(Duration::ZERO, 480, 0));
+    }
+
+    #[test]
+    fn partial_write_anchors_at_the_last_accepted_pcm_frame() {
+        let start = ms(1_000);
+        assert_eq!(accepted_pcm_end(start, 480, 48_000), ms(1_010));
+        assert_eq!(accepted_pcm_end(start, 240, 48_000), ms(1_005));
+        assert_eq!(accepted_pcm_end(start, 0, 48_000), start);
+    }
+
+    #[test]
+    fn source_timeline_observes_zero_accepted_frames() {
+        let mut timeline = AudioTimeline::default();
+        let (writer, _) = audio_clock();
+        let mut output = AudioOutputTrust::default();
+        for index in 0..20 {
+            assert!(!writer.observe_source(&mut timeline, ms(index * 20), ms(20)));
+            assert!(!output.observe(Duration::ZERO, 0, 960));
+        }
+        assert!(timeline.is_continuous());
+        assert!(!writer.observe_source(&mut timeline, ms(400), ms(20)));
+
+        let mut regressed = AudioTimeline::default();
+        assert!(!regressed.observe(ms(1_000), ms(20)));
+        assert!(regressed.observe(ms(900), ms(20)));
+        assert!(!regressed.is_continuous());
+    }
+
+    #[test]
+    fn zero_accepted_frame_with_real_pts_regression_revokes_the_audio_anchor() {
+        let now = Instant::now();
+        let (writer, reader) = audio_clock();
+        writer.update(AudioAnchor::new(ms(1_100), ms(100), now));
+        assert!(reader.anchor().is_some());
+
+        let mut timeline = AudioTimeline::default();
+        assert!(!writer.observe_source(&mut timeline, ms(1_000), ms(20)));
+        assert!(writer.observe_source(&mut timeline, ms(900), ms(20)));
+        assert!(reader.anchor().is_none());
     }
 
     #[test]

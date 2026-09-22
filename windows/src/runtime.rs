@@ -889,8 +889,9 @@ async fn start_services(
     };
     let advertisement = bound.advertisement().clone();
     let authenticated = config.secret_file.is_some();
-    let mut discovery_config =
-        mdns::Config::new(advertisement.addr.port()).with_fingerprint(advertisement.fingerprint);
+    let app = "moqcast".parse::<mdns::App>().expect("valid LAN app name");
+    let mut discovery_config = mdns::Config::new(app, advertisement.addr.port())
+        .with_fingerprint(advertisement.fingerprint);
     if let Some(node) = config.node.clone() {
         discovery_config = discovery_config.with_node(node);
     }

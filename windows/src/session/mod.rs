@@ -208,7 +208,7 @@ impl SessionFoundation {
         let Some(outbound) = self.outbound.remove(peer) else {
             return;
         };
-        outbound.connection.close();
+        outbound.connection.abort(moq_tokio::moq_net::Error::Cancel);
         let _ = outbound.task.await;
     }
 
@@ -249,10 +249,14 @@ impl BoundServer {
 }
 
 fn spawn_origin() -> (moq_tokio::moq_net::origin::Producer, JoinHandle<()>) {
-    let (origin, driver) = moq_tokio::moq_net::origin::Producer::new(
-        moq_tokio::moq_net::origin::Info::new(moq_tokio::moq_net::Origin::random()),
-    );
-    (origin, tokio::spawn(driver))
+    let (origin, driver) =
+        moq_tokio::moq_net::origin::Producer::new(moq_tokio::moq_net::origin::Config::default());
+    (
+        origin,
+        tokio::spawn(async move {
+            let _ = moq_tokio::moq_net::time::run(driver).await;
+        }),
+    )
 }
 
 #[cfg(test)]

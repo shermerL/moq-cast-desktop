@@ -414,6 +414,8 @@ pub(crate) struct Publication {
     broadcast: moq_net::broadcast::Producer,
     #[cfg(target_os = "windows")]
     catalog: moq_mux::catalog::Producer,
+    #[cfg(target_os = "windows")]
+    clock: moq_mux::Clock,
 }
 
 pub(crate) struct ReadyPublication {
@@ -448,7 +450,7 @@ impl ReadyPublication {
         {
             let mut capture = moq_video::capture::Config::default();
             capture.source = self.source;
-            capture.framerate = Some(30);
+            capture.framerate = Some(moq_video::Rate::new(30, 1).expect("valid frame rate"));
 
             let mut encode = moq_video::encode::Options::default();
             encode.codec = moq_video::encode::Codec::H264;
@@ -463,7 +465,7 @@ impl ReadyPublication {
                 "screen publication requested"
             );
 
-            let clock = moq_mux::Clock::new();
+            let clock = self.publication.clock;
             let audio = crate::audio::publish(
                 self.publication.broadcast.clone(),
                 self.publication.catalog.clone(),
@@ -545,10 +547,18 @@ impl Publication {
         #[cfg(target_os = "windows")]
         {
             let path = screen_path::for_peer(local_peer_id);
-            let mut broadcast = origin
-                .create_broadcast(path, moq_net::broadcast::Route::new().with_announce(true))?;
-            let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
-            Ok(Self { broadcast, catalog })
+            let mut broadcast = origin.create_broadcast(path)?;
+            let clock = moq_mux::Clock::new();
+            let catalog = moq_mux::catalog::Producer::new(
+                &mut broadcast,
+                moq_mux::catalog::Config::default().with_clock(clock),
+            )?;
+            broadcast.announce(moq_net::origin::Route::default())?;
+            Ok(Self {
+                broadcast,
+                catalog,
+                clock,
+            })
         }
 
         #[cfg(not(target_os = "windows"))]

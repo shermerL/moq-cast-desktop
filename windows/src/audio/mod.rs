@@ -323,10 +323,14 @@ impl Normalizer {
         Ok(Self { format, resampler })
     }
 
-    fn normalize(&mut self, samples: &[f32]) -> anyhow::Result<Vec<f32>> {
+    fn normalize(
+        &mut self,
+        samples: &[f32],
+        timestamp: moq_tokio::moq_net::Timestamp,
+    ) -> anyhow::Result<Vec<f32>> {
         let stereo = remix_to_stereo(samples, self.format.channels)?;
         match self.resampler.as_mut() {
-            Some(resampler) => Ok(resampler.process(&stereo)?),
+            Some(resampler) => Ok(resampler.process(&stereo, timestamp)?),
             None => Ok(stereo),
         }
     }
@@ -349,16 +353,12 @@ pub(crate) async fn publish(
 
     let mut options = moq_audio::encode::Options::default();
     options.track = Some("0.opus".to_owned());
-    options.codec = moq_audio::encode::Codec::Opus;
-    options.sample_rate = Some(OUTPUT_SAMPLE_RATE);
-    options.channels = Some(OUTPUT_CHANNELS);
-    options.dtx = true;
+    options.settings.codec = moq_audio::encode::Codec::Opus;
+    options.settings.sample_rate = OUTPUT_SAMPLE_RATE;
+    options.settings.layout = moq_audio::Layout::Stereo;
+    options.settings.dtx = true;
 
-    let input = moq_audio::encode::Input {
-        format: moq_audio::Format::F32,
-        sample_rate: OUTPUT_SAMPLE_RATE,
-        channels: OUTPUT_CHANNELS,
-    };
+    let input = moq_audio::encode::Input::new(OUTPUT_SAMPLE_RATE, moq_audio::Layout::Stereo);
     let mut producer =
         match moq_audio::encode::Producer::new(&mut broadcast, catalog, input, &options) {
             Ok(producer) => producer,
@@ -442,7 +442,21 @@ pub(crate) async fn publish(
                         gap = false;
                     }
 
-                    let samples = match normalizer.normalize(&packet.samples) {
+                    let timestamp = match moq_tokio::moq_net::Timestamp::from_micros(
+                        packet.timestamp_us,
+                    ) {
+                        Ok(timestamp) => timestamp,
+                        Err(error) => {
+                            tracing::warn!(stage = "audio-clock", %error, "invalid audio timestamp");
+                            emit(
+                                &updates,
+                                generation,
+                                AudioEvent::Failed(AudioIssue::Encoder),
+                            );
+                            return;
+                        }
+                    };
+                    let samples = match normalizer.normalize(&packet.samples, timestamp) {
                         Ok(samples) => samples,
                         Err(error) => {
                             tracing::warn!(stage = "audio-normalize", %error, "could not normalize system audio");
@@ -460,24 +474,9 @@ pub(crate) async fn publish(
                         for sample in samples {
                             data.extend_from_slice(&sample.to_le_bytes());
                         }
-                        let timestamp = match moq_tokio::moq_net::Timestamp::from_micros(
-                            packet.timestamp_us,
-                        ) {
-                            Ok(timestamp) => timestamp,
-                            Err(error) => {
-                                tracing::warn!(stage = "audio-clock", %error, "invalid audio timestamp");
-                                emit(
-                                    &updates,
-                                    generation,
-                                    AudioEvent::Failed(AudioIssue::Encoder),
-                                );
-                                return;
-                            }
-                        };
-                        if let Err(error) = producer.write(&moq_audio::Frame {
-                            timestamp,
-                            data: data.into(),
-                        }) {
+                        if let Err(error) =
+                            producer.write(&moq_audio::Frame::new(data.into(), timestamp))
+                        {
                             tracing::warn!(stage = "audio-publish", %error, "could not publish Opus audio");
                             emit(
                                 &updates,

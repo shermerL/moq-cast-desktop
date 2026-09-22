@@ -60,7 +60,7 @@ pub(super) fn dial(
     config.bind = Some("[::]:0".parse().expect("valid ephemeral bind"));
     config.once = Some(false);
     config.backoff.timeout = Some(RECONNECT_BUDGET);
-    config.timeout = Some(CONNECT_TIMEOUT);
+    config.timeout = CONNECT_TIMEOUT;
     config.version = config
         .versions()
         .iter()
@@ -109,8 +109,8 @@ mod tests {
 
     fn origins() -> SessionOrigins {
         SessionOrigins {
-            publish: moq_tokio::origin::spawn(moq_net::Origin::random()),
-            receive: moq_tokio::origin::spawn(moq_net::Origin::random()),
+            publish: moq_tokio::origin::spawn(),
+            receive: moq_tokio::origin::spawn(),
         }
     }
 
@@ -130,7 +130,7 @@ mod tests {
         let session = accept.await.expect("accept task").expect("accepted");
 
         assert!(connection.connected());
-        connection.close();
+        connection.abort(moq_net::Error::Cancel);
         session.abort(moq_net::Error::Cancel);
     }
 
@@ -191,7 +191,7 @@ mod tests {
         let session = accept.await.expect("accept task").expect("accepted");
 
         assert!(connection.connected());
-        connection.close();
+        connection.abort(moq_net::Error::Cancel);
         session.abort(moq_net::Error::Cancel);
     }
 
@@ -234,16 +234,16 @@ mod tests {
             .expect("both sessions accepted")
             .expect("accept task");
 
-        let _from_a = a_publish
-            .create_broadcast(
-                "moqcast.screen/a",
-                moq_net::broadcast::Route::new().with_announce(true),
-            )
+        let from_a = a_publish
+            .create_broadcast("moqcast.screen/a")
             .expect("A broadcast");
+        from_a
+            .announce(moq_net::origin::Route::default())
+            .expect("A announcement");
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let update = b_announcements.next().await.expect("B receive origin");
-                if update.path.as_str() == "moqcast.screen/a" {
+                if update.prefix.as_str() == "moqcast.screen/a" {
                     break;
                 }
             }
@@ -251,17 +251,17 @@ mod tests {
         .await
         .expect("A broadcast reached B locally");
 
-        let _from_b = b_publish
-            .create_broadcast(
-                "moqcast.screen/b",
-                moq_net::broadcast::Route::new().with_announce(true),
-            )
+        let from_b = b_publish
+            .create_broadcast("moqcast.screen/b")
             .expect("B broadcast");
+        from_b
+            .announce(moq_net::origin::Route::default())
+            .expect("B announcement");
 
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let update = a_announcements.next().await.expect("A receive origin");
-                if update.path.as_str() == "moqcast.screen/b" {
+                if update.prefix.as_str() == "moqcast.screen/b" {
                     break;
                 }
             }
@@ -272,7 +272,7 @@ mod tests {
         let c_saw_a_before_b = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let update = c_announcements.next().await.expect("C receive origin");
-                match update.path.as_str() {
+                match update.prefix.as_str() {
                     "moqcast.screen/a" => break true,
                     "moqcast.screen/b" => break false,
                     _ => {}
@@ -286,7 +286,7 @@ mod tests {
         let forwarded = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let update = c_announcements.next().await.expect("C receive origin");
-                if update.path.as_str() == "moqcast.screen/a" {
+                if update.prefix.as_str() == "moqcast.screen/a" {
                     break;
                 }
             }
@@ -294,8 +294,8 @@ mod tests {
         .await;
         assert!(forwarded.is_err(), "C received A through B");
 
-        a_connection.close();
-        c_connection.close();
+        a_connection.abort(moq_net::Error::Cancel);
+        c_connection.abort(moq_net::Error::Cancel);
         a_session.abort(moq_net::Error::Cancel);
         c_session.abort(moq_net::Error::Cancel);
     }

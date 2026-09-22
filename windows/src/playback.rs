@@ -374,7 +374,10 @@ impl AudioStats {
         (first_frame, first_nonzero_pcm)
     }
 
-    fn wrote(&mut self) -> bool {
+    fn wrote(&mut self, accepted_sample_frames: usize) -> bool {
+        if accepted_sample_frames == 0 {
+            return false;
+        }
         let first = self.total_sink_writes == 0;
         self.total_sink_writes = self.total_sink_writes.saturating_add(1);
         self.report.sink_writes = self.report.sink_writes.saturating_add(1);
@@ -456,9 +459,9 @@ impl Selection {
         broadcast: &moq_tokio::moq_net::broadcast::Consumer,
         max_age: std::time::Duration,
     ) -> anyhow::Result<moq_video::decode::Consumer> {
-        let mut config = moq_video::decode::Config::new();
-        config.max_age = max_age;
-        moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), config)
+        let mut options = moq_video::decode::Options::new();
+        options.max_age = max_age;
+        moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), options)
             .await
             .map_err(Into::into)
     }
@@ -1236,12 +1239,13 @@ mod tests {
             stats.decoded(10_000, silence.len(), 10_000, pcm_has_nonzero_f32(&silence)),
             (true, false)
         );
-        assert!(stats.wrote());
+        assert!(!stats.wrote(0));
+        assert!(stats.wrote(480));
         assert_eq!(
             stats.decoded(21_000, nonzero.len(), 10_000, pcm_has_nonzero_f32(&nonzero),),
             (false, true)
         );
-        assert!(!stats.wrote());
+        assert!(!stats.wrote(480));
         stats.write_failed();
 
         let report = stats.take_report();
@@ -1261,7 +1265,7 @@ mod tests {
             stats.decoded(20_000, nonzero.len(), 10_000, true),
             (false, false)
         );
-        assert!(!stats.wrote());
+        assert!(!stats.wrote(480));
         let next = stats.take_report();
         assert_eq!(next.pts_regressions, 1);
         assert_eq!(next.decoded_frames, 1);

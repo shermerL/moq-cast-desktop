@@ -15,11 +15,11 @@ use super::{
 
 const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 
-fn remote_audio_decode_config() -> moq_audio::decode::Config {
-    let mut config = moq_audio::decode::Config::new();
-    config.format = moq_audio::Format::F32;
-    config.max_age = super::AV_LIVE_EDGE_BUDGET;
-    config
+fn remote_audio_decode_config() -> moq_audio::decode::Options {
+    let mut options = moq_audio::decode::Options::new();
+    options.output.format = moq_audio::Format::F32;
+    options.max_age = super::AV_LIVE_EDGE_BUDGET;
+    options
 }
 
 #[derive(Clone, PartialEq)]
@@ -97,7 +97,8 @@ impl Playback {
         let sink = engine.sink(moq_audio::playback::Input {
             format: moq_audio::Format::F32,
             sample_rate: consumer.sample_rate(),
-            channels: consumer.channels(),
+            layout: consumer.layout(),
+            ..Default::default()
         })?;
         Ok(Self { consumer, sink })
     }
@@ -111,7 +112,7 @@ impl Playback {
             phase,
             codec: Some(codec.to_owned()),
             sample_rate: Some(self.consumer.sample_rate()),
-            channels: Some(self.consumer.channels()),
+            channels: Some(self.consumer.layout().channels()),
             last_error: None,
         }
     }
@@ -246,7 +247,7 @@ async fn run(
         track = ?name,
         codec = %codec,
         decoded_sample_rate = playback.consumer.sample_rate(),
-        decoded_channels = playback.consumer.channels(),
+        decoded_channels = playback.consumer.layout().channels(),
         live_edge_budget_ms = super::AV_LIVE_EDGE_BUDGET.as_millis() as u64,
         elapsed_ms = elapsed_ms(started_at),
         output_device = "system-default",
@@ -260,6 +261,7 @@ async fn run(
     reports.tick().await;
     let mut callback_nonzero_observed = false;
     let mut timeline = sync::AudioTimeline::default();
+    let mut output_trust = sync::AudioOutputTrust::default();
 
     loop {
         tokio::select! {
@@ -298,7 +300,7 @@ async fn run(
                 let bytes = frame.data.len();
                 let duration_us = pcm_duration_us(
                     bytes,
-                    playback.consumer.channels(),
+                    playback.consumer.layout().channels(),
                     playback.consumer.sample_rate(),
                 );
                 let nonzero_pcm = pcm_has_nonzero_f32(&frame.data);
@@ -332,39 +334,63 @@ async fn run(
                     );
                 }
 
-                if let Err(error) = playback.sink.write(&frame.data) {
-                    stats.write_failed();
-                    tracing::warn!(
-                        broadcast = ?events.path,
-                        view_generation = events.generation,
-                        track = ?name,
-                        frame_pts_us = %timestamp_us,
-                        error = %error,
-                        "remote PCM sink write failed; video continues"
-                    );
-                    log_interval(&events, &name, &codec, &playback, &mut stats);
-                    let mut audio = playback.snapshot(ViewAudioPhase::Failed, &codec);
-                    audio.last_error =
-                        Some("Remote audio playback failed; video is continuing.".to_owned());
-                    events.send(audio).await;
-                    return;
-                }
-                let now = Instant::now();
                 let pts = Duration::from_micros(timestamp_us.min(u128::from(u64::MAX)) as u64);
                 let duration = Duration::from_micros(duration_us.min(u128::from(u64::MAX)) as u64);
-                if timeline.observe(pts, duration) {
+                if clock.observe_source(&mut timeline, pts, duration) {
                     tracing::warn!(
                         view_generation = events.generation,
                         "audio PTS discontinuity; video uses latest frames until the audio task is replaced"
                     );
                 }
-                let anchor = if timeline.is_continuous() {
-                    AudioAnchor::new(pts.saturating_add(duration), playback.sink.buffered(), now)
+
+                let buffered_before = playback.sink.buffered();
+                let write = match playback.sink.write(&frame.data) {
+                    Ok(write) => write,
+                    Err(error) => {
+                        stats.write_failed();
+                        tracing::warn!(
+                            broadcast = ?events.path,
+                            view_generation = events.generation,
+                            track = ?name,
+                            frame_pts_us = %timestamp_us,
+                            error = %error,
+                            "remote PCM sink write failed; video continues"
+                        );
+                        log_interval(&events, &name, &codec, &playback, &mut stats);
+                        let mut audio = playback.snapshot(ViewAudioPhase::Failed, &codec);
+                        audio.last_error =
+                            Some("Remote audio playback failed; video is continuing.".to_owned());
+                        events.send(audio).await;
+                        return;
+                    }
+                };
+                let output_trusted = output_trust.observe(
+                    buffered_before,
+                    write.accepted_sample_frames,
+                    write.dropped_sample_frames,
+                );
+                if !output_trusted {
+                    clock.update(None);
+                }
+                if write.accepted_sample_frames == 0 {
+                    continue;
+                }
+                let now = Instant::now();
+                let anchor = if timeline.is_continuous() && output_trusted {
+                    AudioAnchor::new(
+                        sync::accepted_pcm_end(
+                            pts,
+                            write.accepted_sample_frames,
+                            playback.consumer.sample_rate(),
+                        ),
+                        playback.sink.buffered(),
+                        now,
+                    )
                 } else {
                     None
                 };
                 clock.update(anchor);
-                if stats.wrote() {
+                if stats.wrote(write.accepted_sample_frames) {
                     let elapsed_ms = elapsed_ms(started_at);
                     tracing::info!(
                         broadcast = ?events.path,
@@ -372,6 +398,8 @@ async fn run(
                         track = ?name,
                         frame_pts_us = %timestamp_us,
                         buffered_us = %playback.sink.buffered().as_micros(),
+                        accepted_sample_frames = write.accepted_sample_frames,
+                        dropped_sample_frames = write.dropped_sample_frames,
                         elapsed_ms,
                         "first remote PCM sink write returned successfully; output callback has not been observed"
                     );
@@ -493,7 +521,7 @@ mod tests {
     fn remote_audio_decode_config_uses_f32_and_80ms_live_edge_budget() {
         let config = remote_audio_decode_config();
 
-        assert_eq!(config.format, moq_audio::Format::F32);
+        assert_eq!(config.output.format, moq_audio::Format::F32);
         assert_eq!(config.max_age, Duration::from_millis(80));
     }
 }
