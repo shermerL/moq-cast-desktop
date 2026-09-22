@@ -22,7 +22,7 @@ pub(crate) enum EventKind {
     InitialScanFinished,
     DiscoveryStopped,
     ListenerStopped,
-    Inbound(moq_tokio::Request),
+    Inbound(moq_tokio::server::Request),
 }
 
 #[derive(Debug, Error)]

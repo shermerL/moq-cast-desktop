@@ -789,7 +789,7 @@ impl Supervisor {
         }
     }
 
-    async fn accept_inbound(&mut self, request: moq_tokio::Request) -> LoopAction {
+    async fn accept_inbound(&mut self, request: moq_tokio::server::Request) -> LoopAction {
         let Some(credential) = self
             .discovery
             .services

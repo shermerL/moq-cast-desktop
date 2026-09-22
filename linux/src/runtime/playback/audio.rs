@@ -22,7 +22,7 @@ use crate::runtime::playback_sync::{self, AudioLease, MediaClock};
 #[derive(Clone, Debug, PartialEq)]
 struct Identity {
     track: String,
-    broadcast: Option<moq_tokio::moq_net::PathRelativeOwned>,
+    broadcast: Option<moq_tokio::moq_net::path::RelativeOwned>,
     codec: hang::catalog::AudioCodec,
     description: Option<Vec<u8>>,
     container: hang::catalog::Container,
@@ -599,7 +599,7 @@ mod tests {
     fn rejects_supported_codec_in_an_external_broadcast() {
         let mut config =
             hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-        config.broadcast = Some(moq_tokio::moq_net::PathRelative::new("./audio").into_owned());
+        config.broadcast = Some(moq_tokio::moq_net::path::Relative::new("./audio").into_owned());
         let mut audio = hang::catalog::Audio::default();
         audio.renditions.insert("audio".into(), config);
 

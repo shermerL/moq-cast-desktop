@@ -22,12 +22,12 @@ pub(crate) fn build() -> Result<moq_tokio::Server, moq_tokio::Error> {
     config.init(moq_tokio::quic::Config::default())
 }
 
-pub(crate) fn authorized_request(request: &moq_tokio::Request, credential: &str) -> bool {
+pub(crate) fn authorized_request(request: &moq_tokio::server::Request, credential: &str) -> bool {
     authorized(request.path(), credential)
 }
 
 pub(crate) async fn accept(
-    request: moq_tokio::Request,
+    request: moq_tokio::server::Request,
     credential: &str,
     publish_origin: &moq_net::origin::Producer,
     receive_origin: moq_net::origin::Producer,

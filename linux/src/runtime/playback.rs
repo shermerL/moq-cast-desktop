@@ -31,7 +31,7 @@ pub(super) enum Event {
 #[derive(Clone, Debug, PartialEq)]
 struct VideoIdentity {
     track: String,
-    broadcast: Option<moq_net::PathRelativeOwned>,
+    broadcast: Option<moq_net::path::RelativeOwned>,
     codec: hang::catalog::VideoCodec,
     description: Option<Vec<u8>>,
     container: hang::catalog::Container,
