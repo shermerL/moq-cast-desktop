@@ -442,7 +442,7 @@ impl Timeline {
         clock: moq_mux::Clock,
         discontinuity: bool,
     ) -> u64 {
-        let now = clock.micros();
+        let now = clock.now().as_micros() as u64;
         if discontinuity || qpc_position_100ns == 0 {
             self.qpc_anchor = None;
         }

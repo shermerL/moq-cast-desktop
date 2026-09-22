@@ -29,6 +29,7 @@ hang = { git = "https://github.com/shermerL/moq", rev = "ae3b5d23b537cb33be1d692
 moq-audio = { git = "https://github.com/shermerL/moq", rev = "ae3b5d23b537cb33be1d69292586dc2135d78b05", default-features = false, features = ["playback"] }
 moq-mux = { git = "https://github.com/shermerL/moq", rev = "ae3b5d23b537cb33be1d69292586dc2135d78b05" }
 moq-video = { git = "https://github.com/shermerL/moq", rev = "ae3b5d23b537cb33be1d69292586dc2135d78b05", default-features = false, features = ["capture", "openh264"] }
+rubato = { version = "=5.0.0", default-features = false }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Media_Audio",

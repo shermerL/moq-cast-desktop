@@ -119,6 +119,8 @@ pub(crate) fn export(
 }
 
 fn create_archive(path: &Path, owner_only: bool) -> io::Result<File> {
+    #[cfg(not(unix))]
+    let _ = owner_only;
     let mut options = OpenOptions::new();
     options.create(true).truncate(true).write(true);
     #[cfg(unix)]

@@ -59,7 +59,7 @@ pub(super) fn dial(
     let mut config = moq_tokio::connect::Config::default();
     config.bind = Some("[::]:0".parse().expect("valid ephemeral bind"));
     config.once = Some(false);
-    config.backoff.timeout = Some(RECONNECT_BUDGET);
+    config.backoff.timeout = RECONNECT_BUDGET;
     config.timeout = CONNECT_TIMEOUT;
     config.version = config
         .versions()

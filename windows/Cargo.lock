@@ -3315,6 +3315,7 @@ dependencies = [
  "moqcast-diagnostics",
  "moqcast-ui",
  "rfd",
+ "rubato",
  "thiserror 2.0.20",
  "tokio",
  "toml_edit",

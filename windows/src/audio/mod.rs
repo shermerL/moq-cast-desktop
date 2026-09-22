@@ -8,6 +8,8 @@ pub(crate) const OUTPUT_SAMPLE_RATE: u32 = 48_000;
 pub(crate) const OUTPUT_CHANNELS: u32 = 2;
 
 #[cfg(target_os = "windows")]
+mod resample;
+#[cfg(target_os = "windows")]
 mod wasapi;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -302,7 +304,7 @@ fn remix_to_stereo(samples: &[f32], channels: u16) -> Result<Vec<f32>, PcmError>
 #[cfg(target_os = "windows")]
 struct Normalizer {
     format: MixFormat,
-    resampler: Option<moq_audio::Resampler>,
+    resampler: Option<resample::RateConverter>,
 }
 
 #[cfg(target_os = "windows")]
@@ -312,7 +314,7 @@ impl Normalizer {
         let chunk_frames = usize::try_from((format.sample_rate / 100).max(1))?;
         let resampler = (format.sample_rate != OUTPUT_SAMPLE_RATE)
             .then(|| {
-                moq_audio::Resampler::new(
+                resample::RateConverter::new(
                     format.sample_rate,
                     OUTPUT_SAMPLE_RATE,
                     OUTPUT_CHANNELS,
@@ -323,22 +325,33 @@ impl Normalizer {
         Ok(Self { format, resampler })
     }
 
-    fn normalize(
-        &mut self,
-        samples: &[f32],
-        timestamp: moq_tokio::moq_net::Timestamp,
-    ) -> anyhow::Result<Vec<f32>> {
+    fn normalize(&mut self, samples: &[f32]) -> anyhow::Result<Vec<f32>> {
         let stereo = remix_to_stereo(samples, self.format.channels)?;
         match self.resampler.as_mut() {
-            Some(resampler) => Ok(resampler.process(&stereo, timestamp)?),
+            Some(resampler) => resampler.process(&stereo),
             None => Ok(stereo),
         }
     }
 
-    fn reset(&mut self) -> anyhow::Result<()> {
-        *self = Self::new(self.format)?;
-        Ok(())
+    fn reset(&mut self) {
+        if let Some(resampler) = self.resampler.as_mut() {
+            resampler.reset();
+        }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn anchor_epoch(
+    producer: &mut moq_audio::encode::Producer,
+    timestamp: moq_tokio::moq_net::Timestamp,
+    needs_anchor: &mut bool,
+) -> Result<(), moq_audio::Error> {
+    if *needs_anchor {
+        // The producer fixes its epoch on the first write, even when resampling buffers the PCM.
+        producer.write(&moq_audio::Frame::new(Vec::new().into(), timestamp))?;
+        *needs_anchor = false;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -389,6 +402,7 @@ pub(crate) async fn publish(
         };
         let mut normalizer = None;
         let mut gap = restarting;
+        let mut needs_anchor = true;
         let mut reported_silent = false;
 
         loop {
@@ -430,15 +444,8 @@ pub(crate) async fn publish(
                             return;
                         }
                         producer.reset_epoch();
-                        if let Err(error) = normalizer.reset() {
-                            tracing::warn!(stage = "audio-normalize", %error, "could not reset audio resampler");
-                            emit(
-                                &updates,
-                                generation,
-                                AudioEvent::Failed(AudioIssue::Encoder),
-                            );
-                            return;
-                        }
+                        normalizer.reset();
+                        needs_anchor = true;
                         gap = false;
                     }
 
@@ -456,7 +463,16 @@ pub(crate) async fn publish(
                             return;
                         }
                     };
-                    let samples = match normalizer.normalize(&packet.samples, timestamp) {
+                    if let Err(error) = anchor_epoch(&mut producer, timestamp, &mut needs_anchor) {
+                        tracing::warn!(stage = "audio-publish", %error, "could not anchor Opus audio timeline");
+                        emit(
+                            &updates,
+                            generation,
+                            AudioEvent::Failed(AudioIssue::Encoder),
+                        );
+                        return;
+                    }
+                    let samples = match normalizer.normalize(&packet.samples) {
                         Ok(samples) => samples,
                         Err(error) => {
                             tracing::warn!(stage = "audio-normalize", %error, "could not normalize system audio");
@@ -599,6 +615,80 @@ mod tests {
         assert_eq!(audio.phase, AudioPhase::Stopping);
         audio.ended(4);
         assert_eq!(audio.phase, AudioPhase::Idle);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn resampled_audio_pts_anchors_to_first_packet_after_each_discontinuity() {
+        use std::time::Duration;
+
+        let mut broadcast = moq_tokio::moq_net::broadcast::Info::new().produce();
+        let catalog =
+            moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())
+                .unwrap();
+        let consumer = broadcast.consume();
+        let mut options = moq_audio::encode::Options::default();
+        options.track = Some("0.opus".to_owned());
+        let input = moq_audio::encode::Input::new(OUTPUT_SAMPLE_RATE, moq_audio::Layout::Stereo);
+        let mut producer =
+            moq_audio::encode::Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+        let track = consumer
+            .track("0.opus")
+            .unwrap()
+            .subscribe(
+                moq_tokio::moq_net::track::Subscription::default()
+                    .with_max_age(Duration::from_secs(1)),
+            )
+            .await
+            .unwrap();
+        let mut reader = moq_mux::container::Consumer::new(
+            track,
+            moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio),
+        );
+        let format = MixFormat {
+            sample_rate: 44_100,
+            channels: 2,
+            block_align: 8,
+            encoding: SampleEncoding::Float32,
+        };
+        let mut normalizer = Normalizer::new(format).unwrap();
+        let mut needs_anchor = true;
+
+        for epoch_us in [1_000_000, 5_000_000] {
+            if epoch_us != 1_000_000 {
+                producer.discontinuity().unwrap();
+                producer.reset_epoch();
+                normalizer.reset();
+                needs_anchor = true;
+            }
+
+            let first = moq_tokio::moq_net::Timestamp::from_micros(epoch_us).unwrap();
+            anchor_epoch(&mut producer, first, &mut needs_anchor).unwrap();
+            assert!(normalizer.normalize(&[0.25; 100]).unwrap().is_empty());
+
+            for packet in 1..=3 {
+                let timestamp =
+                    moq_tokio::moq_net::Timestamp::from_micros(epoch_us + packet * 10_000).unwrap();
+                anchor_epoch(&mut producer, timestamp, &mut needs_anchor).unwrap();
+                let samples = normalizer.normalize(&vec![0.25; 441 * 2]).unwrap();
+                if !samples.is_empty() {
+                    let data: Vec<u8> = samples
+                        .iter()
+                        .flat_map(|sample| sample.to_le_bytes())
+                        .collect();
+                    producer
+                        .write(&moq_audio::Frame::new(data.into(), timestamp))
+                        .unwrap();
+                }
+            }
+
+            let frame = tokio::time::timeout(Duration::from_secs(1), reader.read())
+                .await
+                .expect("audio packet")
+                .unwrap()
+                .expect("published frame");
+            assert_eq!(frame.timestamp.as_micros(), u128::from(epoch_us));
+        }
     }
 
     #[test]
