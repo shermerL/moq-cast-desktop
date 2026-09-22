@@ -800,12 +800,18 @@ impl Supervisor {
                 stage = "discovery",
                 "rejecting inbound peer while LAN services are unavailable"
             );
-            request.close(503).await.ok();
+            request
+                .reject(moq_tokio::server::Reject::App(503))
+                .await
+                .ok();
             return LoopAction::Unchanged;
         };
         if !server::authorized_request(&request, &credential) {
             tracing::warn!(stage = "auth", "rejecting unauthorized inbound peer");
-            request.close(403).await.ok();
+            request
+                .reject(moq_tokio::server::Reject::Forbidden)
+                .await
+                .ok();
             return LoopAction::Unchanged;
         }
 
