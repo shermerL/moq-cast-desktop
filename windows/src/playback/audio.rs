@@ -94,12 +94,11 @@ impl Playback {
         let decode = remote_audio_decode_config();
         let consumer = moq_audio::decode::Consumer::new(broadcast, config, name, decode).await?;
         let engine = moq_audio::playback::Engine::open(Default::default()).await?;
-        let sink = engine.sink(moq_audio::playback::Input {
-            format: moq_audio::Format::F32,
-            sample_rate: consumer.sample_rate(),
-            layout: consumer.layout(),
-            ..Default::default()
-        })?;
+        let mut input = moq_audio::playback::Input::default();
+        input.format = moq_audio::Format::F32;
+        input.sample_rate = consumer.sample_rate();
+        input.layout = consumer.layout();
+        let sink = engine.sink(input)?;
         Ok(Self { consumer, sink })
     }
 
