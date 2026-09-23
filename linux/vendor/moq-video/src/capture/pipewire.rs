@@ -1522,6 +1522,54 @@ mod tests {
 	use super::*;
 	use crate::capture::Config;
 
+	fn negotiated_format_offer(framerate: u32, format: VideoFormat, dmabuf: bool) -> Vec<u8> {
+		let bytes = format_offer(framerate, format, dmabuf);
+		let (remaining, value) = spa::pod::deserialize::PodDeserializer::deserialize_any_from(&bytes)
+			.expect("format offer did not round-trip");
+		assert!(remaining.is_empty());
+		let spa::pod::Value::Object(mut object) = value else {
+			panic!("format offer is not an object");
+		};
+
+		// VideoInfoRaw parses a negotiated format. Model PipeWire fixing size and
+		// rate while leaving the DMA-BUF modifier choice for the application.
+		let mut fixed_size = false;
+		let mut fixed_rate = false;
+		for property in &mut object.properties {
+			if property.key == spa::param::format::FormatProperties::VideoSize.as_raw() {
+				let spa::pod::Value::Choice(spa::pod::ChoiceValue::Rectangle(spa::utils::Choice(
+					_,
+					spa::utils::ChoiceEnum::Range { default, .. },
+				))) = &property.value
+				else {
+					panic!("video size is not a range choice");
+				};
+				property.value = spa::pod::Value::Rectangle(*default);
+				fixed_size = true;
+			} else if property.key == spa::param::format::FormatProperties::VideoFramerate.as_raw() {
+				let spa::pod::Value::Choice(spa::pod::ChoiceValue::Fraction(spa::utils::Choice(
+					_,
+					spa::utils::ChoiceEnum::Range { default, .. },
+				))) = &property.value
+				else {
+					panic!("video framerate is not a range choice");
+				};
+				property.value = spa::pod::Value::Fraction(*default);
+				fixed_rate = true;
+			}
+		}
+		assert!(fixed_size, "format offer has no video size");
+		assert!(fixed_rate, "format offer has no video framerate");
+
+		spa::pod::serialize::PodSerializer::serialize(
+			std::io::Cursor::new(Vec::new()),
+			&spa::pod::Value::Object(object),
+		)
+		.expect("serializing a negotiated format pod cannot fail")
+		.0
+		.into_inner()
+	}
+
 	/// The serialized format offer must parse back as a valid pod.
 	#[test]
 	fn format_offer_is_valid_pod() {
@@ -1565,15 +1613,19 @@ mod tests {
 
 	#[test]
 	fn negotiated_modifier_must_be_present_and_fixed() {
-		let shared = format_offer(30, VideoFormat::BGRx, false);
+		let shared = negotiated_format_offer(30, VideoFormat::BGRx, false);
 		let shared = spa::pod::Pod::from_bytes(&shared).unwrap();
 		let mut format = VideoInfoRaw::default();
 		format.parse(shared).unwrap();
+		assert_eq!((format.size().width, format.size().height), (1920, 1080));
+		assert_eq!((format.framerate().num, format.framerate().denom), (30, 1));
 		assert_eq!(negotiated_memory(shared, format), Some(NegotiatedMemory::SharedMemory));
 
-		let offered = format_offer(30, VideoFormat::BGRx, true);
+		let offered = negotiated_format_offer(30, VideoFormat::BGRx, true);
 		let offered = spa::pod::Pod::from_bytes(&offered).unwrap();
 		format.parse(offered).unwrap();
+		assert_eq!((format.size().width, format.size().height), (1920, 1080));
+		assert_eq!((format.framerate().num, format.framerate().denom), (30, 1));
 		assert_eq!(negotiated_memory(offered, format), Some(NegotiatedMemory::Fixating));
 
 		let fixed = fixate_modifier(offered, format.modifier()).unwrap();
