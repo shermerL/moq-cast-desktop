@@ -498,6 +498,7 @@ fn player_info_snapshot(
 ) -> PlayerInfoSnapshot<'_> {
     PlayerInfoSnapshot {
         generation: view.generation,
+        source: None,
         frame: frame_identity.map(|identity| PlayerFrameSample {
             view_generation: identity.view_generation,
             decoder_generation: identity.decoder_generation,

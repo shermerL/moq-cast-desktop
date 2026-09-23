@@ -59,6 +59,8 @@ impl PlayerFrameSample {
 pub struct PlayerInfoSnapshot<'a> {
     /// Playback generation used to reset panel-local state.
     pub generation: u64,
+    /// User-facing name of the selected playback source, when available.
+    pub source: Option<&'a str>,
     /// Latest unique frame accepted by the UI.
     pub frame: Option<PlayerFrameSample>,
     /// Actual decoded display dimensions.
@@ -260,6 +262,12 @@ fn show_player_info(
         COLORS.player_text.into(),
     ));
     ui.add_space(Spacing::XS);
+    if let Some(source) = snapshot.source {
+        info_row(ui, source_label(locale), source.to_owned());
+        ui.add_space(Spacing::SM);
+        ui.separator();
+        ui.add_space(Spacing::SM);
+    }
     info_section(ui, video_section_label(locale));
     info_row(
         ui,
@@ -404,6 +412,13 @@ fn video_section_label(locale: PlayerInfoLocale) -> &'static str {
     }
 }
 
+fn source_label(locale: PlayerInfoLocale) -> &'static str {
+    match locale {
+        PlayerInfoLocale::Chinese => "来源",
+        PlayerInfoLocale::English => "Source",
+    }
+}
+
 fn audio_section_label(locale: PlayerInfoLocale) -> &'static str {
     match locale {
         PlayerInfoLocale::Chinese => "音频",
@@ -534,6 +549,7 @@ mod tests {
     ) -> PlayerInfoSnapshot<'a> {
         PlayerInfoSnapshot {
             generation: 1,
+            source: Some("Studio Mac"),
             frame,
             resolution: Some((1920, 1080)),
             video_codec: Some("avc1.640028"),
@@ -695,5 +711,11 @@ mod tests {
             );
             assert!(ui.min_rect().width() <= PANEL_MIN_WIDTH);
         });
+    }
+
+    #[test]
+    fn playback_source_label_is_localized() {
+        assert_eq!(source_label(PlayerInfoLocale::Chinese), "来源");
+        assert_eq!(source_label(PlayerInfoLocale::English), "Source");
     }
 }

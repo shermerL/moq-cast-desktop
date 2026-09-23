@@ -249,22 +249,6 @@ fn show_toolbar(
                     COLORS.player_muted.into(),
                 ));
             }
-            ui.add_sized(
-                ui.available_size(),
-                egui::Label::new(typography(
-                    format!(
-                        "{} · {device_name}",
-                        match view.locale {
-                            Locale::Chinese => "附近屏幕",
-                            Locale::English => "Nearby screen",
-                        },
-                        device_name = view.device_name,
-                    ),
-                    TypographyRole::Meta,
-                    COLORS.player_text.into(),
-                ))
-                .truncate(),
-            );
         });
         let mut actions_ui = ui.new_child(egui::UiBuilder::new().max_rect(actions));
         actions_ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -355,6 +339,7 @@ struct ToolbarState<'a> {
 fn player_info_snapshot<'a>(view: &'a PlayerView<'a>, muted: bool) -> PlayerInfoSnapshot<'a> {
     PlayerInfoSnapshot {
         generation: view.generation,
+        source: Some(view.device_name),
         frame: view.frame,
         resolution: view.texture.map(|(_, display)| display),
         video_codec: view.video_codec,

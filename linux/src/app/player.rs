@@ -433,6 +433,7 @@ fn player_info_snapshot<'a>(
 ) -> PlayerInfoSnapshot<'a> {
     PlayerInfoSnapshot {
         generation: playback.generation,
+        source: None,
         frame: playback.frame,
         resolution: texture.map(|texture| {
             let [width, height] = texture.size();
