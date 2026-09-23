@@ -1319,6 +1319,8 @@ fn color_from_pipewire(range: u32, matrix: u32, size: Size) -> Result<Option<Col
 /// `BT709`, which is why all three are accepted together.
 const SPA_VIDEO_TRANSFER_BT2020_10: spa::sys::spa_video_transfer_function = 13;
 const SPA_VIDEO_TRANSFER_BT601: spa::sys::spa_video_transfer_function = 16;
+#[cfg(test)]
+const SPA_VIDEO_TRANSFER_SMPTE2084: spa::sys::spa_video_transfer_function = 14;
 
 fn validate_pipewire_description(color: Color, primaries: u32, transfer: u32) -> Result<(), Error> {
 	let expected_primaries = match color {
@@ -1756,15 +1758,16 @@ mod tests {
 		format.set_color_primaries(spa::sys::SPA_VIDEO_COLOR_PRIMARIES_BT2020);
 		format.set_transfer_function(spa::sys::SPA_VIDEO_TRANSFER_BT709);
 		assert!(pipewire_color(format, 1920, 1080).is_err());
+		format.set_color_primaries(spa::sys::SPA_VIDEO_COLOR_PRIMARIES_BT709);
 		format.set_color_range(spa::sys::SPA_VIDEO_COLOR_RANGE_UNKNOWN);
 		format.set_color_matrix(spa::sys::SPA_VIDEO_COLOR_MATRIX_UNKNOWN);
-		format.set_transfer_function(spa::sys::SPA_VIDEO_TRANSFER_SMPTE2084);
+		format.set_transfer_function(SPA_VIDEO_TRANSFER_SMPTE2084);
 		assert!(pipewire_color(format, 1920, 1080).is_err());
 		assert!(
 			validate_pipewire_description(
 				Color::Bt709Limited,
 				spa::sys::SPA_VIDEO_COLOR_PRIMARIES_BT709,
-				PIPEWIRE_TRANSFER_BT2020_10,
+				SPA_VIDEO_TRANSFER_BT2020_10,
 			)
 			.is_ok()
 		);
@@ -1772,7 +1775,7 @@ mod tests {
 			validate_pipewire_description(
 				Color::Bt601Limited,
 				spa::sys::SPA_VIDEO_COLOR_PRIMARIES_SMPTE170M,
-				PIPEWIRE_TRANSFER_BT601,
+				SPA_VIDEO_TRANSFER_BT601,
 			)
 			.is_ok()
 		);
@@ -2023,8 +2026,7 @@ mod tests {
 				.await
 				.unwrap_or_else(|error| panic!("read frame {i}: {error}"))
 				.unwrap_or_else(|| panic!("no frame {i}"));
-			assert_eq!(frame.width(), stream.width());
-			assert_eq!(frame.height(), stream.height());
+			assert_eq!(frame.size(), Size::new(stream.width(), stream.height()));
 		}
 		eprintln!("captured 5 frames at {}x{}", stream.width(), stream.height());
 	}

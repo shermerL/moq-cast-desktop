@@ -128,6 +128,9 @@ jobs:
           cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::cleanup::tests -- --list |
             grep -Fq 'capture::cleanup::tests::source_loss_remains_terminal_when_demand_idle_wins: test'
           cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::cleanup::tests
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::pipewire::tests -- --list |
+            grep -Fq 'capture::pipewire::tests::negotiated_nv12_color_overrides_size_inference: test'
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::pipewire::tests
           cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib encode::producer::tests -- --list |
             grep -Fq 'encode::producer::tests::recoverable_capture_end_reopens_but_source_error_is_terminal: test'
           cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib encode::producer::tests -- --list |
