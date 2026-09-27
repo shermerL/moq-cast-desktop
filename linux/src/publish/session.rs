@@ -120,6 +120,6 @@ impl Publication {
 #[cfg(target_os = "linux")]
 impl Drop for Publication {
     fn drop(&mut self) {
-        self.broadcast.finish();
+        self.broadcast.close();
     }
 }
