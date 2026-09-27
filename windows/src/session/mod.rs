@@ -8,7 +8,10 @@ mod state;
 use std::{collections::BTreeMap, net::SocketAddr};
 
 use moq_tokio::mdns;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 
 pub(crate) use peer::DialError;
 pub(crate) use server::{Advertisement, BoundServer, StartError};
@@ -65,6 +68,7 @@ pub(crate) struct SessionFoundation {
     origin_drivers: OriginDrivers,
     events: mpsc::Sender<RuntimeEvent>,
     recv: mpsc::Receiver<RuntimeEvent>,
+    listener_shutdown: Option<oneshot::Sender<()>>,
     listener_task: Option<JoinHandle<()>>,
     outbound: BTreeMap<String, Outbound>,
     states: PeerStates,
@@ -195,8 +199,10 @@ impl SessionFoundation {
             self.stop_outbound(&peer).await;
             self.states.disconnect(&peer);
         }
+        if let Some(shutdown) = self.listener_shutdown.take() {
+            let _ = shutdown.send(());
+        }
         if let Some(task) = self.listener_task.take() {
-            task.abort();
             let _ = task.await;
         }
         drop(self.origins);
@@ -209,6 +215,7 @@ impl SessionFoundation {
             return;
         };
         outbound.connection.abort(moq_tokio::moq_net::Error::Cancel);
+        outbound.task.abort();
         let _ = outbound.task.await;
     }
 
@@ -226,11 +233,13 @@ impl BoundServer {
         let (receive, receive_driver) = spawn_origin();
         let origins = SessionOrigins { publish, receive };
         let (events, recv) = mpsc::channel(EVENT_CAPACITY);
+        let (listener_shutdown, shutdown) = oneshot::channel();
         let listener_task = tokio::spawn(server::run_listener(
             listener,
             credential,
             origins.clone(),
             events.clone(),
+            shutdown,
         ));
         Ok(SessionFoundation {
             advertisement,
@@ -241,6 +250,7 @@ impl BoundServer {
             },
             events,
             recv,
+            listener_shutdown: Some(listener_shutdown),
             listener_task: Some(listener_task),
             outbound: BTreeMap::new(),
             states: PeerStates::default(),
@@ -302,6 +312,23 @@ mod tests {
         assert_eq!(disconnected.state.phase(), TransportPhase::Disconnected);
         assert!(disconnected.state.generation() > connecting.state.generation());
         assert_eq!(foundation.state("remote"), Some(disconnected.state));
+        foundation.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_the_listener_socket() {
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let bound = SessionFoundation::bind("127.0.0.1:0".parse().expect("bind")).expect("bound");
+        let addr = bound.advertisement().addr;
+        let foundation = bound.start("proof".to_owned()).await.expect("started");
+
+        foundation.shutdown().await;
+
+        let rebound = SessionFoundation::bind(addr).expect("listener socket released");
+        let foundation = rebound
+            .start("proof".to_owned())
+            .await
+            .expect("listener restarted");
         foundation.shutdown().await;
     }
 }

@@ -621,7 +621,7 @@ impl Publication {
 #[cfg(target_os = "windows")]
 impl Drop for Publication {
     fn drop(&mut self) {
-        self.broadcast.finish();
+        self.broadcast.close();
     }
 }
 

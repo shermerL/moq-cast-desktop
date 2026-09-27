@@ -3,7 +3,10 @@
 use std::net::SocketAddr;
 
 use thiserror::Error;
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinSet,
+};
 
 use super::{RuntimeEvent, SessionOrigins, TransportPhase, security::authorized};
 
@@ -83,10 +86,28 @@ pub(super) async fn run_listener(
     credential: String,
     origins: SessionOrigins,
     events: mpsc::Sender<RuntimeEvent>,
+    mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut inbound_id = 0_u64;
     let mut sessions = JoinSet::new();
-    while let Some(request) = listener.accept().await {
+    let stopped_unexpectedly = loop {
+        enum Event {
+            Request(Option<moq_tokio::server::Request>),
+            Shutdown,
+        }
+
+        let event = tokio::select! {
+            request = listener.accept() => Event::Request(request),
+            _ = &mut shutdown => Event::Shutdown,
+        };
+        let request = match event {
+            Event::Request(Some(request)) => request,
+            Event::Request(None) => break true,
+            Event::Shutdown => {
+                listener.close().await;
+                break false;
+            }
+        };
         inbound_id = inbound_id.saturating_add(1);
         let id = inbound_id;
         let events = events.clone();
@@ -128,8 +149,13 @@ pub(super) async fn run_listener(
             }
         });
         while sessions.try_join_next().is_some() {}
-    }
+    };
     sessions.abort_all();
     while sessions.join_next().await.is_some() {}
-    let _ = events.send(RuntimeEvent::ListenerStopped).await;
+    if stopped_unexpectedly {
+        tokio::select! {
+            _ = events.send(RuntimeEvent::ListenerStopped) => {}
+            _ = &mut shutdown => {}
+        }
+    }
 }
