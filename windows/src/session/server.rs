@@ -91,22 +91,12 @@ pub(super) async fn run_listener(
     let mut inbound_id = 0_u64;
     let mut sessions = JoinSet::new();
     let stopped_unexpectedly = loop {
-        enum Event {
-            Request(Option<moq_tokio::server::Request>),
-            Shutdown,
-        }
-
-        let event = tokio::select! {
-            request = listener.accept() => Event::Request(request),
-            _ = &mut shutdown => Event::Shutdown,
-        };
-        let request = match event {
-            Event::Request(Some(request)) => request,
-            Event::Request(None) => break true,
-            Event::Shutdown => {
-                listener.close().await;
-                break false;
-            }
+        let request = tokio::select! {
+            _ = &mut shutdown => break false,
+            request = listener.accept() => match request {
+                Some(request) => request,
+                None => break true,
+            },
         };
         inbound_id = inbound_id.saturating_add(1);
         let id = inbound_id;
@@ -150,6 +140,7 @@ pub(super) async fn run_listener(
         });
         while sessions.try_join_next().is_some() {}
     };
+    listener.close().await;
     sessions.abort_all();
     while sessions.join_next().await.is_some() {}
     if stopped_unexpectedly {
