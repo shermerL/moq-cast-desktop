@@ -1,8 +1,8 @@
 //! Internal build and dependency provenance for local verification.
 
-const MOQ_DEV_REVISION: &str = "615d166d246b04cde8d0449c80a556f22356f719";
-const MOQ_BASELINE: &str = "moq-dev main@615d166d";
-const MOQ_DEPENDENCY_IDENTITY: &str = "moq-dev/moq@615d166d246b04cde8d0449c80a556f22356f719";
+const MOQ_DEV_REVISION: &str = "7458c85814e162dda90e87ad0dd21d600a586e09";
+const MOQ_BASELINE: &str = "moq-dev main@7458c858";
+const MOQ_DEPENDENCY_IDENTITY: &str = "moq-dev/moq@7458c85814e162dda90e87ad0dd21d600a586e09";
 pub(crate) const MINIMUM_MACOS: &str = "14.2";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +38,7 @@ mod tests {
     const MANIFEST: &str = include_str!("../Cargo.toml");
     const CARGO_CONFIG: &str = include_str!("../.cargo/config.toml");
     const INFO_PLIST: &str = include_str!("../packaging/Info.plist.in");
+    const WORKFLOW: &str = include_str!("../../.github/workflows/macos.yml");
     const PACKAGE_SCRIPT: &str = include_str!("../scripts/package-app.sh");
     const MOQ_REPOSITORY: &str = "https://github.com/moq-dev/moq";
     const MOQ_DEPENDENCIES: [&str; 5] = ["hang", "moq-audio", "moq-mux", "moq-tokio", "moq-video"];
@@ -45,7 +46,7 @@ mod tests {
     #[test]
     fn displayed_provenance_matches_every_locked_moq_dependency() {
         let build = BuildInfo::current();
-        assert_eq!(build.moq_baseline, "moq-dev main@615d166d");
+        assert_eq!(build.moq_baseline, "moq-dev main@7458c858");
         assert!(build.dependency_identity.ends_with(MOQ_DEV_REVISION));
 
         let manifest = MANIFEST
@@ -116,6 +117,7 @@ mod tests {
             ["dep:moq-tokio", "dep:url"]
         );
         assert!(PACKAGE_SCRIPT.contains(MOQ_DEPENDENCY_IDENTITY));
+        assert!(WORKFLOW.contains(MOQ_DEPENDENCY_IDENTITY));
     }
 
     #[test]
