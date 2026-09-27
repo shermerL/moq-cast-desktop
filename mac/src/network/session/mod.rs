@@ -6,7 +6,10 @@ mod state;
 
 use std::{collections::BTreeMap, net::SocketAddr};
 
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 
 pub(crate) use peer::DialError;
 pub(crate) use server::{BoundServer, StartError};
@@ -68,6 +71,7 @@ pub(crate) struct SessionFoundation {
     origin_drivers: OriginDrivers,
     events: mpsc::Sender<RuntimeEvent>,
     recv: mpsc::Receiver<RuntimeEvent>,
+    listener_shutdown: Option<oneshot::Sender<()>>,
     listener_task: Option<JoinHandle<()>>,
     outbound: BTreeMap<String, Outbound>,
     states: PeerStates,
@@ -181,7 +185,9 @@ impl SessionFoundation {
             self.states.disconnect(&peer);
         }
         if let Some(task) = self.listener_task.take() {
-            task.abort();
+            if let Some(shutdown) = self.listener_shutdown.take() {
+                let _ = shutdown.send(());
+            }
             let _ = task.await;
         }
         drop(self.origins);
@@ -194,6 +200,7 @@ impl SessionFoundation {
             return;
         };
         outbound.connection.abort(moq_tokio::moq_net::Error::Cancel);
+        outbound.task.abort();
         let _ = outbound.task.await;
     }
 
@@ -210,11 +217,13 @@ impl BoundServer {
         let (receive, receive_driver) = spawn_origin();
         let origins = SessionOrigins { publish, receive };
         let (events, recv) = mpsc::channel(EVENT_CAPACITY);
+        let (listener_shutdown, shutdown) = oneshot::channel();
         let listener_task = tokio::spawn(server::run_listener(
             listener,
             credential,
             origins.clone(),
             events.clone(),
+            shutdown,
         ));
         Ok(SessionFoundation {
             origins,
@@ -224,6 +233,7 @@ impl BoundServer {
             },
             events,
             recv,
+            listener_shutdown: Some(listener_shutdown),
             listener_task: Some(listener_task),
             outbound: BTreeMap::new(),
             states: PeerStates::default(),
@@ -246,7 +256,10 @@ fn spawn_origin() -> (moq_tokio::moq_net::origin::Producer, JoinHandle<()>) {
 mod tests {
     use std::time::Duration;
 
-    use super::{SessionEvent, SessionFoundation, SessionSubject, TransportPhase};
+    use super::{
+        EVENT_CAPACITY, RuntimeEvent, SessionEvent, SessionFoundation, SessionSubject,
+        TransportPhase,
+    };
     use crate::network::discovery::PeerRecord;
 
     #[tokio::test]
@@ -288,5 +301,40 @@ mod tests {
         assert!(disconnected.state.generation() > connecting.state.generation());
         assert_eq!(foundation.state("remote"), None);
         foundation.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_the_listener_socket() {
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let bound = SessionFoundation::bind("127.0.0.1:0".parse().expect("bind")).expect("bound");
+        let addr = bound.advertisement().addr;
+        let foundation = bound.start("proof".to_owned()).await.expect("started");
+
+        foundation.shutdown().await;
+
+        let rebound = SessionFoundation::bind(addr).expect("listener socket released");
+        rebound
+            .start("proof".to_owned())
+            .await
+            .expect("listener restarted")
+            .shutdown()
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_completes_when_the_event_queue_is_full() {
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let bound = SessionFoundation::bind("127.0.0.1:0".parse().expect("bind")).expect("bound");
+        let foundation = bound.start("proof".to_owned()).await.expect("started");
+        for _ in 0..EVENT_CAPACITY {
+            foundation
+                .events
+                .try_send(RuntimeEvent::ListenerStopped)
+                .expect("event queue slot");
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), foundation.shutdown())
+            .await
+            .expect("shutdown must not wait for event capacity");
     }
 }

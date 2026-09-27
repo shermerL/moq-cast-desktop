@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 
 use thiserror::Error;
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::{sync::mpsc, sync::oneshot, task::JoinSet};
 
 use super::{RuntimeEvent, SessionOrigins, TransportPhase};
 use crate::network::security::authorized;
@@ -85,11 +85,20 @@ pub(super) async fn run_listener(
     credential: String,
     origins: SessionOrigins,
     events: mpsc::Sender<RuntimeEvent>,
+    mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut inbound_id = 0_u64;
     let mut sessions = JoinSet::new();
 
-    while let Some(request) = listener.accept().await {
+    let stopped = loop {
+        let request = tokio::select! {
+            biased;
+            _ = &mut shutdown => break false,
+            request = listener.accept() => match request {
+                Some(request) => request,
+                None => break true,
+            },
+        };
         inbound_id = inbound_id.saturating_add(1);
         let id = inbound_id;
         let events = events.clone();
@@ -113,9 +122,16 @@ pub(super) async fn run_listener(
             let _ = events.send(RuntimeEvent::Inbound { id, phase }).await;
         });
         while sessions.try_join_next().is_some() {}
-    }
+    };
 
+    listener.close().await;
     sessions.abort_all();
     while sessions.join_next().await.is_some() {}
-    let _ = events.send(RuntimeEvent::ListenerStopped).await;
+    if stopped {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => {}
+            _ = events.send(RuntimeEvent::ListenerStopped) => {}
+        }
+    }
 }

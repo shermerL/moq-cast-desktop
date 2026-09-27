@@ -317,7 +317,7 @@ async fn run_tracks(
 
 impl Drop for Publication {
     fn drop(&mut self) {
-        self.broadcast.finish();
+        self.broadcast.close();
     }
 }
 

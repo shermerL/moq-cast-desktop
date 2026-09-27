@@ -151,7 +151,7 @@ mod tests {
         assert_eq!(available.view.availability, ScreenAvailability::Available);
         assert!(directory.broadcast(&available.path).is_some());
 
-        broadcast.finish();
+        broadcast.close();
         let withdrawn = tokio::time::timeout(Duration::from_secs(3), directory.recv())
             .await
             .expect("withdrawal bounded")
