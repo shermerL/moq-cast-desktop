@@ -46,7 +46,11 @@ Do not use `git push -u` for topic branches.
 
 ## Commits and pull requests
 
-Use a one-line [Conventional Commit](https://www.conventionalcommits.org/) title. Keep the commit and pull request limited to the stated concern, and complete the pull request template with explicit scope and validation evidence.
+Use a one-line [Conventional Commit](https://www.conventionalcommits.org/) title. Keep the commit and pull request limited to one concern.
+
+Follow the [pull request template](.github/pull_request_template.md): explain the problem, approach, impact, validation, alternatives, and follow-ups. Keep the body short and describe the final change rather than its development history. State public API and wire impact explicitly, including when neither changes; use `None` for alternatives or follow-ups when appropriate. Update the title and description when the scope changes.
+
+Codex review is manual and optional. When desired, comment `@codex review` on the pull request; do not enable automatic review as part of a contribution. A review result does not authorize merging.
 
 ## Validation
 
