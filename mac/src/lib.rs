@@ -2,7 +2,7 @@
 
 #[cfg(feature = "app")]
 mod app;
-#[cfg(test)]
+#[cfg(any(feature = "app", test))]
 mod build_info;
 mod contract;
 #[cfg(feature = "network")]
@@ -22,9 +22,9 @@ pub fn run() -> anyhow::Result<()> {
     use std::time::Duration;
 
     use eframe::egui;
-    use moqcast_diagnostics::{BuildInfo, Config, Paths};
+    use moqcast_diagnostics::{Config, Paths};
 
-    let build = BuildInfo::new(env!("CARGO_PKG_VERSION"));
+    let build = build_info::diagnostics();
     let diagnostics_config = match Paths::discover() {
         Ok(paths) => Config::new(paths, build),
         Err(error) => {

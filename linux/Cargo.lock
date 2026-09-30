@@ -3190,6 +3190,7 @@ dependencies = [
  "moq-mux",
  "moq-tokio",
  "moq-video",
+ "moqcast-build-provenance",
  "moqcast-diagnostics",
  "moqcast-ui",
  "pipewire",
@@ -3507,6 +3508,13 @@ dependencies = [
  "x11rb 0.14.0",
  "yuv",
  "zune-jpeg",
+]
+
+[[package]]
+name = "moqcast-build-provenance"
+version = "0.1.0"
+dependencies = [
+ "toml_edit",
 ]
 
 [[package]]

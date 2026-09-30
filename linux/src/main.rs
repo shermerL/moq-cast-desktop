@@ -1,6 +1,9 @@
 use eframe::egui;
 use moq_cast_desktop::app::MoqCastApp;
-use moqcast_diagnostics::{BuildInfo, Config, Paths};
+use moqcast_diagnostics::{Config, Paths};
+
+#[path = "../build_support/provenance.rs"]
+mod provenance;
 
 const APP_ICON_SIZE: u32 = 64;
 const APP_ICON_RGBA: &[u8; 64 * 64 * 4] = include_bytes!("../assets/icons/moqcast-window-64.rgba");
@@ -14,10 +17,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let build = BuildInfo::new(env!("CARGO_PKG_VERSION"))
-        .with_build_identity(env!("MOQCAST_EMBEDDED_BUILD_IDENTITY"))
-        .with_source_identity(env!("MOQCAST_EMBEDDED_SOURCE_IDENTITY"))
-        .with_dependency_identity(env!("MOQCAST_EMBEDDED_DEPENDENCY_IDENTITY"));
+    let build = provenance::diagnostics();
     let diagnostics_config = match Paths::discover() {
         Ok(paths) => Config::new(paths, build),
         Err(error) => {

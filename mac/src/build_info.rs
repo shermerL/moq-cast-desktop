@@ -1,85 +1,61 @@
-//! Internal build and dependency provenance for local verification.
+//! Build provenance generated from the manifest, lockfile, and source checkout.
 
-const MOQ_DEV_REVISION: &str = "7458c85814e162dda90e87ad0dd21d600a586e09";
-const MOQ_BASELINE: &str = "moq-dev main@7458c858";
-const MOQ_DEPENDENCY_IDENTITY: &str = "moq-dev/moq@7458c85814e162dda90e87ad0dd21d600a586e09";
-pub(crate) const MINIMUM_MACOS: &str = "14.2";
+include!(concat!(env!("OUT_DIR"), "/moqcast-build-info.rs"));
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BuildInfo {
-    pub(crate) version: &'static str,
-    pub(crate) build_identity: &'static str,
-    pub(crate) source_identity: &'static str,
-    pub(crate) dependency_identity: &'static str,
-    pub(crate) moq_baseline: &'static str,
-    pub(crate) target: String,
-}
-
-impl BuildInfo {
-    pub(crate) fn current() -> Self {
-        debug_assert!(MOQ_BASELINE.ends_with(&MOQ_DEV_REVISION[..8]));
-        debug_assert!(MOQ_DEPENDENCY_IDENTITY.ends_with(MOQ_DEV_REVISION));
-        Self {
-            version: env!("CARGO_PKG_VERSION"),
-            build_identity: option_env!("MOQCAST_BUILD_IDENTITY").unwrap_or("local"),
-            source_identity: option_env!("MOQCAST_SOURCE_COMMIT").unwrap_or("unknown"),
-            dependency_identity: MOQ_DEPENDENCY_IDENTITY,
-            moq_baseline: MOQ_BASELINE,
-            target: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
-        }
-    }
+#[cfg(feature = "app")]
+pub(crate) fn diagnostics() -> moqcast_diagnostics::BuildInfo {
+    assert_eq!(GENERATED_APP_VERSION, env!("CARGO_PKG_VERSION"));
+    moqcast_diagnostics::BuildInfo::new(GENERATED_APP_VERSION)
+        .with_build_identity(GENERATED_BUILD_IDENTITY)
+        .with_source_identity(GENERATED_SOURCE_IDENTITY)
+        .with_dependency_identity(GENERATED_DEPENDENCY_IDENTITY)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use toml_edit::{Array, DocumentMut, Table};
+    use toml_edit::{Array, DocumentMut};
 
-    const MANIFEST: &str = include_str!("../Cargo.toml");
     const CARGO_CONFIG: &str = include_str!("../.cargo/config.toml");
     const INFO_PLIST: &str = include_str!("../packaging/Info.plist.in");
-    const WORKFLOW: &str = include_str!("../../.github/workflows/macos.yml");
     const PACKAGE_SCRIPT: &str = include_str!("../scripts/package-app.sh");
-    const MOQ_REPOSITORY: &str = "https://github.com/moq-dev/moq";
-    const MOQ_DEPENDENCIES: [&str; 5] = ["hang", "moq-audio", "moq-mux", "moq-tokio", "moq-video"];
+    const MINIMUM_MACOS: &str = "14.2";
 
     #[test]
-    fn displayed_provenance_matches_every_locked_moq_dependency() {
-        let build = BuildInfo::current();
-        assert_eq!(build.moq_baseline, "moq-dev main@7458c858");
-        assert!(build.dependency_identity.ends_with(MOQ_DEV_REVISION));
+    fn generated_record_matches_the_embedded_build_fields() {
+        assert!(GENERATED_RECORD.contains(&format!("app_version={GENERATED_APP_VERSION}\n")));
+        assert!(GENERATED_RECORD.contains(&format!("build_identity={GENERATED_BUILD_IDENTITY}\n")));
+        assert!(
+            GENERATED_RECORD.contains(&format!("source_identity={GENERATED_SOURCE_IDENTITY}\n"))
+        );
+        assert!(GENERATED_RECORD.contains(&format!(
+            "dependency_identity={GENERATED_DEPENDENCY_IDENTITY}\n"
+        )));
+        assert!(GENERATED_RECORD.contains(&format!("source_commit={GENERATED_SOURCE_COMMIT}\n")));
+        assert!(GENERATED_RECORD.contains(&format!("source_state={GENERATED_SOURCE_STATE}\n")));
+        assert!(GENERATED_RECORD.contains(&format!("moq_revision={GENERATED_MOQ_REVISION}\n")));
+        assert!(GENERATED_RECORD.contains(&format!("target={GENERATED_TARGET}\n")));
+        assert_eq!(
+            GENERATED_DEPENDENCY_IDENTITY,
+            format!("moq-dev/moq@{GENERATED_MOQ_REVISION}")
+        );
+    }
 
-        let manifest = MANIFEST
+    #[test]
+    fn feature_contract_is_unchanged() {
+        let manifest = include_str!("../Cargo.toml")
             .parse::<DocumentMut>()
             .expect("valid macOS Cargo.toml");
-        let dependencies = moq_dependencies(
-            manifest["target"][r#"cfg(target_os = "macos")"#]["dependencies"]
-                .as_table()
-                .expect("macOS dependencies table"),
-        );
-        assert_eq!(
-            dependencies
-                .iter()
-                .map(|(name, _)| *name)
-                .collect::<Vec<_>>(),
-            MOQ_DEPENDENCIES
-        );
-        assert!(
-            dependencies
-                .iter()
-                .all(|(_, revision)| *revision == MOQ_DEV_REVISION)
-        );
-
-        let foundation = manifest["features"]["foundation"]
-            .as_array()
-            .expect("foundation feature array");
-        assert_feature(foundation, &["publish"]);
-
-        let publish = manifest["features"]["publish"]
-            .as_array()
-            .expect("publish feature array");
         assert_feature(
-            publish,
+            manifest["features"]["foundation"]
+                .as_array()
+                .expect("foundation feature array"),
+            &["publish"],
+        );
+        assert_feature(
+            manifest["features"]["publish"]
+                .as_array()
+                .expect("publish feature array"),
             &[
                 "watch",
                 "dep:objc2",
@@ -90,12 +66,10 @@ mod tests {
                 "moq-video/capture",
             ],
         );
-
-        let watch = manifest["features"]["watch"]
-            .as_array()
-            .expect("watch feature array");
         assert_feature(
-            watch,
+            manifest["features"]["watch"]
+                .as_array()
+                .expect("watch feature array"),
             &[
                 "network",
                 "dep:hang",
@@ -105,26 +79,23 @@ mod tests {
                 "moq-audio/playback",
             ],
         );
-
-        let network = manifest["features"]["network"]
-            .as_array()
-            .expect("network feature array");
-        assert_eq!(
-            network
-                .iter()
-                .filter_map(|value| value.as_str())
-                .collect::<Vec<_>>(),
-            ["dep:moq-tokio", "dep:url"]
+        assert_feature(
+            manifest["features"]["network"]
+                .as_array()
+                .expect("network feature array"),
+            &["dep:moq-tokio", "dep:url"],
         );
-        assert!(PACKAGE_SCRIPT.contains(MOQ_DEPENDENCY_IDENTITY));
-        assert!(WORKFLOW.contains(MOQ_DEPENDENCY_IDENTITY));
     }
 
     #[test]
-    fn minimum_macos_matches_build_and_packaging_inputs() {
+    fn packaging_uses_generated_provenance_and_minimum_macos() {
         assert!(CARGO_CONFIG.contains(&format!("MACOSX_DEPLOYMENT_TARGET = \"{MINIMUM_MACOS}\"")));
         assert!(INFO_PLIST.contains(&format!("<string>{MINIMUM_MACOS}</string>")));
+        assert!(PACKAGE_SCRIPT.contains("<(grep -v '^target=' \"$arm64_provenance\")"));
+        assert!(PACKAGE_SCRIPT.contains("<(grep -v '^target=' \"$x86_64_provenance\")"));
+        assert!(PACKAGE_SCRIPT.contains("target=universal2-apple-darwin"));
         assert!(PACKAGE_SCRIPT.contains(&format!("minimum_macos={MINIMUM_MACOS}")));
+        assert!(!PACKAGE_SCRIPT.contains("moq-dev/moq@"));
     }
 
     #[test]
@@ -133,26 +104,6 @@ mod tests {
         assert!(INFO_PLIST.contains("<string>MoQCast.icns</string>"));
         assert!(PACKAGE_SCRIPT.contains("assets/icons/MoQCast.icns"));
         assert!(PACKAGE_SCRIPT.contains("Contents/Resources/MoQCast.icns"));
-    }
-
-    fn moq_dependencies(table: &Table) -> Vec<(&str, &str)> {
-        let mut dependencies = table
-            .iter()
-            .filter_map(|(name, item)| {
-                let dependency = item.as_value()?.as_inline_table()?;
-                (dependency.get("git")?.as_str()? == MOQ_REPOSITORY).then(|| {
-                    (
-                        name,
-                        dependency
-                            .get("rev")
-                            .and_then(toml_edit::Value::as_str)
-                            .expect("MoQ dependency has a revision"),
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        dependencies.sort_unstable_by_key(|(name, _)| *name);
-        dependencies
     }
 
     fn assert_feature(feature: &Array, expected: &[&str]) {

@@ -7,12 +7,14 @@ on:
       - dev
     paths:
       - "linux/**"
+      - "shared/build-provenance/**"
       - "shared/diagnostics/**"
       - "shared/ui/**"
       - ".github/workflows/linux-appimage.yml"
   pull_request:
     paths:
       - "linux/**"
+      - "shared/build-provenance/**"
       - "shared/diagnostics/**"
       - "shared/ui/**"
       - ".github/workflows/linux-appimage.yml"
@@ -35,6 +37,8 @@ jobs:
         run: cargo test --locked --manifest-path shared/diagnostics/Cargo.toml
       - name: Lint shared diagnostics
         run: cargo clippy --locked --manifest-path shared/diagnostics/Cargo.toml --all-targets -- -D warnings
+      - name: Lint build provenance generator
+        run: cargo clippy --locked --manifest-path shared/build-provenance/Cargo.toml --all-targets -- -D warnings
       - name: Test Linux build provenance
         run: ./linux/scripts/check-build-provenance.sh
 
@@ -107,7 +111,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             linux/target/release
-          key: linux-cargo-${{ matrix.variant }}-rust1.95.0-${{ hashFiles('linux/Cargo.lock', 'shared/diagnostics/Cargo.lock', 'shared/ui/Cargo.lock') }}
+          key: linux-cargo-${{ matrix.variant }}-rust1.95.0-${{ hashFiles('linux/Cargo.lock', 'shared/build-provenance/Cargo.lock', 'shared/diagnostics/Cargo.lock', 'shared/ui/Cargo.lock') }}
           restore-keys: |
             linux-cargo-${{ matrix.variant }}-rust1.95.0-
 

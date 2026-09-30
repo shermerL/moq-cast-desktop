@@ -9,6 +9,7 @@ publish = false
 build = "build.rs"
 
 [build-dependencies]
+moqcast-build-provenance = { path = "../shared/build-provenance" }
 winresource = "=0.1.31"
 
 [dependencies]

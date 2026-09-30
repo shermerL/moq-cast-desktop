@@ -52,3 +52,13 @@ M0-M6 开发包使用 ad hoc 签名。测试者可以手动批准 Gatekeeper 提
 - 真机：必须由明确的应用日志或用户观察确认 Android、Windows、Linux 的发现和连接，以及后续权限、画面、声音、睡眠/网络切换和生命周期。
 
 发行与凭据边界见 [RELEASE.md](RELEASE.md)。
+
+### 构建来源
+
+应用诊断和打包元数据由 [共享生成器](../shared/build-provenance/README.md) 从实际依赖与 Git 状态生成。手工合包时需同时传入各架构的编译记录：
+
+```sh
+./scripts/package-app.sh arm64-binary arm64-build-info.txt x86_64-binary x86_64-build-info.txt output-directory
+```
+
+各架构编译设置 `MOQCAST_BUILD_IDENTITY=macos-universal2-adhoc` 和 `MOQCAST_PROVENANCE_OUTPUT`；Cargo 的实际 target 自动记录，合包时校验共同来源并派生 Universal 2 元数据。

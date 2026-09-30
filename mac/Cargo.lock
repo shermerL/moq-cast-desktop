@@ -3171,6 +3171,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "moqcast-build-provenance"
+version = "0.1.0"
+dependencies = [
+ "toml_edit",
+]
+
+[[package]]
 name = "moqcast-diagnostics"
 version = "0.1.0"
 dependencies = [
@@ -3196,6 +3203,7 @@ dependencies = [
  "moq-mux",
  "moq-tokio",
  "moq-video",
+ "moqcast-build-provenance",
  "moqcast-diagnostics",
  "moqcast-ui",
  "objc2 0.6.4",

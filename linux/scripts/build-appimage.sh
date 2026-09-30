@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 LINUX_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-REPO_DIR=$(CDPATH= cd -- "$LINUX_DIR/.." && pwd)
 source "$SCRIPT_DIR/build-info.sh"
 OUTPUT_ROOT=${MOQCAST_PACKAGE_DIR:-"$LINUX_DIR/target/package"}
 LINUXDEPLOY=${LINUXDEPLOY:-linuxdeploy}
@@ -37,45 +36,24 @@ if [[ ! $PACKAGE_VARIANT =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
     exit 1
 fi
 
-VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$LINUX_DIR/Cargo.toml" | head -n 1)
-SOURCE_COMMIT=${MOQCAST_SOURCE_COMMIT:-}
-if [[ -z $SOURCE_COMMIT ]]; then
-    SOURCE_COMMIT=$(git -C "$REPO_DIR" rev-parse --short=12 HEAD)
-fi
-if [[ ! $SOURCE_COMMIT =~ ^[0-9a-fA-F]{7,64}$ ]]; then
-    echo "Invalid source commit: $SOURCE_COMMIT" >&2
+mkdir -p "$OUTPUT_ROOT"
+OUTPUT_ROOT=$(CDPATH= cd -- "$OUTPUT_ROOT" && pwd)
+cd "$LINUX_DIR"
+GENERATED_INFO="$LINUX_DIR/target/release/moqcast-build-info.txt"
+MOQCAST_BUILD_IDENTITY="$PACKAGE_VARIANT" \
+MOQCAST_PROVENANCE_OUTPUT="$GENERATED_INFO" \
+cargo build --locked --release
+VERSION=$(sed -n 's/^app_version=//p' "$GENERATED_INFO")
+if [[ -z $VERSION ]]; then
+    echo "Generated provenance is missing app_version." >&2
     exit 1
 fi
-SOURCE_COMMIT=${SOURCE_COMMIT:0:12}
-MOQ_REVISION=$(sed -n 's/.*moq-tokio.*rev = "\([^"]*\)".*/\1/p' "$LINUX_DIR/Cargo.toml")
-MOQ_VIDEO_REVISION=$(sed -n 's/^source_revision = `\([^`]*\)`/\1/p' "$LINUX_DIR/vendor/moq-video/VENDORED.md")
-if [[ ! $MOQ_REVISION =~ ^[0-9a-fA-F]{7,64}$ ]]; then
-    echo "Invalid MoQ revision: $MOQ_REVISION" >&2
-    exit 1
-fi
-if [[ ! $MOQ_VIDEO_REVISION =~ ^[0-9a-fA-F]{7,64}$ ]]; then
-    echo "Invalid vendored moq-video revision: $MOQ_VIDEO_REVISION" >&2
-    exit 1
-fi
-if [[ $MOQ_VIDEO_REVISION != "$MOQ_REVISION" ]]; then
-    echo "Vendored moq-video does not match MoQ revision: $MOQ_VIDEO_REVISION != $MOQ_REVISION" >&2
-    exit 1
-fi
-for revision in $(sed -n 's/.*git = "https:\/\/github.com\/moq-dev\/moq.git".*rev = "\([^"]*\)".*/\1/p' "$LINUX_DIR/Cargo.toml" "$LINUX_DIR/vendor/moq-video/Cargo.toml"); do
-    if [[ $revision != "$MOQ_REVISION" ]]; then
-        echo "MoQ dependencies do not share one revision: $revision != $MOQ_REVISION" >&2
-        exit 1
-    fi
-done
-DEPENDENCY_IDENTITY="moq-dev/moq@$MOQ_REVISION;vendored/moq-video@$MOQ_VIDEO_REVISION"
 BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 BUILD_DISTRO_ID=$(sed -n 's/^ID="\{0,1\}\([^" ]*\)"\{0,1\}$/\1/p' /etc/os-release | head -n 1)
 BUILD_DISTRO_VERSION=$(sed -n 's/^VERSION_ID="\{0,1\}\([^" ]*\)"\{0,1\}$/\1/p' /etc/os-release | head -n 1)
 GLIBC_VERSION=$(ldd --version | sed -n '1s/.* \([0-9][0-9.]*\)$/\1/p')
 PIPEWIRE_VERSION=$(pkg-config --modversion libpipewire-0.3)
 ALSA_VERSION=$(pkg-config --modversion alsa)
-mkdir -p "$OUTPUT_ROOT"
-OUTPUT_ROOT=$(CDPATH= cd -- "$OUTPUT_ROOT" && pwd)
 PACKAGE_ID="MoQCast-${VERSION}-${PACKAGE_VARIANT}"
 APPDIR="$OUTPUT_ROOT/${PACKAGE_ID}.AppDir"
 APPIMAGE="$OUTPUT_ROOT/${PACKAGE_ID}.AppImage"
@@ -88,11 +66,7 @@ if [[ -e "$APPDIR" || -e "$APPIMAGE" ]]; then
 fi
 mkdir "$APPDIR"
 mkdir -p "$(dirname -- "$BUILD_INFO_FILE")"
-write_build_info "$BUILD_INFO_FILE"
-
-cd "$LINUX_DIR"
-MOQCAST_PROVENANCE_FILE="$BUILD_INFO_FILE" \
-cargo build --locked --release
+write_build_info "$BUILD_INFO_FILE" "$GENERATED_INFO"
 
 install -Dm755 target/release/moq-cast-desktop "$APPDIR/usr/bin/moq-cast-desktop"
 install -Dm755 packaging/appimage/AppRun "$APPDIR/AppRun"

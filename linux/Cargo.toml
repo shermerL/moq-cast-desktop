@@ -35,3 +35,6 @@ pipewire = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["macros"] }
+
+[build-dependencies]
+moqcast-build-provenance = { path = "../shared/build-provenance" }

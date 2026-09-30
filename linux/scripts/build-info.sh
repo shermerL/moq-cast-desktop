@@ -1,21 +1,17 @@
+# Extend the compiler-generated record with package environment facts.
 write_build_info() {
     local output_file=$1
-
+    local generated_file=$2
+    if [[ $(grep -Fxc "build_identity=$PACKAGE_VARIANT" "$generated_file") -ne 1 ]] ||
+       [[ $(grep -Fxc 'target=x86_64-unknown-linux-gnu' "$generated_file") -ne 1 ]]; then
+        echo "Generated provenance does not match this Linux package variant/target." >&2
+        return 1
+    fi
     {
-        printf 'app_version=%s\n' "$VERSION"
-        printf 'build_identity=%s\n' "$PACKAGE_VARIANT"
-        printf 'source_identity=%s\n' "$SOURCE_COMMIT"
-        printf 'dependency_identity=%s\n' "$DEPENDENCY_IDENTITY"
-        printf 'source_commit=%s\n' "$SOURCE_COMMIT"
-        printf 'moq_revision=%s\n' "$MOQ_REVISION"
-        printf 'moq_video_source=vendored\n'
-        printf 'moq_video_revision=%s\n' "$MOQ_VIDEO_REVISION"
-        printf 'libspa_source=vendored-0.10.1\n'
-        printf 'cargo_features=moq-tokio:aws-lc-rs,mdns,noq;moq-audio:playback;moq-video:capture,nvidia,openh264,pipewire\n'
+        cat "$generated_file"
         printf 'system_audio=pipewire\n'
         printf 'remote_audio_output=cpal-alsa\n'
         printf 'build_date=%s\n' "$BUILD_DATE"
-        printf 'target=x86_64-unknown-linux-gnu\n'
         printf 'package_variant=%s\n' "$PACKAGE_VARIANT"
         printf 'build_distribution=%s-%s\n' "$BUILD_DISTRO_ID" "$BUILD_DISTRO_VERSION"
         printf 'glibc_version=%s\n' "$GLIBC_VERSION"

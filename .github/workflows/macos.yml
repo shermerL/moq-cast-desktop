@@ -5,12 +5,14 @@ on:
     branches: [main, dev]
     paths:
       - "mac/**"
+      - "shared/build-provenance/**"
       - "shared/diagnostics/**"
       - "shared/ui/**"
       - ".github/workflows/macos.yml"
   pull_request:
     paths:
       - "mac/**"
+      - "shared/build-provenance/**"
       - "shared/diagnostics/**"
       - "shared/ui/**"
       - ".github/workflows/macos.yml"
@@ -46,11 +48,17 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: macos-cargo-${{ runner.arch }}-rust1.95.0-${{ hashFiles('mac/Cargo.lock', 'shared/diagnostics/Cargo.lock', 'shared/ui/Cargo.lock') }}
+          key: macos-cargo-${{ runner.arch }}-rust1.95.0-${{ hashFiles('mac/Cargo.lock', 'shared/build-provenance/Cargo.lock', 'shared/diagnostics/Cargo.lock', 'shared/ui/Cargo.lock') }}
           restore-keys: |
             macos-cargo-${{ runner.arch }}-rust1.95.0-
       - name: Verify shared diagnostics
         working-directory: shared/diagnostics
+        run: |
+          cargo fmt --all --check
+          cargo test --locked --all-targets
+          cargo clippy --locked --all-targets -- -D warnings
+      - name: Verify build provenance generator
+        working-directory: shared/build-provenance
         run: |
           cargo fmt --all --check
           cargo test --locked --all-targets
@@ -87,19 +95,22 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: macos-cargo-${{ runner.arch }}-rust1.95.0-${{ hashFiles('mac/Cargo.lock', 'shared/diagnostics/Cargo.lock', 'shared/ui/Cargo.lock') }}
+          key: macos-cargo-${{ runner.arch }}-rust1.95.0-${{ hashFiles('mac/Cargo.lock', 'shared/build-provenance/Cargo.lock', 'shared/diagnostics/Cargo.lock', 'shared/ui/Cargo.lock') }}
           restore-keys: |
             macos-cargo-${{ runner.arch }}-rust1.95.0-
       - name: Build release app
         run: cargo build --locked --release --target "${{ matrix.target }}"
         env:
-          MOQCAST_BUILD_IDENTITY: macos-universal2
+          MOQCAST_BUILD_IDENTITY: macos-universal2-adhoc
+          MOQCAST_PROVENANCE_OUTPUT: target/${{ matrix.target }}/release/moqcast-build-info.txt
           MOQCAST_SOURCE_COMMIT: ${{ github.sha }}
       - name: Upload release binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: MoQCast-macOS-binary-${{ matrix.target }}
-          path: ${{ github.workspace }}/mac/target/${{ matrix.target }}/release/moqcast-macos
+          path: |
+            ${{ github.workspace }}/mac/target/${{ matrix.target }}/release/moqcast-macos
+            ${{ github.workspace }}/mac/target/${{ matrix.target }}/release/moqcast-build-info.txt
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -124,20 +135,25 @@ jobs:
       - name: Verify release binary artifacts
         run: |
           arm64="$RUNNER_TEMP/moqcast-binary/aarch64-apple-darwin/moqcast-macos"
+          arm64_provenance="$RUNNER_TEMP/moqcast-binary/aarch64-apple-darwin/moqcast-build-info.txt"
           x86_64="$RUNNER_TEMP/moqcast-binary/x86_64-apple-darwin/moqcast-macos"
+          x86_64_provenance="$RUNNER_TEMP/moqcast-binary/x86_64-apple-darwin/moqcast-build-info.txt"
           test -f "$arm64"
+          test -f "$arm64_provenance"
           test -f "$x86_64"
+          test -f "$x86_64_provenance"
           lipo "$arm64" -verify_arch arm64
           lipo "$x86_64" -verify_arch x86_64
       - name: Package ad hoc signed Universal 2 app
         run: |
           ./scripts/package-app.sh \
             "$RUNNER_TEMP/moqcast-binary/aarch64-apple-darwin/moqcast-macos" \
+            "$RUNNER_TEMP/moqcast-binary/aarch64-apple-darwin/moqcast-build-info.txt" \
             "$RUNNER_TEMP/moqcast-binary/x86_64-apple-darwin/moqcast-macos" \
+            "$RUNNER_TEMP/moqcast-binary/x86_64-apple-darwin/moqcast-build-info.txt" \
             "$RUNNER_TEMP/moqcast-package"
         env:
           MOQCAST_BUILD_VERSION: ${{ github.run_number }}
-          MOQCAST_SOURCE_COMMIT: ${{ github.sha }}
       - name: Verify package metadata
         run: |
           package_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
@@ -145,6 +161,7 @@ jobs:
           app="$RUNNER_TEMP/moqcast-package/MoQCast.app"
           plist="$app/Contents/Info.plist"
           binary="$app/Contents/MacOS/moqcast-macos"
+          build_info="$app/Contents/Resources/build-info.txt"
           archive="$RUNNER_TEMP/moqcast-package/MoQCast-macOS-${package_version}.zip"
           plutil -lint "$plist"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$plist")" = "MoQCast"
@@ -168,9 +185,17 @@ jobs:
           xcrun vtool -show-build -arch x86_64 "$binary" | grep -Eq "minos +14\.2"
           codesign --verify --deep --strict "$app"
           codesign -dv --verbose=4 "$app" 2>&1 | grep -q "Signature=adhoc"
-          grep -Fxq "source_commit=${{ github.sha }}" "$app/Contents/Resources/build-info.txt"
-          grep -Fxq "minimum_macos=14.2" "$app/Contents/Resources/build-info.txt"
-          grep -Fxq "moq_dependency=moq-dev/moq@7458c85814e162dda90e87ad0dd21d600a586e09" "$app/Contents/Resources/build-info.txt"
+          grep -Fxq "app_version=${package_version}" "$build_info"
+          grep -Fxq "build_identity=macos-universal2-adhoc" "$build_info"
+          grep -Fxq "source_identity=${{ github.sha }}" "$build_info"
+          grep -Fxq "source_commit=${{ github.sha }}" "$build_info"
+          grep -Fxq "source_state=clean" "$build_info"
+          grep -Fxq "target=universal2-apple-darwin" "$build_info"
+          grep -Fxq "minimum_macos=14.2" "$build_info"
+          moq_revision="$(sed -n 's/^moq_revision=//p' "$build_info")"
+          test "$(printf '%s' "$moq_revision" | wc -c | tr -d ' ')" = "40"
+          printf '%s' "$moq_revision" | grep -Eq '^[0-9a-f]{40}$'
+          grep -Fxq "dependency_identity=moq-dev/moq@${moq_revision}" "$build_info"
           test -f "$archive"
           test -f "$archive.sha256"
           cd "$(dirname "$archive")"

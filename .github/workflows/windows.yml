@@ -5,12 +5,14 @@ on:
     branches: [main, dev]
     paths:
       - "windows/**"
+      - "shared/build-provenance/**"
       - "shared/diagnostics/**"
       - "shared/ui/**"
       - ".github/workflows/windows.yml"
   pull_request:
     paths:
       - "windows/**"
+      - "shared/build-provenance/**"
       - "shared/diagnostics/**"
       - "shared/ui/**"
       - ".github/workflows/windows.yml"
@@ -44,8 +46,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             windows/target
+            shared/build-provenance/target
             shared/diagnostics/target
-          key: windows-cargo-${{ runner.os }}-rust1.95.0-${{ hashFiles('windows/Cargo.lock', 'shared/diagnostics/Cargo.lock', 'shared/ui/Cargo.lock') }}
+          key: windows-cargo-${{ runner.os }}-rust1.95.0-${{ hashFiles('windows/Cargo.lock', 'shared/build-provenance/Cargo.lock', 'shared/diagnostics/Cargo.lock', 'shared/ui/Cargo.lock') }}
           restore-keys: |
             windows-cargo-${{ runner.os }}-rust1.95.0-
       - name: Check formatting
@@ -55,13 +58,60 @@ jobs:
       - name: Run shared diagnostics tests
         working-directory: shared/diagnostics
         run: cargo test --locked --all-targets
+      - name: Run build provenance tests
+        working-directory: shared/build-provenance
+        run: cargo test --locked --all-targets
       - name: Run Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build release desktop app
         run: cargo build --locked --release
         env:
           MOQCAST_BUILD_IDENTITY: windows-x86_64-msvc
+          MOQCAST_PROVENANCE_OUTPUT: target/release/moqcast-build-info.txt
           MOQCAST_SOURCE_COMMIT: ${{ github.sha }}
+      - name: Verify internal build provenance
+        shell: pwsh
+        run: |
+          $path = "target/release/moqcast-build-info.txt"
+          if (-not (Test-Path $path)) {
+            throw "missing generated provenance record: $path"
+          }
+          $facts = @{}
+          Get-Content $path | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') {
+              $facts[$matches[1]] = $matches[2]
+            }
+          }
+          $required = @(
+            "app_version",
+            "build_identity",
+            "source_identity",
+            "dependency_identity",
+            "source_commit",
+            "source_state",
+            "moq_revision",
+            "target"
+          )
+          foreach ($key in $required) {
+            if (-not $facts.ContainsKey($key) -or [string]::IsNullOrWhiteSpace($facts[$key])) {
+              throw "missing provenance field: $key"
+            }
+          }
+          if ($facts["build_identity"] -ne "windows-x86_64-msvc") {
+            throw "unexpected build identity: $($facts['build_identity'])"
+          }
+          if ($facts["source_commit"] -ne "${{ github.sha }}" -or $facts["source_state"] -ne "clean") {
+            throw "source provenance does not describe this clean checkout"
+          }
+          if ($facts["target"] -ne "x86_64-pc-windows-msvc") {
+            throw "unexpected build target: $($facts['target'])"
+          }
+          if ($facts["moq_revision"] -notmatch '^[0-9a-f]{40}$') {
+            throw "invalid MoQ revision: $($facts['moq_revision'])"
+          }
+          if ($facts["dependency_identity"] -ne "moq-dev/moq@$($facts['moq_revision'])") {
+            throw "dependency identity does not match the generated MoQ revision"
+          }
       - name: Verify Windows GUI subsystem
         shell: pwsh
         run: |

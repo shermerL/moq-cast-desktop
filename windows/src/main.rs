@@ -7,6 +7,7 @@
 
 mod app;
 mod audio;
+mod build_info;
 mod diagnostics;
 mod media;
 mod playback;
@@ -21,7 +22,7 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
-use moqcast_diagnostics::{BuildInfo, Config, Paths};
+use moqcast_diagnostics::{Config, Paths};
 use moqcast_ui::Size;
 use runtime::{RuntimeConfig, RuntimeOwner};
 use url::Url;
@@ -46,7 +47,7 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    let build = BuildInfo::new(env!("CARGO_PKG_VERSION"));
+    let build = build_info::current();
     let diagnostics_config = match Paths::discover() {
         Ok(paths) => Config::new(paths, build).with_minimal_export_metadata(),
         Err(error) => {
