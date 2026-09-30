@@ -5,9 +5,10 @@ Thank you for helping improve MoQCast Desktop. Keep each change focused on one i
 ## Branches
 
 - `main` is the stable and release line.
-- `dev` is the active development and integration line.
-- Create features and regular improvements from `dev`.
-- Create stable fixes from `main`. After a stable fix lands, synchronize it into `dev`.
+- `main` uses a fixed baseline that has landed on upstream `moq-dev/moq` main.
+- `dev` is reserved for work based on upstream MoQ dev.
+- Create main-based features and fixes from `origin/main` and integrate them into `main`; do not automatically synchronize them into `dev`.
+- Create upstream-dev-based work from `origin/dev`. Dependency upgrades and branch promotion require the maintainer's authorization; record any retained fork or vendor patches.
 
 Topic branches use this format:
 
@@ -31,11 +32,11 @@ Always branch from a freshly fetched remote baseline:
 
 ```bash
 git fetch origin
-git switch -c dev-windows/example origin/dev
-git branch --set-upstream-to=origin/dev
+git switch -c main-windows/example origin/main
+git branch --set-upstream-to=origin/main
 ```
 
-Use the matching `origin/main` commands for a stable fix. Push the topic without changing its baseline upstream:
+Use the matching `origin/dev` commands only for upstream-dev-based work. Name new branches for the feature or fix, without agent or model names; existing topic names do not override their approved baseline. Push the topic without changing its baseline upstream:
 
 ```bash
 git push origin HEAD
@@ -61,6 +62,6 @@ Report evidence precisely. Source review and local checks, GitHub Actions, and r
 
 ## Merging and releases
 
-Delete topic branches after merge. The only long-lived branches are `main` and `dev`.
+Coordinate branch cleanup with the maintainer after merge; do not delete branches or discard uncommitted work without authorization.
 
 Public release notes describe user-visible behavior. Keep commit hashes and dependency provenance in CI output and diagnostic manifests, not in public release copy.
