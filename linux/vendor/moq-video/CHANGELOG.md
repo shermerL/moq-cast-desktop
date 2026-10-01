@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/moq-dev/moq/compare/moq-video-v0.1.7...moq-video-v0.1.8) - 2026-09-30
+
+### Fixed
+
+- *(video)* list V4L2 cameras once with PipeWire ([#4488](https://github.com/moq-dev/moq/pull/4488))
+- *(video)* guard portal sessions during negotiation ([#4492](https://github.com/moq-dev/moq/pull/4492))
+- *(video)* re-anchor native capture above its last timestamp ([#4418](https://github.com/moq-dev/moq/pull/4418))
+
+### Other
+
+- compile the Windows, macOS, and OBS plugin code on every PR ([#4370](https://github.com/moq-dev/moq/pull/4370))
+
+## [0.1.7](https://github.com/moq-dev/moq/compare/moq-video-v0.1.6...moq-video-v0.1.7) - 2026-09-27
+
+### Fixed
+
+- *(video)* keep the CUDA context alive until the NVDEC decoder is destroyed ([#4290](https://github.com/moq-dev/moq/pull/4290))
+
 ## [0.1.6](https://github.com/moq-dev/moq/compare/moq-video-v0.1.5...moq-video-v0.1.6) - 2026-09-26
 
 ### Added

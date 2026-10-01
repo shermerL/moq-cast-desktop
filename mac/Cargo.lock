@@ -2051,13 +2051,13 @@ dependencies = [
 
 [[package]]
 name = "hang"
-version = "0.21.7"
-source = "git+https://github.com/moq-dev/moq?rev=7458c85814e162dda90e87ad0dd21d600a586e09#7458c85814e162dda90e87ad0dd21d600a586e09"
+version = "0.21.9"
+source = "git+https://github.com/moq-dev/moq?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
 dependencies = [
  "bytes",
  "derive_more",
  "hex",
- "kio 0.6.1",
+ "kio 0.6.2",
  "lazy_static",
  "moq-json",
  "moq-net",
@@ -2623,8 +2623,8 @@ dependencies = [
 
 [[package]]
 name = "kio"
-version = "0.6.1"
-source = "git+https://github.com/moq-dev/moq?rev=7458c85814e162dda90e87ad0dd21d600a586e09#7458c85814e162dda90e87ad0dd21d600a586e09"
+version = "0.6.2"
+source = "git+https://github.com/moq-dev/moq?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
 dependencies = [
  "loom",
  "smallvec",
@@ -2861,8 +2861,8 @@ dependencies = [
 
 [[package]]
 name = "moq-audio"
-version = "0.1.6"
-source = "git+https://github.com/moq-dev/moq?rev=7458c85814e162dda90e87ad0dd21d600a586e09#7458c85814e162dda90e87ad0dd21d600a586e09"
+version = "0.1.8"
+source = "git+https://github.com/moq-dev/moq?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
 dependencies = [
  "block2 0.6.2",
  "bytes",
@@ -2870,7 +2870,7 @@ dependencies = [
  "dispatch2",
  "fixed-resample",
  "hang",
- "kio 0.6.1",
+ "kio 0.6.2",
  "moq-mux",
  "moq-net",
  "objc2 0.6.4",
@@ -2890,11 +2890,11 @@ dependencies = [
 
 [[package]]
 name = "moq-binary"
-version = "0.1.6"
-source = "git+https://github.com/moq-dev/moq?rev=7458c85814e162dda90e87ad0dd21d600a586e09#7458c85814e162dda90e87ad0dd21d600a586e09"
+version = "0.1.8"
+source = "git+https://github.com/moq-dev/moq?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
 dependencies = [
  "bytes",
- "kio 0.6.1",
+ "kio 0.6.2",
  "moq-flate",
  "moq-net",
  "thiserror 2.0.20",
@@ -2904,7 +2904,7 @@ dependencies = [
 [[package]]
 name = "moq-flate"
 version = "0.2.0"
-source = "git+https://github.com/moq-dev/moq?rev=7458c85814e162dda90e87ad0dd21d600a586e09#7458c85814e162dda90e87ad0dd21d600a586e09"
+source = "git+https://github.com/moq-dev/moq?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
 dependencies = [
  "bytes",
  "flate2",
@@ -2913,11 +2913,11 @@ dependencies = [
 
 [[package]]
 name = "moq-json"
-version = "0.5.4"
-source = "git+https://github.com/moq-dev/moq?rev=7458c85814e162dda90e87ad0dd21d600a586e09#7458c85814e162dda90e87ad0dd21d600a586e09"
+version = "0.5.6"
+source = "git+https://github.com/moq-dev/moq?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
 dependencies = [
  "bytes",
- "kio 0.6.1",
+ "kio 0.6.2",
  "moq-flate",
  "moq-net",
  "serde",
@@ -2929,8 +2929,8 @@ dependencies = [
 
 [[package]]
 name = "moq-loc"
-version = "0.2.15"
-source = "git+https://github.com/moq-dev/moq?rev=7458c85814e162dda90e87ad0dd21d600a586e09#7458c85814e162dda90e87ad0dd21d600a586e09"
+version = "0.2.17"
+source = "git+https://github.com/moq-dev/moq?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
 dependencies = [
  "bytes",
  "moq-net",
@@ -2940,7 +2940,7 @@ dependencies = [
 [[package]]
 name = "moq-msf"
 version = "0.5.1"
-source = "git+https://github.com/moq-dev/moq?rev=7458c85814e162dda90e87ad0dd21d600a586e09#7458c85814e162dda90e87ad0dd21d600a586e09"
+source = "git+https://github.com/moq-dev/moq?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
 dependencies = [
  "serde",
  "serde_json",
@@ -2949,15 +2949,15 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.10.7"
-source = "git+https://github.com/moq-dev/moq?rev=7458c85814e162dda90e87ad0dd21d600a586e09#7458c85814e162dda90e87ad0dd21d600a586e09"
+version = "0.10.9"
+source = "git+https://github.com/moq-dev/moq?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
  "bytes",
  "h264-parser",
  "hang",
- "kio 0.6.1",
+ "kio 0.6.2",
  "memchr",
  "moq-binary",
  "moq-json",
@@ -2982,13 +2982,13 @@ dependencies = [
 
 [[package]]
 name = "moq-net"
-version = "0.3.6"
-source = "git+https://github.com/moq-dev/moq?rev=7458c85814e162dda90e87ad0dd21d600a586e09#7458c85814e162dda90e87ad0dd21d600a586e09"
+version = "0.3.8"
+source = "git+https://github.com/moq-dev/moq?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
 dependencies = [
  "arrayvec",
  "bytes",
  "futures",
- "kio 0.6.1",
+ "kio 0.6.2",
  "moq-pattern",
  "num_enum",
  "rand",
@@ -3002,9 +3002,9 @@ dependencies = [
 
 [[package]]
 name = "moq-noq"
-version = "1.3.1"
+version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39e37523750e5f1313c3fd1798c4ffdb00218571054f601c3193ceb4e100e5ca"
+checksum = "8f73dd3abdf1efa3b89f903494d93836968f4eb4040a29cde5a03a4c6451535b"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -3024,9 +3024,9 @@ dependencies = [
 
 [[package]]
 name = "moq-noq-proto"
-version = "1.3.1"
+version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7448c4a6a6713b276b346931f3def60e0a89415cd8172d12f6465fed6501a261"
+checksum = "c8ede2ffc5008e6c53798802c257689475f01b12960f37a5f78e91cf4580159b"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
@@ -3053,9 +3053,9 @@ dependencies = [
 
 [[package]]
 name = "moq-noq-udp"
-version = "1.3.1"
+version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98e7d85788b7ec2437ac3dd83a231c4e403b96a5e53e39a8701ba5d1d4fad4a4"
+checksum = "b1e67d81510e43c0a0ce67a310e35938aa1dbd4a34ccef32d10f752719269cf2"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -3066,16 +3066,16 @@ dependencies = [
 
 [[package]]
 name = "moq-pattern"
-version = "0.1.0"
-source = "git+https://github.com/moq-dev/moq?rev=7458c85814e162dda90e87ad0dd21d600a586e09#7458c85814e162dda90e87ad0dd21d600a586e09"
+version = "0.1.2"
+source = "git+https://github.com/moq-dev/moq?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "moq-sock"
-version = "0.1.0"
-source = "git+https://github.com/moq-dev/moq?rev=7458c85814e162dda90e87ad0dd21d600a586e09#7458c85814e162dda90e87ad0dd21d600a586e09"
+version = "0.2.0"
+source = "git+https://github.com/moq-dev/moq?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
 dependencies = [
  "core_affinity",
  "libc",
@@ -3087,8 +3087,8 @@ dependencies = [
 
 [[package]]
 name = "moq-tokio"
-version = "0.19.18"
-source = "git+https://github.com/moq-dev/moq?rev=7458c85814e162dda90e87ad0dd21d600a586e09#7458c85814e162dda90e87ad0dd21d600a586e09"
+version = "0.19.20"
+source = "git+https://github.com/moq-dev/moq?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
 dependencies = [
  "bytes",
  "dns-lookup",
@@ -3129,7 +3129,7 @@ dependencies = [
 [[package]]
 name = "moq-v4l"
 version = "0.1.0"
-source = "git+https://github.com/moq-dev/moq?rev=7458c85814e162dda90e87ad0dd21d600a586e09#7458c85814e162dda90e87ad0dd21d600a586e09"
+source = "git+https://github.com/moq-dev/moq?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
 dependencies = [
  "bitflags 2.13.1",
  "libc",
@@ -3137,8 +3137,8 @@ dependencies = [
 
 [[package]]
 name = "moq-video"
-version = "0.1.6"
-source = "git+https://github.com/moq-dev/moq?rev=7458c85814e162dda90e87ad0dd21d600a586e09#7458c85814e162dda90e87ad0dd21d600a586e09"
+version = "0.1.8"
+source = "git+https://github.com/moq-dev/moq?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -6215,9 +6215,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-moq"
-version = "1.3.1"
+version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d3bdb2400eb49f82b778165df8da318f94be5a667a840a94fe6fc32f3798746"
+checksum = "c2d0167f1b04c31eefb41262fd459b90d72d6f41eea0cbc35d7e2c6279190290"
 dependencies = [
  "bytes",
  "futures",

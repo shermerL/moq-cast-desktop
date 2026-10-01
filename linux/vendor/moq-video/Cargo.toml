@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.1.6"
+version = "0.1.8"
 edition = "2024"
 rust-version = "1.91"
 
@@ -21,7 +21,8 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 # on. `capture` and `v4l2` no longer cost anything on Linux (moq-v4l checks its
 # bindings in) and stay opt-in only until every distribution ships them. The features exist so a consumer can pick what it wants, not to hide code
 # from the default compile (`just check` lints default features only, so the
-# opt-in ones are compiled by nightly's `just rs features` and `just rs macos`).
+# opt-in ones are compiled by nightly's `just rs features` and platform.yml's
+# `just rs macos`).
 # OpenH264 remains the default software fallback, but is optional so a hardware-
 # only consumer does not compile its vendored C++. Workspace consumers opt out
 # at the root manifest (`default-features = false`) and pick per crate, so the
@@ -105,9 +106,9 @@ bytes = { version = "1" }
 # Frame::resize; CUDA and macOS pixel-buffer frames resize on the GPU instead.
 fast_image_resize = "6"
 # Catalog types (VideoConfig / VideoCodec) the decode consumer reads.
-hang = { git = "https://github.com/moq-dev/moq.git", rev = "7458c85814e162dda90e87ad0dd21d600a586e09" }
-moq-mux = { git = "https://github.com/moq-dev/moq.git", rev = "7458c85814e162dda90e87ad0dd21d600a586e09" }
-moq-net = { git = "https://github.com/moq-dev/moq.git", rev = "7458c85814e162dda90e87ad0dd21d600a586e09" }
+hang = { git = "https://github.com/moq-dev/moq.git", rev = "472231acdb17b0e797b53eeba60a053661842805" }
+moq-mux = { git = "https://github.com/moq-dev/moq.git", rev = "472231acdb17b0e797b53eeba60a053661842805" }
+moq-net = { git = "https://github.com/moq-dev/moq.git", rev = "472231acdb17b0e797b53eeba60a053661842805" }
 # Vendored, statically linked software H.264 fallback (no system dependency).
 # Hardware encoders are preferred, but an OpenH264-enabled build falls back when
 # none is usable (a GPU-less box, or a resolution a hardware encoder rejects).
@@ -164,7 +165,7 @@ libc = { version = "0.2", optional = true }
 libloading = { version = "0.9", optional = true }
 # Architecture-correct DMA_BUF_IOCTL_SYNC request values for CPU access.
 linux-raw-sys = { version = "0.12.1", features = ["ioctl"], optional = true }
-moq-nvenc = { git = "https://github.com/moq-dev/moq.git", rev = "7458c85814e162dda90e87ad0dd21d600a586e09", optional = true }
+moq-nvenc = { git = "https://github.com/moq-dev/moq.git", rev = "472231acdb17b0e797b53eeba60a053661842805", optional = true }
 # Native V4L2 webcam capture and, behind the `v4l2` feature, the M2M hardware
 # codecs. An in-tree fork of `v4l` (see rs/moq-v4l) with the videodev2.h
 # bindings checked in, so the build needs no libclang or kernel headers. It
@@ -172,7 +173,7 @@ moq-nvenc = { git = "https://github.com/moq-dev/moq.git", rev = "7458c85814e162d
 # (no libjpeg/IJG). The codec backends use its raw layer (`moq_v4l::sys` for the
 # videodev2.h structs, `moq_v4l::v4l2::vidioc` for the request codes) rather
 # than a second V4L2 crate, so no ioctl struct is hand-rolled.
-moq-v4l = { git = "https://github.com/moq-dev/moq.git", rev = "7458c85814e162dda90e87ad0dd21d600a586e09", optional = true }
+moq-v4l = { git = "https://github.com/moq-dev/moq.git", rev = "472231acdb17b0e797b53eeba60a053661842805", optional = true }
 # Intel/AMD VAAPI hardware H.264 encoder and decoder, behind the opt-in `vaapi`
 # feature. As of moq-vaapi 0.0.3 libva is dlopen'd at runtime, so the binary carries
 # no NEEDED libva: the build needs no libva-dev (its build script's bindgen still

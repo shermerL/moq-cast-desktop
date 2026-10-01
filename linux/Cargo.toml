@@ -17,7 +17,7 @@ libspa = { path = "vendor/libspa" }
 anyhow = "1"
 eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wayland", "wgpu", "x11"] }
 gethostname = "1.1.0"
-moq-tokio = { git = "https://github.com/moq-dev/moq.git", rev = "7458c85814e162dda90e87ad0dd21d600a586e09", default-features = false, features = ["aws-lc-rs", "mdns", "noq"] }
+moq-tokio = { git = "https://github.com/moq-dev/moq.git", rev = "472231acdb17b0e797b53eeba60a053661842805", default-features = false, features = ["aws-lc-rs", "mdns", "noq"] }
 moqcast-diagnostics = { path = "../shared/diagnostics" }
 moqcast-ui = { path = "../shared/ui" }
 rfd = "0.17.2"
@@ -27,9 +27,9 @@ tracing = "0.1"
 url = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-hang = { git = "https://github.com/moq-dev/moq.git", rev = "7458c85814e162dda90e87ad0dd21d600a586e09" }
-moq-audio = { git = "https://github.com/moq-dev/moq.git", rev = "7458c85814e162dda90e87ad0dd21d600a586e09", default-features = false, features = ["playback"] }
-moq-mux = { git = "https://github.com/moq-dev/moq.git", rev = "7458c85814e162dda90e87ad0dd21d600a586e09" }
+hang = { git = "https://github.com/moq-dev/moq.git", rev = "472231acdb17b0e797b53eeba60a053661842805" }
+moq-audio = { git = "https://github.com/moq-dev/moq.git", rev = "472231acdb17b0e797b53eeba60a053661842805", default-features = false, features = ["playback"] }
+moq-mux = { git = "https://github.com/moq-dev/moq.git", rev = "472231acdb17b0e797b53eeba60a053661842805" }
 moq-video = { path = "vendor/moq-video", default-features = false, features = ["capture", "nvidia", "openh264", "pipewire"] }
 pipewire = "0.10"
 

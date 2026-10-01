@@ -143,6 +143,19 @@ jobs:
             grep -Fq 'encode::producer::tests::sticky_capture_failure_prevents_reopen_after_demand_idle: test'
           cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib encode::producer::tests
 
+      - name: Test vendored capture clocks and camera enumeration
+        working-directory: linux
+        run: |
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::channel::tests -- --list |
+            grep -Fq 'capture::channel::tests::native_timestamps_reanchor_when_the_device_clock_restarts: test'
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::channel::tests
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::pipewire::camera::tests::listing_hides_only_v4l2_paths_already_enumerated -- --exact --list |
+            grep -Fq 'capture::pipewire::camera::tests::listing_hides_only_v4l2_paths_already_enumerated: test'
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::pipewire::camera::tests::listing_hides_only_v4l2_paths_already_enumerated -- --exact
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::v4l2::tests::only_devices_offering_a_converted_format_are_cameras -- --exact --list |
+            grep -Fq 'capture::v4l2::tests::only_devices_offering_a_converted_format_are_cameras: test'
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::v4l2::tests::only_devices_offering_a_converted_format_are_cameras -- --exact
+
       - name: Build AppImage
         working-directory: linux
         env:

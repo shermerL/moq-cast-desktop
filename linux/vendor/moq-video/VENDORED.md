@@ -1,7 +1,7 @@
 # Vendored moq-video
 
 source_repository = `https://github.com/moq-dev/moq`
-source_revision = `7458c85814e162dda90e87ad0dd21d600a586e09`
+source_revision = `472231acdb17b0e797b53eeba60a053661842805`
 source_path = `rs/moq-video`
 
 The local copy carries these Linux product patches on top of that revision:
@@ -22,8 +22,15 @@ The local copy carries these Linux product patches on top of that revision:
   producer tests cover this decision; real portal/compositor behavior still
   requires a Wayland environment.
 
+Upstream now creates its ScreenCast `SessionGuard` immediately after
+`CreateSession` (PR #4492). The local `Owner`/`Handle` contract already owns the
+session before negotiation, including an in-flight `CreateSession`, and waits
+for close acknowledgement. It remains the sole cleanup owner here; no second
+upstream guard is layered onto the same session.
+
 The upstream revision also includes native camera mode selection, capture-clock
-fixtures, encoder flush timing, and the NVDEC CUDA-context lifetime fix. The
+fixtures, capture-clock reanchoring, V4L2/PipeWire camera deduplication, encoder
+flush timing, and the NVDEC CUDA-context lifetime fix. The
 local cleanup scope is retained across the shared screen/camera capture loop;
 the application still exposes screen sharing only.
 
