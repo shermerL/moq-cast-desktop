@@ -1,7 +1,7 @@
 # Vendored moq-video
 
 source_repository = `https://github.com/moq-dev/moq`
-source_revision = `472231acdb17b0e797b53eeba60a053661842805`
+source_revision = `24ccc98a2853d22c77178bf4713cad6d88f1e36d`
 source_path = `rs/moq-video`
 
 The local copy carries these Linux product patches on top of that revision:

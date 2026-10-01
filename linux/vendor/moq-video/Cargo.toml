@@ -106,9 +106,9 @@ bytes = { version = "1" }
 # Frame::resize; CUDA and macOS pixel-buffer frames resize on the GPU instead.
 fast_image_resize = "6"
 # Catalog types (VideoConfig / VideoCodec) the decode consumer reads.
-hang = { git = "https://github.com/moq-dev/moq.git", rev = "472231acdb17b0e797b53eeba60a053661842805" }
-moq-mux = { git = "https://github.com/moq-dev/moq.git", rev = "472231acdb17b0e797b53eeba60a053661842805" }
-moq-net = { git = "https://github.com/moq-dev/moq.git", rev = "472231acdb17b0e797b53eeba60a053661842805" }
+hang = { git = "https://github.com/moq-dev/moq.git", rev = "24ccc98a2853d22c77178bf4713cad6d88f1e36d" }
+moq-mux = { git = "https://github.com/moq-dev/moq.git", rev = "24ccc98a2853d22c77178bf4713cad6d88f1e36d" }
+moq-net = { git = "https://github.com/moq-dev/moq.git", rev = "24ccc98a2853d22c77178bf4713cad6d88f1e36d" }
 # Vendored, statically linked software H.264 fallback (no system dependency).
 # Hardware encoders are preferred, but an OpenH264-enabled build falls back when
 # none is usable (a GPU-less box, or a resolution a hardware encoder rejects).
@@ -165,7 +165,7 @@ libc = { version = "0.2", optional = true }
 libloading = { version = "0.9", optional = true }
 # Architecture-correct DMA_BUF_IOCTL_SYNC request values for CPU access.
 linux-raw-sys = { version = "0.12.1", features = ["ioctl"], optional = true }
-moq-nvenc = { git = "https://github.com/moq-dev/moq.git", rev = "472231acdb17b0e797b53eeba60a053661842805", optional = true }
+moq-nvenc = { git = "https://github.com/moq-dev/moq.git", rev = "24ccc98a2853d22c77178bf4713cad6d88f1e36d", optional = true }
 # Native V4L2 webcam capture and, behind the `v4l2` feature, the M2M hardware
 # codecs. An in-tree fork of `v4l` (see rs/moq-v4l) with the videodev2.h
 # bindings checked in, so the build needs no libclang or kernel headers. It
@@ -173,7 +173,7 @@ moq-nvenc = { git = "https://github.com/moq-dev/moq.git", rev = "472231acdb17b0e
 # (no libjpeg/IJG). The codec backends use its raw layer (`moq_v4l::sys` for the
 # videodev2.h structs, `moq_v4l::v4l2::vidioc` for the request codes) rather
 # than a second V4L2 crate, so no ioctl struct is hand-rolled.
-moq-v4l = { git = "https://github.com/moq-dev/moq.git", rev = "472231acdb17b0e797b53eeba60a053661842805", optional = true }
+moq-v4l = { git = "https://github.com/moq-dev/moq.git", rev = "24ccc98a2853d22c77178bf4713cad6d88f1e36d", optional = true }
 # Intel/AMD VAAPI hardware H.264 encoder and decoder, behind the opt-in `vaapi`
 # feature. As of moq-vaapi 0.0.3 libva is dlopen'd at runtime, so the binary carries
 # no NEEDED libva: the build needs no libva-dev (its build script's bindgen still

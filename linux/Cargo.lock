@@ -2284,7 +2284,7 @@ dependencies = [
 [[package]]
 name = "hang"
 version = "0.21.9"
-source = "git+https://github.com/moq-dev/moq.git?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
+source = "git+https://github.com/moq-dev/moq.git?rev=24ccc98a2853d22c77178bf4713cad6d88f1e36d#24ccc98a2853d22c77178bf4713cad6d88f1e36d"
 dependencies = [
  "bytes",
  "derive_more",
@@ -2876,7 +2876,7 @@ dependencies = [
 [[package]]
 name = "kio"
 version = "0.6.2"
-source = "git+https://github.com/moq-dev/moq.git?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
+source = "git+https://github.com/moq-dev/moq.git?rev=24ccc98a2853d22c77178bf4713cad6d88f1e36d#24ccc98a2853d22c77178bf4713cad6d88f1e36d"
 dependencies = [
  "loom",
  "smallvec",
@@ -3149,7 +3149,7 @@ dependencies = [
 [[package]]
 name = "moq-audio"
 version = "0.1.8"
-source = "git+https://github.com/moq-dev/moq.git?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
+source = "git+https://github.com/moq-dev/moq.git?rev=24ccc98a2853d22c77178bf4713cad6d88f1e36d#24ccc98a2853d22c77178bf4713cad6d88f1e36d"
 dependencies = [
  "bytes",
  "cpal",
@@ -3168,7 +3168,7 @@ dependencies = [
 [[package]]
 name = "moq-binary"
 version = "0.1.8"
-source = "git+https://github.com/moq-dev/moq.git?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
+source = "git+https://github.com/moq-dev/moq.git?rev=24ccc98a2853d22c77178bf4713cad6d88f1e36d#24ccc98a2853d22c77178bf4713cad6d88f1e36d"
 dependencies = [
  "bytes",
  "kio 0.6.2",
@@ -3204,7 +3204,7 @@ dependencies = [
 [[package]]
 name = "moq-flate"
 version = "0.2.0"
-source = "git+https://github.com/moq-dev/moq.git?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
+source = "git+https://github.com/moq-dev/moq.git?rev=24ccc98a2853d22c77178bf4713cad6d88f1e36d#24ccc98a2853d22c77178bf4713cad6d88f1e36d"
 dependencies = [
  "bytes",
  "flate2",
@@ -3214,7 +3214,7 @@ dependencies = [
 [[package]]
 name = "moq-json"
 version = "0.5.6"
-source = "git+https://github.com/moq-dev/moq.git?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
+source = "git+https://github.com/moq-dev/moq.git?rev=24ccc98a2853d22c77178bf4713cad6d88f1e36d#24ccc98a2853d22c77178bf4713cad6d88f1e36d"
 dependencies = [
  "bytes",
  "kio 0.6.2",
@@ -3230,7 +3230,7 @@ dependencies = [
 [[package]]
 name = "moq-loc"
 version = "0.2.17"
-source = "git+https://github.com/moq-dev/moq.git?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
+source = "git+https://github.com/moq-dev/moq.git?rev=24ccc98a2853d22c77178bf4713cad6d88f1e36d#24ccc98a2853d22c77178bf4713cad6d88f1e36d"
 dependencies = [
  "bytes",
  "moq-net",
@@ -3240,7 +3240,7 @@ dependencies = [
 [[package]]
 name = "moq-msf"
 version = "0.5.1"
-source = "git+https://github.com/moq-dev/moq.git?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
+source = "git+https://github.com/moq-dev/moq.git?rev=24ccc98a2853d22c77178bf4713cad6d88f1e36d#24ccc98a2853d22c77178bf4713cad6d88f1e36d"
 dependencies = [
  "serde",
  "serde_json",
@@ -3250,7 +3250,7 @@ dependencies = [
 [[package]]
 name = "moq-mux"
 version = "0.10.9"
-source = "git+https://github.com/moq-dev/moq.git?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
+source = "git+https://github.com/moq-dev/moq.git?rev=24ccc98a2853d22c77178bf4713cad6d88f1e36d#24ccc98a2853d22c77178bf4713cad6d88f1e36d"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3283,7 +3283,7 @@ dependencies = [
 [[package]]
 name = "moq-net"
 version = "0.3.8"
-source = "git+https://github.com/moq-dev/moq.git?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
+source = "git+https://github.com/moq-dev/moq.git?rev=24ccc98a2853d22c77178bf4713cad6d88f1e36d#24ccc98a2853d22c77178bf4713cad6d88f1e36d"
 dependencies = [
  "arrayvec",
  "bytes",
@@ -3367,7 +3367,7 @@ dependencies = [
 [[package]]
 name = "moq-nvenc"
 version = "0.1.2"
-source = "git+https://github.com/moq-dev/moq.git?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
+source = "git+https://github.com/moq-dev/moq.git?rev=24ccc98a2853d22c77178bf4713cad6d88f1e36d#24ccc98a2853d22c77178bf4713cad6d88f1e36d"
 dependencies = [
  "cudarc",
  "libloading 0.9.0",
@@ -3377,7 +3377,7 @@ dependencies = [
 [[package]]
 name = "moq-pattern"
 version = "0.1.2"
-source = "git+https://github.com/moq-dev/moq.git?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
+source = "git+https://github.com/moq-dev/moq.git?rev=24ccc98a2853d22c77178bf4713cad6d88f1e36d#24ccc98a2853d22c77178bf4713cad6d88f1e36d"
 dependencies = [
  "serde",
 ]
@@ -3385,7 +3385,7 @@ dependencies = [
 [[package]]
 name = "moq-sock"
 version = "0.2.0"
-source = "git+https://github.com/moq-dev/moq.git?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
+source = "git+https://github.com/moq-dev/moq.git?rev=24ccc98a2853d22c77178bf4713cad6d88f1e36d#24ccc98a2853d22c77178bf4713cad6d88f1e36d"
 dependencies = [
  "core_affinity",
  "libc",
@@ -3398,7 +3398,7 @@ dependencies = [
 [[package]]
 name = "moq-tokio"
 version = "0.19.20"
-source = "git+https://github.com/moq-dev/moq.git?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
+source = "git+https://github.com/moq-dev/moq.git?rev=24ccc98a2853d22c77178bf4713cad6d88f1e36d#24ccc98a2853d22c77178bf4713cad6d88f1e36d"
 dependencies = [
  "bytes",
  "dns-lookup",
@@ -3439,7 +3439,7 @@ dependencies = [
 [[package]]
 name = "moq-v4l"
 version = "0.1.0"
-source = "git+https://github.com/moq-dev/moq.git?rev=472231acdb17b0e797b53eeba60a053661842805#472231acdb17b0e797b53eeba60a053661842805"
+source = "git+https://github.com/moq-dev/moq.git?rev=24ccc98a2853d22c77178bf4713cad6d88f1e36d#24ccc98a2853d22c77178bf4713cad6d88f1e36d"
 dependencies = [
  "bitflags 2.13.1",
  "libc",
