@@ -109,8 +109,22 @@ jobs:
           if ($facts["moq_revision"] -notmatch '^[0-9a-f]{40}$') {
             throw "invalid MoQ revision: $($facts['moq_revision'])"
           }
-          if ($facts["dependency_identity"] -ne "moq-dev/moq@$($facts['moq_revision'])") {
-            throw "dependency identity does not match the generated MoQ revision"
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) {
+            throw "could not read the manifest dependency source"
+          }
+          $package = $metadata.packages | Where-Object { $_.name -eq "moqcast-windows" }
+          $dependency = @($package.dependencies | Where-Object { $_.name -eq "moq-tokio" })
+          if ($dependency.Count -ne 1) {
+            throw "expected one direct moq-tokio dependency"
+          }
+          $source = [regex]::Match($dependency[0].source, '^git\+https://github\.com/([^/?#]+/[^/?#]+?)(?:\.git)?\?rev=([0-9a-f]{40})$')
+          if (-not $source.Success) {
+            throw "MoQ dependency must use an exact GitHub revision"
+          }
+          $expectedIdentity = "$($source.Groups[1].Value)@$($source.Groups[2].Value)"
+          if ($facts["moq_revision"] -ne $source.Groups[2].Value -or $facts["dependency_identity"] -ne $expectedIdentity) {
+            throw "dependency provenance does not match the manifest source"
           }
       - name: Verify Windows GUI subsystem
         shell: pwsh
