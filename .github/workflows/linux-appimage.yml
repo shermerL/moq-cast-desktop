@@ -143,6 +143,18 @@ jobs:
             grep -Fq 'encode::producer::tests::sticky_capture_failure_prevents_reopen_after_demand_idle: test'
           cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib encode::producer::tests
 
+      - name: Test vendored X11 capture state and pixels
+        working-directory: linux
+        run: |
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::x11::tests -- --list |
+            grep -Fq 'capture::x11::tests::rgb_reuses_storage_and_overwrites_the_previous_frame: test'
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::x11::tests
+
+      - name: Measure X11 RGB buffer reuse
+        if: matrix.variant == 'linux-x86_64-ubuntu24.04-glibc2.39'
+        working-directory: linux
+        run: cargo test --locked --release -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::x11::tests::x11_rgb_workload -- --exact --ignored --nocapture
+
       - name: Test vendored capture clocks and camera enumeration
         working-directory: linux
         run: |

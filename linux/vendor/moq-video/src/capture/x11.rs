@@ -3,15 +3,18 @@
 //! Wayland capture goes through the desktop portal because direct global
 //! capture is intentionally forbidden there. An X11 session does expose stable
 //! monitor and window ids, so this backend enumerates them with RandR and pulls
-//! pixels with `GetImage`. It is also the fallback when the `pipewire` feature
-//! is disabled on an X11 desktop.
+//! pixels through MIT-SHM, falling back to `GetImage` without local shared
+//! memory. It is also the fallback when the `pipewire` feature is disabled
+//! on an X11 desktop.
 
+use std::os::fd::AsRawFd;
 use std::ptr::NonNull;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::Event;
-use x11rb::protocol::randr::ConnectionExt as _;
+use x11rb::protocol::randr::{self, ConnectionExt as _};
 use x11rb::protocol::shm::{self, ConnectionExt as _};
 use x11rb::protocol::xfixes::{ConnectionExt as _, GetCursorImageReply};
 use x11rb::protocol::xproto::{
@@ -172,7 +175,7 @@ enum Target {
 }
 
 struct Capture {
-	connection: RustConnection,
+	connection: Arc<RustConnection>,
 	drawable: Drawable,
 	x: i16,
 	y: i16,
@@ -180,6 +183,8 @@ struct Capture {
 	height: u32,
 	format: PixelFormat,
 	shm: Option<SharedMemory>,
+	rgb: Vec<u8>,
+	observed: Observed,
 	framerate: crate::Rate,
 	interval: Duration,
 	next: Instant,
@@ -195,7 +200,7 @@ struct Capture {
 
 /// What the backend watches for a change: window size or destruction, or
 /// whether the selected monitor is still the one the stream opened with.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Observed {
 	Size(u32, u32),
 	Monitor(bool),
@@ -205,12 +210,14 @@ enum Observed {
 impl Capture {
 	fn open(config: &Config, target: Target) -> Result<Self, Error> {
 		let (connection, screen_index) = connect()?;
+		let connection = Arc::new(connection);
 		let (root, root_depth, root_visual) = {
 			let screen = &connection.setup().roots[screen_index];
 			(screen.root, screen.root_depth, screen.root_visual)
 		};
 		let (drawable, x, y, width, height, depth, visual, name, display) = match target {
 			Target::Display(selector) => {
+				watch_display(&connection, root)?;
 				let monitors = monitors(&connection, root)?;
 				let index = select_monitor(&monitors, selector).ok_or_else(|| match selector {
 					Some(index) => {
@@ -283,15 +290,8 @@ impl Capture {
 			return Err(Error::SourceUnavailable(format!("{name} has no capturable area")));
 		}
 		let format = PixelFormat::new(connection.setup(), depth, visual)?;
-		let shm = format
-			.required_len(width, height)
-			.and_then(|len| u32::try_from(len).map_err(|_| codec("XShm frame size overflow")))
-			.and_then(|len| SharedMemory::open(&connection, len))
-			.map_err(|error| {
-				tracing::warn!(%error, "XShm unavailable; falling back to XGetImage");
-				error
-			})
-			.ok();
+		let shm = SharedMemory::open(connection.clone(), format.required_len(width, height)?)?;
+		tracing::debug!(source = %name, shared_memory = shm.is_some(), "X11 capture opened");
 		let framerate = config.framerate.unwrap_or(crate::Rate::integer(DEFAULT_FRAMERATE));
 		let interval = Duration::from_secs_f64(1.0 / framerate.as_f64());
 		let cursor = config.cursor
@@ -314,6 +314,8 @@ impl Capture {
 			height,
 			format,
 			shm,
+			rgb: Vec::new(),
+			observed: opened,
 			framerate,
 			interval,
 			next: Instant::now(),
@@ -343,24 +345,16 @@ impl Capture {
 		let width = u16::try_from(self.width).map_err(|_| Error::Codec(anyhow::anyhow!("X11 width is too large")))?;
 		let height =
 			u16::try_from(self.height).map_err(|_| Error::Codec(anyhow::anyhow!("X11 height is too large")))?;
-		// Bound to a local so the cookie, which borrows the connection, is dropped
-		// before the error arm asks the source what it is doing now.
-		let image = match self.capture_image(width, height) {
-			Ok(image) => image,
-			// The check above and this request are separate round trips, so a
-			// resize or a minimize lands between them often enough to matter. Only
-			// a change we can still confirm is recoverable: anything else stays
-			// terminal, so a persistent failure surfaces instead of spinning the
-			// caller's reopen loop.
-			Err(error) => {
-				return match self.settled() {
-					Ok(Settled::Waiting) => Ok(pump::Read::Idle),
-					Ok(Settled::Changed) => Ok(pump::Read::Done),
-					_ => Err(Error::SourceUnavailable(format!("X11 source: {error}"))),
-				};
-			}
-		};
-		let mut rgb = self.format.rgb(&image, self.width, self.height)?;
+		if let Err(error) = self.capture_image(width, height) {
+			// A resize can land after the state check but before the image request.
+			// The reply has queued the preceding events; only a confirmed source
+			// change can turn a failed read into a hold or an orderly close.
+			return match self.settled() {
+				Ok(Settled::Waiting) => Ok(pump::Read::Idle),
+				Ok(Settled::Changed) => Ok(pump::Read::Done),
+				_ => Err(error),
+			};
+		}
 		if self.cursor
 			&& let Some(cursor) = self
 				.connection
@@ -369,17 +363,17 @@ impl Capture {
 				.and_then(|cookie| cookie.reply().ok())
 		{
 			let (x, y) = self.origin()?;
-			blend_cursor(&mut rgb, self.width, self.height, x, y, &cursor);
+			blend_cursor(&mut self.rgb, self.width, self.height, x, y, &cursor);
 		}
 		Ok(pump::Read::Frame(Surface::I420(I420::from_rgb(
-			&rgb,
+			&self.rgb,
 			crate::Size::new(self.width, self.height),
 		)?)))
 	}
 
-	fn capture_image(&mut self, width: u16, height: u16) -> Result<Vec<u8>, Error> {
-		if let Some(shm) = &self.shm {
-			let shared = self
+	fn capture_image(&mut self, width: u16, height: u16) -> Result<(), Error> {
+		if let Some(shm) = &mut self.shm {
+			let reply = self
 				.connection
 				.shm_get_image(
 					self.drawable,
@@ -392,40 +386,32 @@ impl Capture {
 					shm.segment,
 					0,
 				)
-				.map_err(source)
-				.and_then(|cookie| cookie.reply().map_err(source));
-			match shared {
-				Ok(_) => {
-					let bytes = unsafe { std::slice::from_raw_parts(shm.ptr.as_ptr(), shm.len) };
-					return Ok(bytes.to_vec());
-				}
-				Err(error) => {
-					tracing::warn!(%error, "XShm capture failed; switching to XGetImage");
-					self.close_shm();
-				}
+				.map_err(source)?
+				.reply()
+				.map_err(source)?;
+			if reply.size as usize != shm.len {
+				return Err(codec("unexpected XShm image size"));
 			}
-		}
-		self.connection
-			.get_image(
-				ImageFormat::Z_PIXMAP,
-				self.drawable,
-				self.x,
-				self.y,
-				width,
-				height,
-				u32::MAX,
-			)
-			.map_err(source)?
-			.reply()
-			.map(|reply| reply.data)
-			.map_err(source)
-	}
-
-	fn close_shm(&mut self) {
-		if let Some(shm) = self.shm.take() {
-			let _ = self.connection.shm_detach(shm.segment);
-			let _ = self.connection.flush();
-			drop(shm);
+			// The reply fences the server's write. No further SHM request is sent
+			// until conversion finishes, and no slice escapes this capture read.
+			let data = unsafe { std::slice::from_raw_parts(shm.ptr.as_ptr(), shm.len) };
+			self.format.rgb(data, self.width, self.height, &mut self.rgb)
+		} else {
+			let image = self
+				.connection
+				.get_image(
+					ImageFormat::Z_PIXMAP,
+					self.drawable,
+					self.x,
+					self.y,
+					width,
+					height,
+					u32::MAX,
+				)
+				.map_err(source)?
+				.reply()
+				.map_err(source)?;
+			self.format.rgb(&image.data, self.width, self.height, &mut self.rgb)
 		}
 	}
 
@@ -437,7 +423,13 @@ impl Capture {
 		// An unmapped window (minimized, or on a workspace that isn't showing) has
 		// nothing to copy and GetImage on it fails outright. Hold the capture
 		// rather than ending it, so the broadcast resumes when the window returns.
-		if self.hidden()? {
+		let hidden = self.hidden()?;
+		let current = self.observe()?;
+		if current == Observed::Destroyed {
+			tracing::info!(source = %self.name, reason = "window destroyed", "X11 source changed; ending capture");
+			return Ok(Settled::Changed);
+		}
+		if hidden {
 			if !self.unmapped {
 				self.unmapped = true;
 				tracing::info!(source = %self.name, "X11 window unmapped; holding capture");
@@ -449,11 +441,6 @@ impl Capture {
 			tracing::info!(source = %self.name, "X11 window mapped; resuming capture");
 		}
 
-		let current = self.observe()?;
-		if current == Observed::Destroyed {
-			tracing::info!(source = %self.name, reason = "window destroyed", "X11 source changed; ending capture");
-			return Ok(Settled::Changed);
-		}
 		let settled = self.settle.observe(&current, Instant::now());
 		if settled == Settled::Changed {
 			let reason = match current {
@@ -469,7 +456,9 @@ impl Capture {
 	}
 
 	/// Whether a captured window is currently unmapped. A display target draws
-	/// from the root window, which is always mapped.
+	/// from the root window, which is always mapped. Query attributes rather
+	/// than trusting MapNotify: an ancestor may become unmapped without a
+	/// notification on the captured child. Its reply also fences queued events.
 	fn hidden(&self) -> Result<bool, Error> {
 		if self.display.is_some() {
 			return Ok(false);
@@ -483,51 +472,16 @@ impl Capture {
 		Ok(attributes.map_state != MapState::VIEWABLE)
 	}
 
-	/// The source's geometry right now: a round trip per call.
-	fn observe(&self) -> Result<Observed, Error> {
-		match &self.display {
-			Some(display) => {
-				let monitors = monitors(&self.connection, self.root)?;
-				Ok(Observed::Monitor(display.matches(&monitors)))
-			}
-			None => {
-				let geometry = self
-					.connection
-					.get_geometry(self.drawable)
-					.map_err(source)?
-					.reply()
-					.map_err(source)?;
-				// Drained after that round trip, not before: the server writes events
-				// and replies down one ordered stream, so a DestroyNotify it generated
-				// before this reply is already queued here. A destroyed window whose id
-				// nobody took makes the request above fail instead, which is equally
-				// terminal.
-				if self.destroyed()? {
-					return Ok(Observed::Destroyed);
-				}
-				Ok(Observed::Size(
-					u32::from(geometry.width) & !1,
-					u32::from(geometry.height) & !1,
-				))
-			}
-		}
-	}
-
-	/// Whether the captured window has been destroyed, draining the events the
-	/// StructureNotify subscription queues up. Draining every frame is also what
-	/// keeps that queue from growing for the life of the stream.
-	///
-	/// `ConfigureNotify` rides the same subscription and could stand in for the
-	/// per-frame `get_geometry` round trip.
-	fn destroyed(&self) -> Result<bool, Error> {
-		let mut destroyed = false;
+	/// Drain every frame, but re-query monitors only after a layout event.
+	fn observe(&mut self) -> Result<Observed, Error> {
+		let mut layout_changed = false;
 		while let Some(event) = self.connection.poll_for_event().map_err(source)? {
-			// Nothing else on the queue is ours to act on: x11rb routes an error to
-			// the cookie waiting for it, so an `Event::Error` reaching here belongs
-			// to a request we already gave up on.
-			destroyed |= destroys(&event, self.drawable);
+			layout_changed |= self.observed.event(&event, self.drawable);
 		}
-		Ok(destroyed)
+		if layout_changed && let Some(display) = &self.display {
+			self.observed = Observed::Monitor(display.matches(&monitors(&self.connection, self.root)?));
+		}
+		Ok(self.observed)
 	}
 
 	fn origin(&self) -> Result<(i32, i32), Error> {
@@ -544,26 +498,41 @@ impl Capture {
 	}
 }
 
-impl Drop for Capture {
-	fn drop(&mut self) {
-		self.close_shm();
-	}
-}
-
+/// The server owns the fd-backed segment; dropping capture detaches it and
+/// unmaps our view even when opening or conversion fails.
 struct SharedMemory {
+	connection: Arc<RustConnection>,
 	segment: shm::Seg,
 	ptr: NonNull<u8>,
 	len: usize,
 }
 
 impl SharedMemory {
-	fn open(connection: &RustConnection, size: u32) -> Result<Self, Error> {
-		if connection
-			.extension_information(shm::X11_EXTENSION_NAME)
-			.map_err(source)?
-			.is_none()
+	fn open(connection: Arc<RustConnection>, len: usize) -> Result<Option<Self>, Error> {
+		// DISPLAY's spelling is not a transport check (localhost may be SSH
+		// forwarding). FD segments work only across a Unix-domain connection.
+		let mut domain: libc::c_int = 0;
+		let mut size = std::mem::size_of_val(&domain) as libc::socklen_t;
+		// SAFETY: both output pointers name live, correctly sized integers.
+		let status = unsafe {
+			libc::getsockopt(
+				connection.stream().as_raw_fd(),
+				libc::SOL_SOCKET,
+				libc::SO_DOMAIN,
+				(&mut domain as *mut libc::c_int).cast(),
+				&mut size,
+			)
+		};
+		if status != 0 {
+			return Err(codec(std::io::Error::last_os_error()));
+		}
+		if domain != libc::AF_UNIX
+			|| connection
+				.extension_information(shm::X11_EXTENSION_NAME)
+				.map_err(source)?
+				.is_none()
 		{
-			return Err(Error::Unsupported("XShm extension is unavailable".to_owned()));
+			return Ok(None);
 		}
 		let version = connection
 			.shm_query_version()
@@ -571,44 +540,58 @@ impl SharedMemory {
 			.reply()
 			.map_err(source)?;
 		if (version.major_version, version.minor_version) < (1, 2) {
-			return Err(Error::Unsupported(
-				"XShm file-descriptor segments are unavailable".to_owned(),
-			));
+			return Ok(None);
 		}
+		let size = u32::try_from(len).map_err(|_| codec("XShm frame is too large"))?;
 		let segment = connection.generate_id().map_err(source)?;
 		let reply = connection
 			.shm_create_segment(segment, size, false)
 			.map_err(source)?
 			.reply()
 			.map_err(source)?;
-		let ptr = unsafe {
+		// SAFETY: the server returned an owned fd for this size. The mapping is
+		// read only here; shm_get_image writes through the server's mapping.
+		let mapped = unsafe {
 			libc::mmap(
 				std::ptr::null_mut(),
-				size as usize,
-				libc::PROT_READ | libc::PROT_WRITE,
+				len,
+				libc::PROT_READ,
 				libc::MAP_SHARED,
-				std::os::fd::AsRawFd::as_raw_fd(&reply.shm_fd),
+				reply.shm_fd.as_raw_fd(),
 				0,
 			)
 		};
-		if ptr == libc::MAP_FAILED {
+		if mapped == libc::MAP_FAILED {
+			let error = std::io::Error::last_os_error();
 			let _ = connection.shm_detach(segment);
-			return Err(codec(format!("XShm mmap failed: {}", std::io::Error::last_os_error())));
+			let _ = connection.flush();
+			return Err(codec(error));
 		}
-		let Some(ptr) = NonNull::new(ptr.cast::<u8>()) else {
+		let Some(ptr) = NonNull::new(mapped.cast::<u8>()) else {
+			// SAFETY: even address zero is a successful mapping, but Rust slices
+			// cannot represent it. Release both sides before refusing capture.
+			unsafe {
+				libc::munmap(mapped, len);
+			}
 			let _ = connection.shm_detach(segment);
-			return Err(codec("XShm mmap returned a null buffer"));
+			let _ = connection.flush();
+			return Err(codec("XShm mapped a null address"));
 		};
-		Ok(Self {
+		Ok(Some(Self {
+			connection,
 			segment,
 			ptr,
-			len: size as usize,
-		})
+			len,
+		}))
 	}
 }
 
 impl Drop for SharedMemory {
 	fn drop(&mut self) {
+		// All reads wait for their reply, so no server write is outstanding.
+		let _ = self.connection.shm_detach(self.segment);
+		let _ = self.connection.flush();
+		// SAFETY: this object uniquely owns the mapping returned by mmap.
 		unsafe {
 			libc::munmap(self.ptr.as_ptr().cast(), self.len);
 		}
@@ -699,11 +682,65 @@ fn select_monitor(monitors: &[Monitor], selector: Option<usize>) -> Option<usize
 		.or_else(|| selector.is_none().then_some(0).filter(|_| !monitors.is_empty()))
 }
 
-/// Whether an event says the captured window is gone. StructureNotify reports
-/// only the window it was selected on, but a recycled id is exactly what this
-/// guards against, so match the id rather than assume it.
-fn destroys(event: &Event, window: XWindow) -> bool {
-	matches!(event, Event::DestroyNotify(destroy) if destroy.window == window)
+impl Observed {
+	/// Update window state, or mark the monitor snapshot dirty. Destruction is
+	/// terminal even if the server reuses the XID before the next capture read.
+	fn event(&mut self, event: &Event, drawable: Drawable) -> bool {
+		if *self == Self::Destroyed {
+			return false;
+		}
+		match event {
+			Event::DestroyNotify(event) if event.window == drawable => *self = Self::Destroyed,
+			Event::ConfigureNotify(event) if event.window == drawable => {
+				if matches!(self, Self::Monitor(_)) {
+					return true;
+				}
+				*self = Self::Size(u32::from(event.width) & !1, u32::from(event.height) & !1);
+			}
+			Event::RandrScreenChangeNotify(_) | Event::RandrNotify(_) => {
+				return matches!(self, Self::Monitor(_));
+			}
+			_ => {}
+		}
+		false
+	}
+}
+
+fn watch_display(connection: &RustConnection, root: XWindow) -> Result<(), Error> {
+	// Also watch the root for servers without RandR. Subscribe before reading
+	// the initial geometry, so a change during open cannot go unnoticed.
+	connection
+		.change_window_attributes(
+			root,
+			&ChangeWindowAttributesAux::new().event_mask(EventMask::STRUCTURE_NOTIFY),
+		)
+		.map_err(source)?
+		.check()
+		.map_err(source)?;
+	if connection
+		.extension_information(randr::X11_EXTENSION_NAME)
+		.map_err(source)?
+		.is_some()
+	{
+		let version = connection
+			.randr_query_version(1, 5)
+			.map_err(source)?
+			.reply()
+			.map_err(source)?;
+		let mut mask = randr::NotifyMask::SCREEN_CHANGE;
+		if (version.major_version, version.minor_version) >= (1, 2) {
+			mask |= randr::NotifyMask::CRTC_CHANGE | randr::NotifyMask::OUTPUT_CHANGE;
+		}
+		if (version.major_version, version.minor_version) >= (1, 4) {
+			mask |= randr::NotifyMask::RESOURCE_CHANGE;
+		}
+		connection
+			.randr_select_input(root, mask)
+			.map_err(source)?
+			.check()
+			.map_err(source)?;
+	}
+	Ok(())
 }
 
 fn client_windows(connection: &RustConnection, root: XWindow) -> Result<Vec<XWindow>, Error> {
@@ -777,17 +814,6 @@ struct PixelFormat {
 }
 
 impl PixelFormat {
-	fn required_len(&self, width: u32, height: u32) -> Result<usize, Error> {
-		let row_bits = (width as usize)
-			.checked_mul(usize::from(self.bits_per_pixel))
-			.ok_or_else(|| codec("X11 row size overflow"))?;
-		let pad = usize::from(self.scanline_pad);
-		let stride = row_bits.div_ceil(pad) * pad / 8;
-		stride
-			.checked_mul(height as usize)
-			.ok_or_else(|| codec("X11 frame size overflow"))
-	}
-
 	fn new(setup: &x11rb::protocol::xproto::Setup, depth: u8, visual_id: u32) -> Result<Self, Error> {
 		let visual = setup
 			.roots
@@ -817,23 +843,31 @@ impl PixelFormat {
 		})
 	}
 
-	fn rgb(&self, data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error> {
-		let pixel_bytes = usize::from(self.bits_per_pixel.div_ceil(8));
-		if !(2..=4).contains(&pixel_bytes) {
-			return Err(Error::Codec(anyhow::anyhow!(
-				"unsupported X11 pixel depth: {} bits per pixel",
-				self.bits_per_pixel
-			)));
+	fn stride(&self, width: u32) -> Result<usize, Error> {
+		if !matches!(self.bits_per_pixel, 16 | 24 | 32) || !matches!(self.scanline_pad, 8 | 16 | 32) {
+			return Err(codec("unsupported X11 pixel layout"));
 		}
-		let row_bits = usize::try_from(width)
-			.ok()
-			.and_then(|width| width.checked_mul(usize::from(self.bits_per_pixel)))
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("X11 row size overflow")))?;
+		let row_bits = (width as usize)
+			.checked_mul(usize::from(self.bits_per_pixel))
+			.ok_or_else(|| codec("X11 row size overflow"))?;
 		let pad = usize::from(self.scanline_pad);
-		let stride = row_bits.div_ceil(pad) * pad / 8;
-		let required = stride
+		row_bits
+			.div_ceil(pad)
+			.checked_mul(pad / 8)
+			.ok_or_else(|| codec("X11 row size overflow"))
+	}
+
+	fn required_len(&self, width: u32, height: u32) -> Result<usize, Error> {
+		self.stride(width)?
 			.checked_mul(height as usize)
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("X11 frame size overflow")))?;
+			.filter(|len| *len > 0)
+			.ok_or_else(|| codec("invalid X11 frame size"))
+	}
+
+	fn rgb(&self, data: &[u8], width: u32, height: u32, rgb: &mut Vec<u8>) -> Result<(), Error> {
+		let pixel_bytes = usize::from(self.bits_per_pixel / 8);
+		let stride = self.stride(width)?;
+		let required = self.required_len(width, height)?;
 		if data.len() < required {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"short X11 frame: got {} bytes, need {required}",
@@ -841,7 +875,12 @@ impl PixelFormat {
 			)));
 		}
 
-		let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+		let len = (width as usize)
+			.checked_mul(height as usize)
+			.and_then(|len| len.checked_mul(3))
+			.ok_or_else(|| codec("X11 RGB size overflow"))?;
+		rgb.clear();
+		rgb.reserve(len);
 		for row in data[..required].chunks_exact(stride) {
 			for bytes in row[..width as usize * pixel_bytes].chunks_exact(pixel_bytes) {
 				let mut pixel = 0u32;
@@ -862,7 +901,7 @@ impl PixelFormat {
 				rgb.push(component(pixel, self.blue_mask));
 			}
 		}
-		Ok(rgb)
+		Ok(())
 	}
 }
 
@@ -975,9 +1014,13 @@ mod tests {
 				..Default::default()
 			})
 		};
-		assert!(destroys(&destroy(0x40_0001), 0x40_0001));
-		assert!(!destroys(&destroy(0x40_0002), 0x40_0001));
-		assert!(!destroys(&Event::Unknown(Vec::new()), 0x40_0001));
+		let mut observed = Observed::Size(640, 480);
+		observed.event(&destroy(0x40_0002), 0x40_0001);
+		assert_eq!(observed, Observed::Size(640, 480));
+		observed.event(&destroy(0x40_0001), 0x40_0001);
+		assert_eq!(observed, Observed::Destroyed);
+		observed.event(&Event::Unknown(Vec::new()), 0x40_0001);
+		assert_eq!(observed, Observed::Destroyed);
 	}
 
 	#[test]
@@ -1025,7 +1068,139 @@ mod tests {
 			green_mask: 0x07e0,
 			blue_mask: 0x001f,
 		};
-		let rgb = format.rgb(&[0x00, 0xf8, 0xe0, 0x07], 2, 1).unwrap();
+		let mut rgb = Vec::new();
+		format.rgb(&[0x00, 0xf8, 0xe0, 0x07], 2, 1, &mut rgb).unwrap();
 		assert_eq!(rgb, [255, 0, 0, 0, 255, 0]);
+	}
+	fn configure(window: XWindow, width: u16, height: u16) -> Event {
+		Event::ConfigureNotify(x11rb::protocol::xproto::ConfigureNotifyEvent {
+			event: window,
+			window,
+			width,
+			height,
+			..Default::default()
+		})
+	}
+
+	#[test]
+	fn window_events_update_geometry_without_reviving_a_destroyed_source() {
+		let mut observed = Observed::Size(640, 480);
+		assert!(!observed.event(&configure(7, 801, 603), 7));
+		assert_eq!(observed, Observed::Size(800, 602));
+		observed.event(&configure(8, 320, 240), 7);
+		assert_eq!(observed, Observed::Size(800, 602));
+		observed.event(
+			&Event::DestroyNotify(DestroyNotifyEvent {
+				window: 7,
+				..Default::default()
+			}),
+			7,
+		);
+		observed.event(&configure(7, 640, 480), 7);
+		assert_eq!(observed, Observed::Destroyed);
+	}
+
+	#[test]
+	fn a_window_resize_settles_without_another_event() {
+		let now = Instant::now();
+		let mut observed = Observed::Size(640, 480);
+		let mut settle = Settle::new(observed);
+		observed.event(&configure(7, 800, 600), 7);
+		assert_eq!(settle.observe(&observed, now), Settled::Waiting);
+		assert_eq!(
+			settle.observe(&observed, now + super::super::settle::HOLD),
+			Settled::Changed
+		);
+		observed.event(&configure(7, 640, 480), 7);
+		assert_eq!(settle.observe(&observed, now), Settled::Open);
+	}
+
+	#[test]
+	fn only_layout_events_invalidate_the_monitor_snapshot() {
+		let screen = Event::RandrScreenChangeNotify(Default::default());
+		let resource = Event::RandrNotify(randr::NotifyEvent {
+			response_type: 0,
+			sequence: 0,
+			sub_code: randr::Notify::RESOURCE_CHANGE,
+			u: randr::ResourceChange::default().into(),
+		});
+		let mut display = Observed::Monitor(true);
+		assert!(!display.event(&Event::Unknown(Vec::new()), 1));
+		assert!(!display.event(&configure(2, 1280, 720), 1));
+		assert!(display.event(&configure(1, 1280, 720), 1));
+		assert!(display.event(&screen, 1));
+		assert!(display.event(&resource, 1));
+		assert_eq!(display, Observed::Monitor(true));
+		let mut window = Observed::Size(640, 480);
+		assert!(!window.event(&screen, 2));
+		assert!(!window.event(&resource, 2));
+	}
+
+	fn bgra() -> PixelFormat {
+		PixelFormat {
+			byte_order: ImageOrder::LSB_FIRST,
+			bits_per_pixel: 32,
+			scanline_pad: 32,
+			red_mask: 0xff0000,
+			green_mask: 0xff00,
+			blue_mask: 0xff,
+		}
+	}
+
+	#[test]
+	fn rgb_reuses_storage_and_overwrites_the_previous_frame() {
+		let format = bgra();
+		let mut rgb = Vec::new();
+		format.rgb(&[0, 0, 255, 0, 0, 255, 0, 0], 2, 1, &mut rgb).unwrap();
+		assert_eq!(rgb, [255, 0, 0, 0, 255, 0]);
+		let ptr = rgb.as_ptr();
+		let capacity = rgb.capacity();
+		format.rgb(&[255, 0, 0, 0, 255, 255, 255, 0], 2, 1, &mut rgb).unwrap();
+		assert_eq!(rgb, [0, 0, 255, 255, 255, 255]);
+		assert_eq!(rgb.as_ptr(), ptr);
+		assert_eq!(rgb.capacity(), capacity);
+	}
+
+	#[test]
+	fn rgb_handles_row_padding_and_big_endian_pixels() {
+		let mut format = bgra();
+		format.byte_order = ImageOrder::MSB_FIRST;
+		format.bits_per_pixel = 24;
+		let mut rgb = Vec::new();
+		assert_eq!(format.required_len(1, 2).unwrap(), 8);
+		format.rgb(&[255, 0, 0, 99, 0, 255, 0, 99], 1, 2, &mut rgb).unwrap();
+		assert_eq!(rgb, [255, 0, 0, 0, 255, 0]);
+		assert!(format.rgb(&[0; 7], 1, 2, &mut rgb).is_err());
+		assert!(format.required_len(0, 1).is_err());
+		format.scanline_pad = 0;
+		assert!(format.required_len(1, 1).is_err());
+	}
+
+	#[test]
+	#[ignore = "conversion benchmark; run explicitly in release mode with --ignored"]
+	fn x11_rgb_workload() {
+		use std::hint::black_box;
+		let format = bgra();
+		for (width, height) in [(640, 480), (1280, 720), (1920, 1080)] {
+			let data = [0x12, 0x34, 0x56, 0].repeat(width * height);
+			let mut rgb = Vec::new();
+			format.rgb(&data, width as u32, height as u32, &mut rgb).unwrap();
+			let expected = rgb.clone();
+			for reuse in [false, true] {
+				let start = Instant::now();
+				for _ in 0..32 {
+					if !reuse {
+						rgb = Vec::new();
+					}
+					format
+						.rgb(black_box(&data), width as u32, height as u32, &mut rgb)
+						.unwrap();
+					black_box(&rgb);
+				}
+				let elapsed = start.elapsed();
+				assert_eq!(rgb, expected);
+				eprintln!("X11 RGB {width}x{height}, reuse={reuse}: 32 frames in {elapsed:?}");
+			}
+		}
 	}
 }

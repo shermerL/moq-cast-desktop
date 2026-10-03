@@ -9,9 +9,15 @@ The local copy carries these Linux product patches on top of that revision:
 - `encode::Options::max_size` resizes display capture before probing and
   encoding, keeping the catalog and encoded output within MoQCast's 1080p
   ceiling.
-- X11 backend selection prioritizes `XDG_SESSION_TYPE`; X11 pixel capture
-  uses MIT-SHM with an XGetImage fallback. XRandR monitor selection and XFixes
-  cursor handling come from upstream.
+- X11 backend selection prioritizes `XDG_SESSION_TYPE`. The local
+  `quest/m2/x11-capture-shm` candidate uses MIT-SHM 1.2 fd-backed buffers on
+  Unix connections, with XGetImage for remote connections or missing support.
+  Shared pixels are converted directly and the RGB buffer is reused. Setup
+  and read failures are reported rather than silently disabling SHM. Monitor
+  layout changes refresh from RandR events, and ConfigureNotify updates window
+  sizes. Window viewability checks remain in place for ancestor unmapping.
+  The candidate is carried as a local patch, not part of the upstream baseline
+  above; XRandR selection and XFixes cursor handling originate upstream.
 - `capture::cleanup::Owner` retains portal acquisition and close tasks outside
   a cancellable capture future. The application stops capture, joins its
   PipeWire thread, and awaits session close acknowledgement before completing
