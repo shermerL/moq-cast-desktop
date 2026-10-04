@@ -1,4 +1,6 @@
-//! One Linux display capture published as the MoQCast screen broadcast.
+//! One Linux capture source published as the MoQCast screen broadcast.
+
+use super::source::CaptureSource;
 
 use moq_tokio::moq_net;
 use tokio::sync::watch;
@@ -7,6 +9,36 @@ use tokio::sync::watch;
 use super::audio;
 #[cfg(target_os = "linux")]
 use crate::screen_path;
+
+#[derive(Clone, Debug, thiserror::Error)]
+pub(crate) enum Failure {
+    #[error("{0}")]
+    Source(String),
+    #[error("{0}")]
+    Other(String),
+}
+
+impl From<anyhow::Error> for Failure {
+    fn from(error: anyhow::Error) -> Self {
+        let unavailable = error.is::<super::source::Unavailable>();
+        #[cfg(target_os = "linux")]
+        let unavailable = unavailable
+            || matches!(
+                error.downcast_ref::<moq_video::Error>(),
+                Some(moq_video::Error::SourceUnavailable(_))
+            );
+        if unavailable {
+            Self::Source(error.to_string())
+        } else {
+            Self::Other(error.to_string())
+        }
+    }
+}
+
+pub(crate) struct Options {
+    pub(crate) system_audio: bool,
+    pub(crate) source: CaptureSource,
+}
 
 /// A prepared screen publication whose future owns capture and encoding.
 pub(crate) struct Publication {
@@ -18,14 +50,16 @@ pub(crate) struct Publication {
     clock: moq_mux::Clock,
     #[cfg(target_os = "linux")]
     system_audio: bool,
+    #[cfg(target_os = "linux")]
+    source: CaptureSource,
 }
 
 impl Publication {
-    /// Create the announced broadcast before opening the system picker.
+    /// Create the announced broadcast before opening the selected source.
     pub(crate) fn prepare(
         origin: &moq_net::origin::Producer,
         local_peer_id: &str,
-        system_audio: bool,
+        options: Options,
     ) -> anyhow::Result<Self> {
         #[cfg(target_os = "linux")]
         {
@@ -41,23 +75,32 @@ impl Publication {
                 broadcast,
                 catalog,
                 clock,
-                system_audio,
+                system_audio: options.system_audio,
+                source: options.source,
             })
         }
 
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (origin, local_peer_id, system_audio);
+            let _ = (origin, local_peer_id, options.system_audio, options.source);
             anyhow::bail!("screen sharing is available only on Linux")
         }
     }
 
-    /// Open the portal picker, capture the selected display, and publish H.264.
+    /// Validate the selected source, open capture, and publish H.264.
     pub(crate) async fn run(self, mut cancelled: watch::Receiver<bool>) -> anyhow::Result<()> {
         #[cfg(target_os = "linux")]
         {
+            if *cancelled.borrow() {
+                return Ok(());
+            }
+            let source = tokio::select! {
+                biased;
+                _ = cancelled.changed() => return Ok(()),
+                source = super::source::prepare(self.source.clone()) => source?,
+            };
             let mut capture = moq_video::capture::Config::default();
-            capture.source = moq_video::capture::Source::Display(None);
+            capture.source = source;
             capture.framerate = Some(moq_video::Rate::new(30, 1).expect("valid frame rate"));
             let cleanup = moq_video::capture::cleanup::Owner::default();
             capture.cleanup = Some(cleanup.handle());
@@ -121,5 +164,22 @@ impl Publication {
 impl Drop for Publication {
     fn drop(&mut self) {
         self.broadcast.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_rejection_remains_distinct_from_other_publication_errors() {
+        let source = anyhow::Error::new(super::super::source::Unavailable("select again".into()));
+        assert!(
+            matches!(Failure::from(source), Failure::Source(message) if message == "select again")
+        );
+        assert!(matches!(
+            Failure::from(anyhow::anyhow!("encoder failed")),
+            Failure::Other(_)
+        ));
     }
 }

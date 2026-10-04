@@ -3,3 +3,4 @@
 #[cfg(target_os = "linux")]
 mod audio;
 pub(crate) mod session;
+pub(crate) mod source;

@@ -198,6 +198,8 @@ pub struct AppSnapshot {
     pub remote_screens: BTreeMap<String, RemoteScreenSnapshot>,
     /// Current screen media lifecycle.
     pub media: MediaState,
+    /// Capture sources available in the current desktop session.
+    pub sources: super::SourceCatalog,
     /// Generation of the current or most recently started remote playback.
     pub view_generation: u64,
     /// Remote audio progress for the current viewer.
