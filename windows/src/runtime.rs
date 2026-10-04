@@ -1132,7 +1132,7 @@ async fn refresh_capture_sources(
     let _ = snapshots.send(snapshot.clone());
     match Publication::enumerate_capture_sources().await {
         Ok(sources) => {
-            snapshot.media.capture_sources_refreshed(sources);
+            snapshot.media.capture_source_enumeration_refreshed(sources);
             true
         }
         Err(_) => {
@@ -1190,9 +1190,6 @@ async fn start_publication(
     let ready = match prepared.configure(&selected, policy).await {
         Ok(ready) => ready,
         Err(error) => {
-            if error == PublicationFailure::CaptureSourceUnavailable {
-                snapshot.media.invalidate_capture_source_selection();
-            }
             snapshot.media.ended(generation, Err(error));
             return;
         }
