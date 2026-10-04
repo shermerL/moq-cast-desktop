@@ -31,12 +31,12 @@ impl VideoEncodingPolicy {
             Self::Compatible if info.width.max(info.height) <= COMPATIBLE_MAX_SCREEN_EDGE => {
                 EncoderRequirement::Auto
             }
-            Self::Compatible => return Err(PublicationFailure::CompatibleDisplayTooLarge),
+            Self::Compatible => return Err(PublicationFailure::CompatibleSourceTooLarge),
             Self::NativeQhdHardware if (info.width, info.height) == (QHD_WIDTH, QHD_HEIGHT) => {
                 EncoderRequirement::HardwareOnly
             }
             Self::NativeQhdHardware => {
-                return Err(PublicationFailure::NativeQhdDisplayRequired);
+                return Err(PublicationFailure::NativeQhdSourceRequired);
             }
         };
         Ok(VideoEncodingPlan {
@@ -92,13 +92,13 @@ struct VideoEncodingPlan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PublicationFailure {
     CaptureUnavailable,
-    NoDisplaysAvailable,
-    DisplaySelectionRequired,
-    DisplaySelectionUnavailable,
+    NoCaptureSourcesAvailable,
+    CaptureSourceSelectionRequired,
+    CaptureSourceUnavailable,
     #[cfg(any(target_os = "windows", test))]
-    CompatibleDisplayTooLarge,
+    CompatibleSourceTooLarge,
     #[cfg(any(target_os = "windows", test))]
-    NativeQhdDisplayRequired,
+    NativeQhdSourceRequired,
     #[cfg(any(target_os = "windows", test))]
     NativeQhdUnavailable,
     Unexpected,
@@ -107,21 +107,23 @@ pub(crate) enum PublicationFailure {
 impl PublicationFailure {
     pub(crate) fn message(self) -> &'static str {
         match self {
-            Self::CaptureUnavailable => "Windows could not open a capturable display.",
-            Self::NoDisplaysAvailable => "No capturable Windows displays are available.",
-            Self::DisplaySelectionRequired => {
-                "Choose an available display before starting screen sharing."
+            Self::CaptureUnavailable => "Windows could not open the selected capture source.",
+            Self::NoCaptureSourcesAvailable => {
+                "No capturable Windows displays or windows are available."
             }
-            Self::DisplaySelectionUnavailable => {
-                "The selected display is no longer available. Choose a display again."
+            Self::CaptureSourceSelectionRequired => {
+                "Choose an available display or window before starting screen sharing."
             }
-            #[cfg(any(target_os = "windows", test))]
-            Self::CompatibleDisplayTooLarge => {
-                "Compatible mode supports native displays with a longest edge up to 1920 pixels."
+            Self::CaptureSourceUnavailable => {
+                "The selected capture source is unavailable. Restore a minimized window or choose a source again."
             }
             #[cfg(any(target_os = "windows", test))]
-            Self::NativeQhdDisplayRequired => {
-                "Native QHD mode currently requires a landscape 2560x1440 display."
+            Self::CompatibleSourceTooLarge => {
+                "Compatible mode supports native sources with a longest edge up to 1920 pixels."
+            }
+            #[cfg(any(target_os = "windows", test))]
+            Self::NativeQhdSourceRequired => {
+                "Native QHD mode currently requires a landscape 2560x1440 capture source."
             }
             #[cfg(any(target_os = "windows", test))]
             Self::NativeQhdUnavailable => {
@@ -133,12 +135,25 @@ impl PublicationFailure {
 }
 
 #[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PublicationErrorKind {
+    NoEncoder,
+    SourceUnavailable,
+    Other,
+}
+
+#[cfg(any(target_os = "windows", test))]
 fn classify_publication_failure(
     policy: VideoEncodingPolicy,
-    no_encoder: bool,
+    error: PublicationErrorKind,
 ) -> PublicationFailure {
-    match (policy, no_encoder) {
-        (VideoEncodingPolicy::NativeQhdHardware, true) => PublicationFailure::NativeQhdUnavailable,
+    match (policy, error) {
+        (VideoEncodingPolicy::NativeQhdHardware, PublicationErrorKind::NoEncoder) => {
+            PublicationFailure::NativeQhdUnavailable
+        }
+        (_, PublicationErrorKind::SourceUnavailable) => {
+            PublicationFailure::CaptureSourceUnavailable
+        }
         _ => PublicationFailure::Unexpected,
     }
 }
@@ -154,7 +169,7 @@ pub(crate) enum MediaPhase {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum DisplayCatalogPhase {
+pub(crate) enum CaptureSourceCatalogPhase {
     #[default]
     Loading,
     Ready,
@@ -162,27 +177,45 @@ pub(crate) enum DisplayCatalogPhase {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(crate) enum CaptureSourceKind {
+    Display,
+    Window,
+}
+
+impl CaptureSourceKind {
+    #[cfg(target_os = "windows")]
+    fn name(self) -> &'static str {
+        match self {
+            Self::Display => "display",
+            Self::Window => "window",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub(crate) struct DisplayChoice {
+pub(crate) struct CaptureSourceChoice {
+    pub(crate) kind: CaptureSourceKind,
     pub(crate) id: String,
     pub(crate) name: String,
+    pub(crate) application: Option<String>,
     pub(crate) width: u32,
     pub(crate) height: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DisplayCatalogSnapshot {
-    pub(crate) phase: DisplayCatalogPhase,
-    pub(crate) choices: Vec<DisplayChoice>,
-    pub(crate) selected: Option<DisplayChoice>,
+pub(crate) struct CaptureSourceCatalogSnapshot {
+    pub(crate) phase: CaptureSourceCatalogPhase,
+    pub(crate) choices: Vec<CaptureSourceChoice>,
+    pub(crate) selected: Option<CaptureSourceChoice>,
     pub(crate) last_error: Option<&'static str>,
     selection_invalidated: bool,
 }
 
-impl Default for DisplayCatalogSnapshot {
+impl Default for CaptureSourceCatalogSnapshot {
     fn default() -> Self {
         Self {
-            phase: DisplayCatalogPhase::Loading,
+            phase: CaptureSourceCatalogPhase::Loading,
             choices: Vec::new(),
             selected: None,
             last_error: None,
@@ -191,30 +224,45 @@ impl Default for DisplayCatalogSnapshot {
     }
 }
 
-impl DisplayCatalogSnapshot {
+impl CaptureSourceCatalogSnapshot {
     fn begin_refresh(&mut self) {
-        self.phase = DisplayCatalogPhase::Loading;
+        self.phase = CaptureSourceCatalogPhase::Loading;
         self.last_error = None;
     }
 
-    fn refreshed(&mut self, choices: Vec<DisplayChoice>) {
+    fn refreshed(&mut self, choices: Vec<CaptureSourceChoice>) {
         let previous = self.selected.take();
         self.phase = if choices.is_empty() {
-            DisplayCatalogPhase::Empty
+            CaptureSourceCatalogPhase::Empty
         } else {
-            DisplayCatalogPhase::Ready
+            CaptureSourceCatalogPhase::Ready
         };
         self.choices = choices;
         self.last_error = None;
 
         match previous {
+            Some(selected) if selected.kind == CaptureSourceKind::Window => {
+                if let Some(current) = self
+                    .choices
+                    .iter()
+                    .find(|current| current.kind == selected.kind && current.id == selected.id)
+                {
+                    self.selected = Some(current.clone());
+                } else {
+                    self.selection_invalidated = true;
+                    self.last_error = Some(
+                        "The selected capture source is no longer available. Choose a source again.",
+                    );
+                }
+            }
             Some(selected) if self.choices.contains(&selected) => {
                 self.selected = Some(selected);
             }
             Some(_) => {
                 self.selection_invalidated = true;
-                self.last_error =
-                    Some("The selected display is no longer available. Choose a display again.");
+                self.last_error = Some(
+                    "The selected capture source is no longer available. Choose a source again.",
+                );
             }
             None if !self.selection_invalidated => {
                 self.selected = self.choices.first().cloned();
@@ -224,12 +272,12 @@ impl DisplayCatalogSnapshot {
     }
 
     fn failed(&mut self) {
-        self.phase = DisplayCatalogPhase::Failed;
-        self.last_error = Some("Windows could not enumerate capturable displays.");
+        self.phase = CaptureSourceCatalogPhase::Failed;
+        self.last_error = Some("Windows could not enumerate capturable displays and windows.");
     }
 
-    fn select(&mut self, choice: &DisplayChoice) -> bool {
-        if self.phase != DisplayCatalogPhase::Ready {
+    fn select(&mut self, choice: &CaptureSourceChoice) -> bool {
+        if self.phase != CaptureSourceCatalogPhase::Ready {
             return false;
         }
         let Some(selected) = self.choices.iter().find(|display| *display == choice) else {
@@ -245,7 +293,7 @@ impl DisplayCatalogSnapshot {
         self.selected = None;
         self.selection_invalidated = true;
         self.last_error =
-            Some("The selected display is no longer available. Choose a display again.");
+            Some("The selected capture source is no longer available. Choose a source again.");
     }
 }
 
@@ -254,7 +302,7 @@ pub(crate) struct MediaSnapshot {
     pub(crate) generation: u64,
     pub(crate) phase: MediaPhase,
     pub(crate) audio: AudioSnapshot,
-    pub(crate) displays: DisplayCatalogSnapshot,
+    pub(crate) capture_sources: CaptureSourceCatalogSnapshot,
     pub(crate) video_encoding: VideoEncodingPolicy,
     pub(crate) path: Option<String>,
     pub(crate) width: Option<u32>,
@@ -268,7 +316,7 @@ impl Default for MediaSnapshot {
             generation: 0,
             phase: MediaPhase::Idle,
             audio: AudioSnapshot::default(),
-            displays: DisplayCatalogSnapshot::default(),
+            capture_sources: CaptureSourceCatalogSnapshot::default(),
             video_encoding: VideoEncodingPolicy::default(),
             path: None,
             width: None,
@@ -279,27 +327,27 @@ impl Default for MediaSnapshot {
 }
 
 impl MediaSnapshot {
-    pub(crate) fn begin_display_refresh(&mut self) -> bool {
+    pub(crate) fn begin_capture_source_refresh(&mut self) -> bool {
         if !matches!(self.phase, MediaPhase::Idle | MediaPhase::Failed) {
             return false;
         }
-        self.displays.begin_refresh();
+        self.capture_sources.begin_refresh();
         true
     }
 
-    pub(crate) fn display_refreshed(&mut self, choices: Vec<DisplayChoice>) {
-        self.displays.refreshed(choices);
+    pub(crate) fn capture_sources_refreshed(&mut self, choices: Vec<CaptureSourceChoice>) {
+        self.capture_sources.refreshed(choices);
     }
 
-    pub(crate) fn display_refresh_failed(&mut self) {
-        self.displays.failed();
+    pub(crate) fn capture_source_refresh_failed(&mut self) {
+        self.capture_sources.failed();
     }
 
-    pub(crate) fn select_display(&mut self, choice: &DisplayChoice) -> bool {
+    pub(crate) fn select_capture_source(&mut self, choice: &CaptureSourceChoice) -> bool {
         if !matches!(self.phase, MediaPhase::Idle | MediaPhase::Failed) {
             return false;
         }
-        let selected = self.displays.select(choice);
+        let selected = self.capture_sources.select(choice);
         if selected {
             self.last_error = None;
         }
@@ -315,8 +363,8 @@ impl MediaSnapshot {
         true
     }
 
-    pub(crate) fn invalidate_display_selection(&mut self) {
-        self.displays.invalidate_selection();
+    pub(crate) fn invalidate_capture_source_selection(&mut self) {
+        self.capture_sources.invalidate_selection();
     }
 
     pub(crate) fn set_video_encoding_policy(&mut self, policy: VideoEncodingPolicy) -> bool {
@@ -424,6 +472,8 @@ pub(crate) struct ReadyPublication {
     #[cfg(target_os = "windows")]
     source: moq_video::capture::Source,
     #[cfg(target_os = "windows")]
+    source_kind: CaptureSourceKind,
+    #[cfg(target_os = "windows")]
     plan: VideoEncodingPlan,
     #[cfg(not(target_os = "windows"))]
     info: PublicationInfo,
@@ -458,6 +508,7 @@ impl ReadyPublication {
 
             tracing::info!(
                 video_policy = self.plan.policy.name(),
+                capture_source_kind = self.source_kind.name(),
                 source_width = self.plan.info.width,
                 source_height = self.plan.info.height,
                 encoder_kind = self.plan.encoder.name(),
@@ -496,10 +547,14 @@ impl ReadyPublication {
                     %error,
                     "screen publication failed"
                 );
-                classify_publication_failure(
-                    self.plan.policy,
-                    matches!(error, moq_video::Error::NoEncoder(_)),
-                )
+                let error = match error {
+                    moq_video::Error::NoEncoder(_) => PublicationErrorKind::NoEncoder,
+                    moq_video::Error::SourceUnavailable(_) => {
+                        PublicationErrorKind::SourceUnavailable
+                    }
+                    _ => PublicationErrorKind::Other,
+                };
+                classify_publication_failure(self.plan.policy, error)
             })
         }
 
@@ -512,26 +567,37 @@ impl ReadyPublication {
 }
 
 impl Publication {
-    pub(crate) async fn enumerate_displays() -> Result<Vec<DisplayChoice>, PublicationFailure> {
+    pub(crate) async fn enumerate_capture_sources()
+    -> Result<Vec<CaptureSourceChoice>, PublicationFailure> {
         #[cfg(target_os = "windows")]
         {
-            moq_video::capture::displays()
-                .await
-                .map(|displays| {
-                    displays
-                        .into_iter()
-                        .map(|display| DisplayChoice {
-                            id: display.id,
-                            name: display.name,
-                            width: display.width,
-                            height: display.height,
-                        })
-                        .collect()
+            let displays = moq_video::capture::displays().await.map_err(|error| {
+                tracing::warn!(%error, "could not enumerate Windows displays");
+                PublicationFailure::CaptureUnavailable
+            })?;
+            let windows = moq_video::capture::windows().await.map_err(|error| {
+                tracing::warn!(%error, "could not enumerate Windows windows");
+                PublicationFailure::CaptureUnavailable
+            })?;
+            Ok(displays
+                .into_iter()
+                .map(|display| CaptureSourceChoice {
+                    kind: CaptureSourceKind::Display,
+                    id: display.id,
+                    name: display.name,
+                    application: None,
+                    width: display.width,
+                    height: display.height,
                 })
-                .map_err(|error| {
-                    tracing::warn!(%error, "could not enumerate Windows displays");
-                    PublicationFailure::CaptureUnavailable
-                })
+                .chain(windows.into_iter().map(|window| CaptureSourceChoice {
+                    kind: CaptureSourceKind::Window,
+                    id: window.id,
+                    name: window.title,
+                    application: Some(window.app),
+                    width: window.width,
+                    height: window.height,
+                }))
+                .collect())
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -570,27 +636,49 @@ impl Publication {
 
     pub(crate) async fn configure(
         self,
-        selected: &DisplayChoice,
+        selected: &CaptureSourceChoice,
         policy: VideoEncodingPolicy,
     ) -> Result<ReadyPublication, PublicationFailure> {
         #[cfg(target_os = "windows")]
         {
-            let displays = moq_video::capture::displays().await.map_err(|error| {
-                tracing::warn!(%error, "could not enumerate Windows displays");
-                PublicationFailure::CaptureUnavailable
-            })?;
-            let display = displays
-                .into_iter()
-                .find(|display| {
-                    display.id == selected.id
-                        && display.name == selected.name
-                        && display.width == selected.width
-                        && display.height == selected.height
-                })
-                .ok_or(PublicationFailure::DisplaySelectionUnavailable)?;
-            let info = PublicationInfo {
-                width: display.width,
-                height: display.height,
+            let (source, info) = match selected.kind {
+                CaptureSourceKind::Display => {
+                    let display = moq_video::capture::displays()
+                        .await
+                        .map_err(|error| {
+                            tracing::warn!(%error, "could not enumerate Windows displays");
+                            PublicationFailure::CaptureUnavailable
+                        })?
+                        .into_iter()
+                        .find(|display| {
+                            display.id == selected.id
+                                && display.name == selected.name
+                                && display.width == selected.width
+                                && display.height == selected.height
+                        })
+                        .ok_or(PublicationFailure::CaptureSourceUnavailable)?;
+                    let info = PublicationInfo {
+                        width: display.width,
+                        height: display.height,
+                    };
+                    (display.source(), info)
+                }
+                CaptureSourceKind::Window => {
+                    let window = moq_video::capture::windows()
+                        .await
+                        .map_err(|error| {
+                            tracing::warn!(%error, "could not enumerate Windows windows");
+                            PublicationFailure::CaptureUnavailable
+                        })?
+                        .into_iter()
+                        .find(|window| window.id == selected.id)
+                        .ok_or(PublicationFailure::CaptureSourceUnavailable)?;
+                    let info = PublicationInfo {
+                        width: window.width,
+                        height: window.height,
+                    };
+                    (window.source(), info)
+                }
             };
             let plan = policy.resolve(info).inspect_err(|error| {
                 tracing::warn!(
@@ -603,7 +691,8 @@ impl Publication {
             })?;
             Ok(ReadyPublication {
                 publication: self,
-                source: display.source(),
+                source,
+                source_kind: selected.kind,
                 plan,
             })
         }
@@ -629,10 +718,23 @@ impl Drop for Publication {
 mod tests {
     use super::*;
 
-    fn display(id: &str, name: &str, width: u32, height: u32) -> DisplayChoice {
-        DisplayChoice {
+    fn window(id: &str, title: &str, app: &str, width: u32, height: u32) -> CaptureSourceChoice {
+        CaptureSourceChoice {
+            kind: CaptureSourceKind::Window,
+            id: id.to_owned(),
+            name: title.to_owned(),
+            application: Some(app.to_owned()),
+            width,
+            height,
+        }
+    }
+
+    fn display(id: &str, name: &str, width: u32, height: u32) -> CaptureSourceChoice {
+        CaptureSourceChoice {
+            kind: CaptureSourceKind::Display,
             id: id.to_owned(),
             name: name.to_owned(),
+            application: None,
             width,
             height,
         }
@@ -644,36 +746,82 @@ mod tests {
         let second = display("display:1", "Display 2", 1280, 720);
         let mut media = MediaSnapshot::default();
 
-        assert!(media.begin_display_refresh());
-        media.display_refreshed(vec![first.clone(), second.clone()]);
-        assert_eq!(media.displays.selected, Some(first.clone()));
+        assert!(media.begin_capture_source_refresh());
+        media.capture_sources_refreshed(vec![first.clone(), second.clone()]);
+        assert_eq!(media.capture_sources.selected, Some(first.clone()));
 
-        assert!(media.select_display(&second));
-        assert!(media.begin_display_refresh());
-        media.display_refreshed(vec![first.clone()]);
-        assert!(media.displays.selected.is_none());
-        assert!(media.displays.last_error.is_some());
+        assert!(media.select_capture_source(&second));
+        assert!(media.begin_capture_source_refresh());
+        media.capture_sources_refreshed(vec![first.clone()]);
+        assert!(media.capture_sources.selected.is_none());
+        assert!(media.capture_sources.last_error.is_some());
 
-        assert!(media.begin_display_refresh());
-        media.display_refreshed(vec![first]);
-        assert!(media.displays.selected.is_none());
+        assert!(media.begin_capture_source_refresh());
+        media.capture_sources_refreshed(vec![first]);
+        assert!(media.capture_sources.selected.is_none());
+    }
+
+    #[test]
+    fn refresh_preserves_an_exact_window_and_invalidates_a_closed_one() {
+        let editor = window("window:7", "Notes", "Editor", 1280, 720);
+        let terminal = window("window:8", "Build", "Terminal", 960, 720);
+        let mut media = MediaSnapshot::default();
+
+        media.capture_sources_refreshed(vec![editor.clone(), terminal]);
+        assert!(media.select_capture_source(&editor));
+
+        assert!(media.begin_capture_source_refresh());
+        let renamed = window("window:7", "Notes (saved)", "Editor", 1024, 768);
+        media.capture_sources_refreshed(vec![renamed.clone()]);
+        assert_eq!(media.capture_sources.selected, Some(renamed));
+
+        assert!(media.begin_capture_source_refresh());
+        media.capture_sources_refreshed(Vec::new());
+        assert!(media.capture_sources.selected.is_none());
+        assert_eq!(
+            media.capture_sources.last_error,
+            Some("The selected capture source is no longer available. Choose a source again.")
+        );
+    }
+
+    #[test]
+    fn source_kind_is_part_of_the_selection_identity() {
+        let display = CaptureSourceChoice {
+            kind: CaptureSourceKind::Display,
+            id: "source:1".to_owned(),
+            name: "Screen".to_owned(),
+            application: None,
+            width: 1920,
+            height: 1080,
+        };
+        let window = CaptureSourceChoice {
+            kind: CaptureSourceKind::Window,
+            application: Some("App".to_owned()),
+            ..display.clone()
+        };
+        let mut media = MediaSnapshot::default();
+
+        media.capture_sources_refreshed(vec![display.clone(), window.clone()]);
+        assert!(media.select_capture_source(&window));
+        assert_eq!(media.capture_sources.selected, Some(window));
+        assert_ne!(display, media.capture_sources.selected.unwrap());
     }
 
     #[test]
     fn display_refresh_requires_an_exact_current_descriptor() {
         let selected = display("display:0", "Display 1", 1920, 1080);
         let mut media = MediaSnapshot::default();
-        media.display_refreshed(vec![selected.clone()]);
-        assert_eq!(media.displays.selected, Some(selected.clone()));
+        media.capture_sources_refreshed(vec![selected.clone()]);
+        assert_eq!(media.capture_sources.selected, Some(selected.clone()));
 
-        media.begin_display_refresh();
-        media.display_refreshed(vec![display("display:0", "Display 2", 2560, 1440)]);
+        media.begin_capture_source_refresh();
+        media.capture_sources_refreshed(vec![display("display:0", "Display 2", 2560, 1440)]);
 
-        assert!(media.displays.selected.is_none());
+        assert!(media.capture_sources.selected.is_none());
         let refreshed = display("display:0", "Display 2", 2560, 1440);
-        assert!(!media.select_display(&selected));
-        assert!(media.select_display(&refreshed));
-        assert_eq!(media.displays.selected, Some(refreshed));
+        assert!(!media.select_capture_source(&selected));
+        assert!(media.select_capture_source(&refreshed));
+        assert_eq!(media.capture_sources.selected, Some(refreshed));
     }
 
     #[test]
@@ -681,12 +829,12 @@ mod tests {
         let first = display("display:0", "Display 1", 1920, 1080);
         let second = display("display:1", "Display 2", 1280, 720);
         let mut media = MediaSnapshot::default();
-        media.display_refreshed(vec![first.clone(), second.clone()]);
+        media.capture_sources_refreshed(vec![first.clone(), second.clone()]);
         let generation = media.begin("peer-a").expect("begin");
 
-        assert!(!media.select_display(&second));
-        assert!(!media.begin_display_refresh());
-        assert_eq!(media.displays.selected, Some(first));
+        assert!(!media.select_capture_source(&second));
+        assert!(!media.begin_capture_source_refresh());
+        assert_eq!(media.capture_sources.selected, Some(first));
 
         assert!(media.started(
             generation,
@@ -695,33 +843,39 @@ mod tests {
                 height: 1080,
             }
         ));
-        assert!(!media.select_display(&second));
-        assert!(!media.begin_display_refresh());
+        assert!(!media.select_capture_source(&second));
+        assert!(!media.begin_capture_source_refresh());
 
         assert_eq!(media.begin_stop(), Some(generation));
-        assert!(!media.select_display(&second));
-        assert!(!media.begin_display_refresh());
+        assert!(!media.select_capture_source(&second));
+        assert!(!media.begin_capture_source_refresh());
         assert!(media.stopped(generation));
-        assert!(media.select_display(&second));
-        assert_eq!(media.displays.selected, Some(second));
+        assert!(media.select_capture_source(&second));
+        assert_eq!(media.capture_sources.selected, Some(second));
     }
 
     #[test]
     fn display_failed_or_empty_refresh_preserves_explicit_retry_semantics() {
         let mut media = MediaSnapshot::default();
-        media.display_refreshed(Vec::new());
-        assert_eq!(media.displays.phase, DisplayCatalogPhase::Empty);
-        assert!(media.displays.selected.is_none());
+        media.capture_sources_refreshed(Vec::new());
+        assert_eq!(
+            media.capture_sources.phase,
+            CaptureSourceCatalogPhase::Empty
+        );
+        assert!(media.capture_sources.selected.is_none());
 
-        media.begin_display_refresh();
-        media.display_refresh_failed();
-        assert_eq!(media.displays.phase, DisplayCatalogPhase::Failed);
-        assert!(media.displays.last_error.is_some());
+        media.begin_capture_source_refresh();
+        media.capture_source_refresh_failed();
+        assert_eq!(
+            media.capture_sources.phase,
+            CaptureSourceCatalogPhase::Failed
+        );
+        assert!(media.capture_sources.last_error.is_some());
 
-        media.begin_display_refresh();
+        media.begin_capture_source_refresh();
         let available = display("display:0", "Display 1", 1920, 1080);
-        media.display_refreshed(vec![available.clone()]);
-        assert_eq!(media.displays.selected, Some(available));
+        media.capture_sources_refreshed(vec![available.clone()]);
+        assert_eq!(media.capture_sources.selected, Some(available));
     }
 
     #[test]
@@ -838,7 +992,7 @@ mod tests {
         ] {
             assert_eq!(
                 qhd.resolve(info),
-                Err(PublicationFailure::NativeQhdDisplayRequired)
+                Err(PublicationFailure::NativeQhdSourceRequired)
             );
         }
         assert!(
@@ -865,16 +1019,32 @@ mod tests {
         assert!(message.contains("hardware H.264"));
         assert!(!message.contains("OpenH264"));
         assert_eq!(
-            classify_publication_failure(VideoEncodingPolicy::NativeQhdHardware, true),
+            classify_publication_failure(
+                VideoEncodingPolicy::NativeQhdHardware,
+                PublicationErrorKind::NoEncoder,
+            ),
             PublicationFailure::NativeQhdUnavailable
         );
         assert_eq!(
-            classify_publication_failure(VideoEncodingPolicy::NativeQhdHardware, false),
+            classify_publication_failure(
+                VideoEncodingPolicy::NativeQhdHardware,
+                PublicationErrorKind::Other,
+            ),
             PublicationFailure::Unexpected
         );
         assert_eq!(
-            classify_publication_failure(VideoEncodingPolicy::Compatible, true),
+            classify_publication_failure(
+                VideoEncodingPolicy::Compatible,
+                PublicationErrorKind::NoEncoder,
+            ),
             PublicationFailure::Unexpected
+        );
+        assert_eq!(
+            classify_publication_failure(
+                VideoEncodingPolicy::Compatible,
+                PublicationErrorKind::SourceUnavailable,
+            ),
+            PublicationFailure::CaptureSourceUnavailable
         );
     }
 

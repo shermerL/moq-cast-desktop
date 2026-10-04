@@ -13,7 +13,10 @@ use moqcast_ui::{
 use crate::{
     audio::AudioPhase,
     diagnostics::DiagnosticsUi,
-    media::{DisplayCatalogPhase, MediaPhase, VideoEncodingPolicy},
+    media::{
+        CaptureSourceCatalogPhase, CaptureSourceChoice, CaptureSourceKind, MediaPhase,
+        VideoEncodingPolicy,
+    },
     playback::{PlaybackFrameIdentity, ViewPhase},
     player::{LivePlayer, PlayerAction, TOOLBAR_HEIGHT},
     remote::ScreenAvailability,
@@ -642,12 +645,14 @@ impl MoqCastApp {
         page_header(
             ui,
             match self.locale {
-                Locale::Chinese => "共享这台电脑的屏幕",
-                Locale::English => "Share this computer's screen",
+                Locale::Chinese => "共享这台电脑的画面",
+                Locale::English => "Share this computer",
             },
             Some(match self.locale {
-                Locale::Chinese => "管理本次共享使用的屏幕来源和系统音频。",
-                Locale::English => "Manage the screen source and system audio used for this share.",
+                Locale::Chinese => "选择一块屏幕或一个窗口，并管理本次共享的系统音频。",
+                Locale::English => {
+                    "Choose a display or window and manage system audio for this share."
+                }
             }),
         );
         section_header(
@@ -658,7 +663,7 @@ impl MoqCastApp {
             },
             None,
         );
-        self.display_source(ui);
+        self.capture_source(ui);
         ui.separator();
         setting_value_row(
             ui,
@@ -667,9 +672,9 @@ impl MoqCastApp {
                 Locale::English => "System audio",
             },
             match self.locale {
-                Locale::Chinese => "可用时随屏幕共享捕获；没有单独开关。",
+                Locale::Chinese => "捕获系统正在播放的声音；选择窗口不会限制为该窗口的声音。",
                 Locale::English => {
-                    "Captured with screen sharing when available; there is no separate switch."
+                    "Captures system output; selecting a window does not isolate that window's audio."
                 }
             },
             share_audio_status(self.locale, self.snapshot.media.audio.phase),
@@ -721,7 +726,7 @@ impl MoqCastApp {
                     ) {
                         "正在观看远端屏幕。停止观看后才能开始共享。"
                     } else {
-                        "开始前会重新核对所选屏幕，并尝试捕获系统音频。"
+                        "开始前会重新核对所选来源，并尝试捕获系统音频。"
                     }
                 }
                 (Locale::English, MediaPhase::Idle) => {
@@ -731,7 +736,7 @@ impl MoqCastApp {
                     ) {
                         "A remote screen is active. Stop watching before sharing."
                     } else {
-                        "The selected display is checked again before sharing starts, together with system audio capture."
+                        "The selected source is checked again before sharing starts, together with system audio capture."
                     }
                 }
             },
@@ -744,8 +749,9 @@ impl MoqCastApp {
                 let enabled = self.snapshot.discovery.is_active()
                     && !self.nearby_turn_off_pending
                     && self.snapshot.local_id.is_some()
-                    && self.snapshot.media.displays.phase == DisplayCatalogPhase::Ready
-                    && self.snapshot.media.displays.selected.is_some()
+                    && self.snapshot.media.capture_sources.phase
+                        == CaptureSourceCatalogPhase::Ready
+                    && self.snapshot.media.capture_sources.selected.is_some()
                     && matches!(
                         self.snapshot.view.phase,
                         ViewPhase::Idle | ViewPhase::Failed
@@ -799,21 +805,22 @@ impl MoqCastApp {
         }
     }
 
-    fn display_source(&mut self, ui: &mut egui::Ui) {
+    fn capture_source(&mut self, ui: &mut egui::Ui) {
         let editable = matches!(
             self.snapshot.media.phase,
             MediaPhase::Idle | MediaPhase::Failed
         );
-        let refreshing = self.snapshot.media.displays.phase == DisplayCatalogPhase::Loading;
+        let refreshing =
+            self.snapshot.media.capture_sources.phase == CaptureSourceCatalogPhase::Loading;
         setting_row(
             ui,
             SettingRowSpec::new(match self.locale {
-                Locale::Chinese => "屏幕来源",
-                Locale::English => "Screen source",
+                Locale::Chinese => "共享来源",
+                Locale::English => "Capture source",
             })
             .description(match self.locale {
-                Locale::Chinese => "开始共享前选择一块当前可用的屏幕。",
-                Locale::English => "Choose one currently available display before sharing.",
+                Locale::Chinese => "开始共享前选择一块当前可用的屏幕或一个窗口。",
+                Locale::English => "Choose an available display or window before sharing.",
             }),
             |ui| {
                 if secondary_button(
@@ -826,49 +833,53 @@ impl MoqCastApp {
                 )
                 .clicked()
                 {
-                    self.send(RuntimeCommand::RefreshDisplays);
+                    self.send(RuntimeCommand::RefreshCaptureSources);
                 }
             },
         );
 
-        match self.snapshot.media.displays.phase {
-            DisplayCatalogPhase::Loading => state_panel(
+        match self.snapshot.media.capture_sources.phase {
+            CaptureSourceCatalogPhase::Loading => state_panel(
                 ui,
                 StatePanelSpec::new(
                     StatePanelKind::Pending,
                     match self.locale {
-                        Locale::Chinese => "正在查找屏幕",
-                        Locale::English => "Finding displays",
+                        Locale::Chinese => "正在查找共享来源",
+                        Locale::English => "Finding capture sources",
                     },
                     match self.locale {
-                        Locale::Chinese => "正在读取 Windows 当前可捕获的显示器。",
-                        Locale::English => "Reading the displays Windows can currently capture.",
+                        Locale::Chinese => "正在读取 Windows 当前可捕获的屏幕和窗口。",
+                        Locale::English => {
+                            "Reading the displays and windows Windows can currently capture."
+                        }
                     },
                 ),
                 |_| {},
             ),
-            DisplayCatalogPhase::Empty => state_panel(
+            CaptureSourceCatalogPhase::Empty => state_panel(
                 ui,
                 StatePanelSpec::new(
                     StatePanelKind::Empty,
                     match self.locale {
-                        Locale::Chinese => "没有可用屏幕",
-                        Locale::English => "No displays available",
+                        Locale::Chinese => "没有可用来源",
+                        Locale::English => "No capture sources available",
                     },
                     match self.locale {
-                        Locale::Chinese => "连接或启用屏幕后刷新列表。",
-                        Locale::English => "Connect or enable a display, then refresh the list.",
+                        Locale::Chinese => "连接屏幕或打开可见窗口后刷新列表。",
+                        Locale::English => {
+                            "Connect a display or open a visible window, then refresh the list."
+                        }
                     },
                 ),
                 |_| {},
             ),
-            DisplayCatalogPhase::Failed => state_panel(
+            CaptureSourceCatalogPhase::Failed => state_panel(
                 ui,
                 StatePanelSpec::new(
                     StatePanelKind::Failed,
                     match self.locale {
-                        Locale::Chinese => "无法读取屏幕",
-                        Locale::English => "Displays unavailable",
+                        Locale::Chinese => "无法读取共享来源",
+                        Locale::English => "Capture sources unavailable",
                     },
                     match self.locale {
                         Locale::Chinese => "检查 Windows 图形环境后重试。",
@@ -877,25 +888,25 @@ impl MoqCastApp {
                 ),
                 |_| {},
             ),
-            DisplayCatalogPhase::Ready => {
-                let choices = self.snapshot.media.displays.choices.clone();
+            CaptureSourceCatalogPhase::Ready => {
+                let choices = self.snapshot.media.capture_sources.choices.clone();
                 let selected = self
                     .snapshot
                     .media
-                    .displays
+                    .capture_sources
                     .selected
                     .as_ref()
-                    .map(|display| display.id.as_str());
+                    .map(|source| (source.kind, source.id.as_str()));
                 let subtitles = choices
                     .iter()
-                    .map(|display| format!("{} × {}", display.width, display.height))
+                    .map(|source| capture_source_subtitle(self.locale, source))
                     .collect::<Vec<_>>();
                 let items = choices
                     .iter()
                     .zip(&subtitles)
-                    .map(|(display, subtitle)| {
-                        let is_selected = selected == Some(display.id.as_str());
-                        DeviceListItemSpec::new(display.clone(), &display.name)
+                    .map(|(source, subtitle)| {
+                        let is_selected = selected == Some((source.kind, source.id.as_str()));
+                        DeviceListItemSpec::new(source.clone(), &source.name)
                             .subtitle(subtitle)
                             .badge(DeviceBadgeSpec::new(
                                 match (self.locale, is_selected) {
@@ -916,9 +927,30 @@ impl MoqCastApp {
                     .collect::<Vec<_>>();
                 if let Some(choice) = device_list(
                     ui,
-                    DeviceListSpec::new(egui::Id::new("windows-capture-displays"), &items),
+                    DeviceListSpec::new(egui::Id::new("windows-capture-sources"), &items),
                 ) {
-                    self.send(RuntimeCommand::SelectDisplay { choice });
+                    self.send(RuntimeCommand::SelectCaptureSource { choice });
+                }
+                if self
+                    .snapshot
+                    .media
+                    .capture_sources
+                    .selected
+                    .as_ref()
+                    .is_some_and(|source| source.kind == CaptureSourceKind::Window)
+                {
+                    ui.label(typography(
+                        match self.locale {
+                            Locale::Chinese => {
+                                "窗口最小化时画面暂停，恢复后继续；关闭窗口会结束共享。调整大小可能重开采集，编码尺寸策略仅在开始共享时检查。"
+                            }
+                            Locale::English => {
+                                "Minimizing pauses window video until it is restored; closing the window ends sharing. Resizing may reopen capture, and encoding size policy is checked only when sharing starts."
+                            }
+                        },
+                        TypographyRole::Help,
+                        COLORS.muted.into(),
+                    ));
                 }
             }
         }
@@ -926,14 +958,14 @@ impl MoqCastApp {
         if !editable {
             ui.label(typography(
                 match self.locale {
-                    Locale::Chinese => "停止共享后才能更改屏幕来源。",
-                    Locale::English => "Stop sharing before changing the screen source.",
+                    Locale::Chinese => "停止共享后才能更改共享来源。",
+                    Locale::English => "Stop sharing before changing the capture source.",
                 },
                 TypographyRole::Help,
                 COLORS.warning.into(),
             ));
         }
-        if let Some(error) = self.snapshot.media.displays.last_error {
+        if let Some(error) = self.snapshot.media.capture_sources.last_error {
             ui.label(typography(
                 error,
                 TypographyRole::Help,
@@ -1277,10 +1309,10 @@ impl MoqCastApp {
         ui.label(typography(
             match (self.locale, current_video_encoding) {
             (Locale::Chinese, VideoEncodingPolicy::Compatible) => {
-                "保持显示器原生尺寸；最长边不超过 1920。编码器自动选择。"
+                "保持所选来源的原生尺寸；开始共享时要求最长边不超过 1920。编码器自动选择。"
             }
             (Locale::English, VideoEncodingPolicy::Compatible) => {
-                "Keeps the display's native size up to a 1920-pixel edge; encoder selection is automatic."
+                "Keeps the selected source's native size; sharing starts only when its longest edge is at most 1920 pixels. Encoder selection is automatic."
             }
             (Locale::Chinese, VideoEncodingPolicy::NativeQhdHardware) => {
                 "请求原生横屏 2560x1440；启动共享时验证硬件 H.264，失败时不会降级。"
@@ -1690,6 +1722,26 @@ fn share_audio_status(locale: Locale, phase: AudioPhase) -> &'static str {
     }
 }
 
+fn capture_source_subtitle(locale: Locale, source: &CaptureSourceChoice) -> String {
+    let dimensions = format!("{} × {}", source.width, source.height);
+    match source.kind {
+        CaptureSourceKind::Display => match locale {
+            Locale::Chinese => format!("屏幕 · {dimensions}"),
+            Locale::English => format!("Display · {dimensions}"),
+        },
+        CaptureSourceKind::Window => {
+            let kind = match locale {
+                Locale::Chinese => "窗口",
+                Locale::English => "Window",
+            };
+            match source.application.as_deref().filter(|app| !app.is_empty()) {
+                Some(app) => format!("{kind} · {app} · {dimensions}"),
+                None => format!("{kind} · {dimensions}"),
+            }
+        }
+    }
+}
+
 fn watch_player_size(available: egui::Vec2) -> egui::Vec2 {
     let available = egui::vec2(available.x.max(1.0), available.y.max(1.0));
     let width = available.x.min(Size::PAGE_MEDIUM_MAX);
@@ -1904,6 +1956,35 @@ mod tests {
 
         visible.screen = ScreenAvailability::Available;
         assert_eq!(peer_status(Locale::Chinese, &visible), "屏幕可观看");
+    }
+
+    #[test]
+    fn capture_source_subtitles_distinguish_displays_and_windows() {
+        let display = CaptureSourceChoice {
+            kind: CaptureSourceKind::Display,
+            id: "display:0".to_owned(),
+            name: "Display 1".to_owned(),
+            application: None,
+            width: 1920,
+            height: 1080,
+        };
+        let window = CaptureSourceChoice {
+            kind: CaptureSourceKind::Window,
+            id: "window:7".to_owned(),
+            name: "Document".to_owned(),
+            application: Some("Editor".to_owned()),
+            width: 1280,
+            height: 720,
+        };
+
+        assert_eq!(
+            capture_source_subtitle(Locale::English, &display),
+            "Display · 1920 × 1080"
+        );
+        assert_eq!(
+            capture_source_subtitle(Locale::Chinese, &window),
+            "窗口 · Editor · 1280 × 720"
+        );
     }
 
     fn assert_size(actual: egui::Vec2, expected: egui::Vec2) {
