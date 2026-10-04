@@ -10,6 +10,7 @@ mod player;
 mod snapshot;
 mod theme;
 
+pub use crate::publish::source::{CaptureSource, SourceCatalog};
 pub use command::UserCommand;
 pub use locale::Locale;
 pub use snapshot::{
@@ -151,6 +152,7 @@ pub struct MoqCastApp {
     selected_peer: Option<String>,
     locale: Locale,
     system_audio: bool,
+    selected_source: Option<CaptureSource>,
     developer_mode: bool,
     local_device_name: String,
     diagnostics: diagnostics::DiagnosticsUi,
@@ -194,6 +196,7 @@ impl MoqCastApp {
             selected_peer: None,
             locale,
             system_audio,
+            selected_source: None,
             developer_mode,
             local_device_name: device::name(),
             diagnostics: diagnostics::DiagnosticsUi::new(diagnostics, detailed_diagnostics),
@@ -423,18 +426,6 @@ impl eframe::App for MoqCastApp {
                                         Some((self.locale.retry(), UserCommand::RetryDiscovery))
                                     }
                                     Page::Nearby => None,
-                                    Page::ScreenShare
-                                        if snapshot.has_mesh_session()
-                                            && snapshot.discovery != DiscoveryState::Error
-                                            && matches!(snapshot.media, MediaState::Idle) =>
-                                    {
-                                        Some((
-                                            self.locale.retry(),
-                                            UserCommand::StartScreenShare {
-                                                system_audio: self.system_audio,
-                                            },
-                                        ))
-                                    }
                                     Page::ScreenShare | Page::Watch | Page::Settings => None,
                                 };
                                 let clicked = components::error_banner(
@@ -463,6 +454,7 @@ impl eframe::App for MoqCastApp {
                                     self.locale,
                                     &snapshot,
                                     &mut self.system_audio,
+                                    &mut self.selected_source,
                                 ),
                                 Page::Watch => match pages::watch::show(
                                     ui,

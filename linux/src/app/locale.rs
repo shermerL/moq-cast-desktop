@@ -226,8 +226,8 @@ impl Locale {
 
     pub(super) fn share_description(self) -> &'static str {
         match self {
-            Self::Chinese => "将本机屏幕共享给附近的 MoQCast 设备。",
-            Self::English => "Share this desktop with nearby MoQCast devices.",
+            Self::Chinese => "选择本机画面，共享给附近的 MoQCast 设备。",
+            Self::English => "Choose a source to share with nearby MoQCast devices.",
         }
     }
 
@@ -261,8 +261,8 @@ impl Locale {
 
     pub(super) fn system_audio_hint(self) -> &'static str {
         match self {
-            Self::Chinese => "同时共享此设备正在播放的声音。",
-            Self::English => "Also share sound playing on this device.",
+            Self::Chinese => "共享此设备的系统声音，不仅是选中窗口的声音。",
+            Self::English => "Share system sound, not just sound from the selected window.",
         }
     }
 
@@ -275,8 +275,8 @@ impl Locale {
 
     pub(super) fn preparing_share(self) -> &'static str {
         match self {
-            Self::Chinese => "正在等待系统选择屏幕…",
-            Self::English => "Waiting for the system screen picker...",
+            Self::Chinese => "正在准备共享画面…",
+            Self::English => "Preparing the selected source...",
         }
     }
 

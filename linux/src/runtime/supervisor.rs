@@ -16,7 +16,8 @@ use crate::app::{
 };
 use crate::network::discovery::{PeerRecord, PeerRegistry, PeerUpdate};
 use crate::network::{peer, server, service};
-use crate::publish::session::Publication;
+use crate::publish::session::{Failure as PublishFailure, Options as PublishOptions, Publication};
+use crate::publish::source::{self, CaptureSource, SourceCatalog};
 
 use super::PlaybackFrame;
 
@@ -127,6 +128,7 @@ enum SessionKey {
 }
 
 enum OperationEvent {
+    CaptureSourcesLoaded(Result<SourceCatalog, String>),
     ServicesStarted {
         generation: u64,
         result: Result<Box<service::Services>, String>,
@@ -154,7 +156,7 @@ enum OperationEvent {
     },
     PublishEnded {
         generation: u64,
-        result: Result<(), String>,
+        result: Result<(), PublishFailure>,
     },
     #[cfg(target_os = "linux")]
     ViewStarted {
@@ -334,7 +336,7 @@ struct PublishCompletion {
 }
 
 impl PublishCompletion {
-    async fn report(mut self, result: Result<(), String>) -> Result<(), String> {
+    async fn report(mut self, result: Result<(), PublishFailure>) -> Result<(), String> {
         // Stop joins this task while the operation queue is not being drained.
         let stopping = *self.cancelled.borrow();
         if !stopping {
@@ -347,7 +349,7 @@ impl PublishCompletion {
                 }) => {},
             }
         }
-        result
+        result.map_err(|error| error.to_string())
     }
 }
 
@@ -418,6 +420,7 @@ struct Supervisor {
     publish: PublishResources,
     view: ViewResources,
     announcements: JoinHandle<()>,
+    source_refresh: Option<JoinHandle<()>>,
     playback_tx: watch::Sender<Option<Arc<PlaybackFrame>>>,
     service_tx: mpsc::Sender<service::Event>,
     service_rx: mpsc::Receiver<service::Event>,
@@ -442,6 +445,7 @@ impl Supervisor {
             publish: PublishResources::default(),
             view: ViewResources::default(),
             announcements,
+            source_refresh: None,
             playback_tx,
             service_tx,
             service_rx,
@@ -478,6 +482,10 @@ impl Supervisor {
             }
         }
 
+        if let Some(task) = self.source_refresh.take() {
+            task.abort();
+            let _ = task.await;
+        }
         self.view.stop().await;
         if let Err(error) = self.publish.stop().await {
             tracing::warn!(
@@ -507,7 +515,11 @@ impl Supervisor {
                 LoopAction::Changed
             }
             UserCommand::RetryDiscovery => self.restart_discovery(),
-            UserCommand::StartScreenShare { system_audio } => self.start_publish(system_audio),
+            UserCommand::RefreshCaptureSources => self.refresh_sources(),
+            UserCommand::StartScreenShare {
+                system_audio,
+                source,
+            } => self.start_publish(system_audio, source),
             UserCommand::StopScreenShare => self.stop_publish().await,
             UserCommand::StartWatching { path } => self.start_view(path),
             UserCommand::SetPlaybackVolume {
@@ -623,7 +635,22 @@ impl Supervisor {
         }));
     }
 
-    fn start_publish(&mut self, system_audio: bool) -> LoopAction {
+    fn refresh_sources(&mut self) -> LoopAction {
+        if self.source_refresh.is_some() || self.state.media != MediaState::Idle {
+            return LoopAction::Unchanged;
+        }
+        self.state.sources = SourceCatalog::Loading;
+        let events = self.operation_tx.clone();
+        self.source_refresh = Some(tokio::spawn(async move {
+            let result = source::enumerate().await;
+            let _ = events
+                .send(OperationEvent::CaptureSourcesLoaded(result))
+                .await;
+        }));
+        LoopAction::Changed
+    }
+
+    fn start_publish(&mut self, system_audio: bool, source: CaptureSource) -> LoopAction {
         if let Err(error) = self.state.begin_publish() {
             self.state.last_error = Some(error.to_string());
             return LoopAction::Changed;
@@ -635,16 +662,22 @@ impl Supervisor {
             return LoopAction::Changed;
         };
 
-        let publication =
-            match Publication::prepare(&self.publish_origin, &local_peer_id, system_audio) {
-                Ok(publication) => publication,
-                Err(error) => {
-                    self.state
-                        .fail_publish(error.to_string())
-                        .expect("publication preparation was active");
-                    return LoopAction::Changed;
-                }
-            };
+        let publication = match Publication::prepare(
+            &self.publish_origin,
+            &local_peer_id,
+            PublishOptions {
+                system_audio,
+                source,
+            },
+        ) {
+            Ok(publication) => publication,
+            Err(error) => {
+                self.state
+                    .fail_publish(error.to_string())
+                    .expect("publication preparation was active");
+                return LoopAction::Changed;
+            }
+        };
 
         let generation = self.publish.advance();
         let events = self.operation_tx.clone();
@@ -654,7 +687,7 @@ impl Supervisor {
             let result = publication
                 .run(cancelled.clone())
                 .await
-                .map_err(|error| error.to_string());
+                .map_err(PublishFailure::from);
             PublishCompletion {
                 generation,
                 events,
@@ -842,6 +875,14 @@ impl Supervisor {
 
     async fn handle_operation_event(&mut self, event: OperationEvent) -> LoopAction {
         match event {
+            OperationEvent::CaptureSourcesLoaded(result) => {
+                self.source_refresh = None;
+                self.state.sources = match result {
+                    Ok(catalog) => catalog,
+                    Err(error) => SourceCatalog::Failed(error),
+                };
+                LoopAction::Changed
+            }
             OperationEvent::ServicesStarted { generation, result } => {
                 if generation != self.discovery.generation || !self.state.discovery.is_active() {
                     return LoopAction::Unchanged;
@@ -926,9 +967,12 @@ impl Supervisor {
                         self.state.end_publish().expect("current publication ended");
                     }
                     Err(error) => {
-                        tracing::warn!(stage = "publish", error, "screen publication ended");
+                        tracing::warn!(stage = "publish", %error, "screen publication ended");
+                        if let PublishFailure::Source(message) = &error {
+                            self.state.sources = SourceCatalog::Failed(message.clone());
+                        }
                         self.state
-                            .fail_publish(error)
+                            .fail_publish(error.to_string())
                             .expect("current publication failed");
                     }
                 }
@@ -1447,6 +1491,8 @@ mod tests {
         RemoteAudioSnapshot, TransportState, UserCommand,
     };
     use crate::network::service;
+    use crate::publish::session::Failure as PublishFailure;
+    use crate::publish::source::{CaptureSource, SourceCatalog};
 
     use super::{
         DISCOVERY_RETRY_LIMIT, DiscoveryRetryBudget, OperationEvent, PEER_RETRY_LIMIT,
@@ -1475,6 +1521,77 @@ mod tests {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 4443),
             "proof",
         )
+    }
+
+    #[tokio::test]
+    async fn rejected_source_invalidates_catalog_before_retry() {
+        let mut supervisor = supervisor();
+        let selected = CaptureSource::Display {
+            id: "x11:0".into(),
+            name: "DP-1".into(),
+            width: 1920,
+            height: 1080,
+        };
+        supervisor.state.sources = SourceCatalog::Ready(vec![selected.clone()]);
+        supervisor.state.media = MediaState::Publishing;
+        supervisor.publish.generation = 7;
+        supervisor
+            .handle_operation_event(OperationEvent::PublishEnded {
+                generation: 6,
+                result: Err(PublishFailure::Source("stale failure".into())),
+            })
+            .await;
+        assert!(matches!(supervisor.state.sources, SourceCatalog::Ready(_)));
+        supervisor
+            .handle_operation_event(OperationEvent::PublishEnded {
+                generation: 7,
+                result: Err(PublishFailure::Other("encoder failed".into())),
+            })
+            .await;
+        assert!(matches!(supervisor.state.sources, SourceCatalog::Ready(_)));
+        supervisor.state.media = MediaState::Publishing;
+        supervisor
+            .handle_operation_event(OperationEvent::PublishEnded {
+                generation: 7,
+                result: Err(PublishFailure::Source(
+                    "The selected source is unavailable. Refresh and select again.".into(),
+                )),
+            })
+            .await;
+        assert!(matches!(supervisor.state.sources, SourceCatalog::Failed(_)));
+        assert_eq!(supervisor.state.sources.selected(Some(&selected)), None);
+        assert_eq!(supervisor.state.media, MediaState::Idle);
+    }
+
+    #[tokio::test]
+    async fn source_refresh_is_rejected_while_media_is_active() {
+        let (playback, _) = watch::channel(None);
+        let mut supervisor = Supervisor::new(playback);
+        supervisor.state.media = MediaState::Publishing;
+        assert!(matches!(
+            supervisor.refresh_sources(),
+            super::LoopAction::Unchanged
+        ));
+        assert!(supervisor.source_refresh.is_none());
+        assert_eq!(supervisor.state.sources, super::SourceCatalog::Unloaded);
+        supervisor.announcements.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_source_refresh_cannot_leave_a_stale_catalog_usable() {
+        let (playback, _) = watch::channel(None);
+        let mut supervisor = Supervisor::new(playback);
+        supervisor.state.sources = super::SourceCatalog::Loading;
+        supervisor
+            .handle_operation_event(OperationEvent::CaptureSourcesLoaded(Err(
+                "display unavailable".into(),
+            )))
+            .await;
+        assert_eq!(
+            supervisor.state.sources,
+            super::SourceCatalog::Failed("display unavailable".into())
+        );
+        supervisor.announcements.abort();
     }
 
     #[tokio::test]
@@ -1525,7 +1642,7 @@ mod tests {
                 events,
                 cancelled,
             }
-            .report(Err("close failed".to_owned())),
+            .report(Err(PublishFailure::Other("close failed".to_owned()))),
         );
         tokio::task::yield_now().await;
         assert!(!task.is_finished());

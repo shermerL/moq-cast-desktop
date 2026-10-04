@@ -1,5 +1,7 @@
 //! Commands sent from the UI to the background runtime.
 
+use super::CaptureSource;
+
 /// A user request handled by the runtime resource owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UserCommand {
@@ -9,8 +11,13 @@ pub enum UserCommand {
     StopDiscovery,
     /// Restart LAN discovery and its listener after a visible failure.
     RetryDiscovery,
-    /// Open the system picker and begin screen publishing.
-    StartScreenShare { system_audio: bool },
+    /// Refresh available capture sources without opening the system picker.
+    RefreshCaptureSources,
+    /// Begin publishing the selected source.
+    StartScreenShare {
+        system_audio: bool,
+        source: CaptureSource,
+    },
     /// Stop the current screen publication while keeping the peer connected.
     StopScreenShare,
     /// Begin viewing one announced remote screen.
