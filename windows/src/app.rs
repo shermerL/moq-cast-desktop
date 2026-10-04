@@ -965,6 +965,13 @@ impl MoqCastApp {
                 COLORS.warning.into(),
             ));
         }
+        if let Some(warning) = self.snapshot.media.capture_sources.warning {
+            ui.label(typography(
+                warning,
+                TypographyRole::Help,
+                COLORS.warning.into(),
+            ));
+        }
         if let Some(error) = self.snapshot.media.capture_sources.last_error {
             ui.label(typography(
                 error,

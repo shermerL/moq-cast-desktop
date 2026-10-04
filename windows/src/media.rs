@@ -8,6 +8,9 @@ use crate::{
 };
 
 pub(crate) const COMPATIBLE_MAX_SCREEN_EDGE: u32 = 1920;
+#[cfg(any(target_os = "windows", test))]
+const WINDOW_ENUMERATION_WARNING: &str =
+    "Windows could not enumerate capturable windows. Any listed displays remain available.";
 
 #[cfg(any(target_os = "windows", test))]
 const QHD_WIDTH: u32 = 2560;
@@ -208,6 +211,7 @@ pub(crate) struct CaptureSourceCatalogSnapshot {
     pub(crate) phase: CaptureSourceCatalogPhase,
     pub(crate) choices: Vec<CaptureSourceChoice>,
     pub(crate) selected: Option<CaptureSourceChoice>,
+    pub(crate) warning: Option<&'static str>,
     pub(crate) last_error: Option<&'static str>,
     selection_invalidated: bool,
 }
@@ -218,6 +222,7 @@ impl Default for CaptureSourceCatalogSnapshot {
             phase: CaptureSourceCatalogPhase::Loading,
             choices: Vec::new(),
             selected: None,
+            warning: None,
             last_error: None,
             selection_invalidated: false,
         }
@@ -227,10 +232,11 @@ impl Default for CaptureSourceCatalogSnapshot {
 impl CaptureSourceCatalogSnapshot {
     fn begin_refresh(&mut self) {
         self.phase = CaptureSourceCatalogPhase::Loading;
+        self.warning = None;
         self.last_error = None;
     }
 
-    fn refreshed(&mut self, choices: Vec<CaptureSourceChoice>) {
+    fn refreshed(&mut self, choices: Vec<CaptureSourceChoice>, warning: Option<&'static str>) {
         let previous = self.selected.take();
         self.phase = if choices.is_empty() {
             CaptureSourceCatalogPhase::Empty
@@ -238,6 +244,7 @@ impl CaptureSourceCatalogSnapshot {
             CaptureSourceCatalogPhase::Ready
         };
         self.choices = choices;
+        self.warning = warning;
         self.last_error = None;
 
         match previous {
@@ -273,6 +280,7 @@ impl CaptureSourceCatalogSnapshot {
 
     fn failed(&mut self) {
         self.phase = CaptureSourceCatalogPhase::Failed;
+        self.warning = None;
         self.last_error = Some("Windows could not enumerate capturable displays and windows.");
     }
 
@@ -294,6 +302,30 @@ impl CaptureSourceCatalogSnapshot {
         self.selection_invalidated = true;
         self.last_error =
             Some("The selected capture source is no longer available. Choose a source again.");
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CaptureSourceEnumeration {
+    choices: Vec<CaptureSourceChoice>,
+    warning: Option<&'static str>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn combine_capture_sources(
+    mut displays: Vec<CaptureSourceChoice>,
+    windows: Result<Vec<CaptureSourceChoice>, PublicationFailure>,
+) -> CaptureSourceEnumeration {
+    let warning = match windows {
+        Ok(mut windows) => {
+            displays.append(&mut windows);
+            None
+        }
+        Err(_) => Some(WINDOW_ENUMERATION_WARNING),
+    };
+    CaptureSourceEnumeration {
+        choices: displays,
+        warning,
     }
 }
 
@@ -335,8 +367,17 @@ impl MediaSnapshot {
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn capture_sources_refreshed(&mut self, choices: Vec<CaptureSourceChoice>) {
-        self.capture_sources.refreshed(choices);
+        self.capture_sources.refreshed(choices, None);
+    }
+
+    pub(crate) fn capture_source_enumeration_refreshed(
+        &mut self,
+        enumeration: CaptureSourceEnumeration,
+    ) {
+        self.capture_sources
+            .refreshed(enumeration.choices, enumeration.warning);
     }
 
     pub(crate) fn capture_source_refresh_failed(&mut self) {
@@ -361,10 +402,6 @@ impl MediaSnapshot {
         self.phase = MediaPhase::Failed;
         self.last_error = Some(failure.message());
         true
-    }
-
-    pub(crate) fn invalidate_capture_source_selection(&mut self) {
-        self.capture_sources.invalidate_selection();
     }
 
     pub(crate) fn set_video_encoding_policy(&mut self, policy: VideoEncodingPolicy) -> bool {
@@ -443,6 +480,9 @@ impl MediaSnapshot {
                 self.height = None;
             }
             Err(failure) => {
+                if failure == PublicationFailure::CaptureSourceUnavailable {
+                    self.capture_sources.invalidate_selection();
+                }
                 self.phase = MediaPhase::Failed;
                 self.last_error = Some(failure.message());
             }
@@ -568,18 +608,14 @@ impl ReadyPublication {
 
 impl Publication {
     pub(crate) async fn enumerate_capture_sources()
-    -> Result<Vec<CaptureSourceChoice>, PublicationFailure> {
+    -> Result<CaptureSourceEnumeration, PublicationFailure> {
         #[cfg(target_os = "windows")]
         {
             let displays = moq_video::capture::displays().await.map_err(|error| {
                 tracing::warn!(%error, "could not enumerate Windows displays");
                 PublicationFailure::CaptureUnavailable
             })?;
-            let windows = moq_video::capture::windows().await.map_err(|error| {
-                tracing::warn!(%error, "could not enumerate Windows windows");
-                PublicationFailure::CaptureUnavailable
-            })?;
-            Ok(displays
+            let displays = displays
                 .into_iter()
                 .map(|display| CaptureSourceChoice {
                     kind: CaptureSourceKind::Display,
@@ -589,15 +625,27 @@ impl Publication {
                     width: display.width,
                     height: display.height,
                 })
-                .chain(windows.into_iter().map(|window| CaptureSourceChoice {
-                    kind: CaptureSourceKind::Window,
-                    id: window.id,
-                    name: window.title,
-                    application: Some(window.app),
-                    width: window.width,
-                    height: window.height,
-                }))
-                .collect())
+                .collect();
+            let windows = moq_video::capture::windows()
+                .await
+                .map(|windows| {
+                    windows
+                        .into_iter()
+                        .map(|window| CaptureSourceChoice {
+                            kind: CaptureSourceKind::Window,
+                            id: window.id,
+                            name: window.title,
+                            application: Some(window.app),
+                            width: window.width,
+                            height: window.height,
+                        })
+                        .collect()
+                })
+                .map_err(|error| {
+                    tracing::warn!(%error, "could not enumerate Windows windows");
+                    PublicationFailure::CaptureUnavailable
+                });
+            Ok(combine_capture_sources(displays, windows))
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -909,6 +957,77 @@ mod tests {
         assert!(current > old);
         assert!(!media.ended(old, Err(PublicationFailure::Unexpected)));
         assert_eq!(media.phase, MediaPhase::Preparing);
+    }
+
+    #[test]
+    fn source_unavailable_invalidates_only_the_current_publication_selection() {
+        let selected = window("window:7", "Notes", "Editor", 1280, 720);
+        let mut media = MediaSnapshot::default();
+        media.capture_sources_refreshed(vec![selected.clone()]);
+
+        let old = media.begin("peer-a").expect("old");
+        media.phase = MediaPhase::Failed;
+        let current = media.begin("peer-a").expect("current");
+
+        assert!(!media.ended(old, Err(PublicationFailure::CaptureSourceUnavailable)));
+        assert_eq!(media.capture_sources.selected, Some(selected.clone()));
+
+        assert!(media.started(
+            current,
+            PublicationInfo {
+                width: selected.width,
+                height: selected.height,
+            }
+        ));
+        assert!(media.ended(current, Err(PublicationFailure::CaptureSourceUnavailable)));
+        assert!(media.capture_sources.selected.is_none());
+
+        assert!(media.begin_capture_source_refresh());
+        media.capture_sources_refreshed(vec![selected.clone()]);
+        assert!(media.capture_sources.selected.is_none());
+        assert!(media.select_capture_source(&selected));
+    }
+
+    #[test]
+    fn failed_window_enumeration_keeps_displays_and_drops_window_selection() {
+        let display = display("display:0", "Display 1", 1920, 1080);
+        let window = window("window:7", "Notes", "Editor", 1280, 720);
+        let partial = combine_capture_sources(
+            vec![display.clone()],
+            Err(PublicationFailure::CaptureUnavailable),
+        );
+
+        let mut display_selected = MediaSnapshot::default();
+        display_selected.capture_sources_refreshed(vec![display.clone(), window.clone()]);
+        assert!(display_selected.select_capture_source(&display));
+        display_selected.capture_source_enumeration_refreshed(partial.clone());
+        assert_eq!(
+            display_selected.capture_sources.phase,
+            CaptureSourceCatalogPhase::Ready
+        );
+        assert_eq!(
+            display_selected.capture_sources.choices,
+            vec![display.clone()]
+        );
+        assert_eq!(
+            display_selected.capture_sources.selected,
+            Some(display.clone())
+        );
+        assert_eq!(
+            display_selected.capture_sources.warning,
+            Some(WINDOW_ENUMERATION_WARNING)
+        );
+
+        let mut window_selected = MediaSnapshot::default();
+        window_selected.capture_sources_refreshed(vec![display.clone(), window.clone()]);
+        assert!(window_selected.select_capture_source(&window));
+        window_selected.capture_source_enumeration_refreshed(partial);
+        assert_eq!(window_selected.capture_sources.choices, vec![display]);
+        assert!(window_selected.capture_sources.selected.is_none());
+        assert_eq!(
+            window_selected.capture_sources.warning,
+            Some(WINDOW_ENUMERATION_WARNING)
+        );
     }
 
     #[test]
