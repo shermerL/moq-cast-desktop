@@ -268,8 +268,8 @@ impl Locale {
 
     pub(super) fn share_local_screen(self) -> &'static str {
         match self {
-            Self::Chinese => "共享本机屏幕",
-            Self::English => "Share this screen",
+            Self::Chinese => "共享本机画面",
+            Self::English => "Share a screen or window",
         }
     }
 
@@ -282,8 +282,8 @@ impl Locale {
 
     pub(super) fn sharing_screen(self) -> &'static str {
         match self {
-            Self::Chinese => "正在共享屏幕",
-            Self::English => "Sharing your screen",
+            Self::Chinese => "正在共享画面",
+            Self::English => "Sharing the selected source",
         }
     }
 

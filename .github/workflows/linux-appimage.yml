@@ -126,6 +126,13 @@ jobs:
         working-directory: linux
         run: cargo test --locked
 
+      - name: Test Linux capture source policy
+        working-directory: linux
+        run: |
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::tests::linux_application_capture_is_refused_without_opening_a_backend -- --exact --list |
+            grep -Fq 'capture::tests::linux_application_capture_is_refused_without_opening_a_backend: test'
+          cargo test --locked -p moq-video --no-default-features --features capture,nvidia,openh264,pipewire --lib capture::tests::linux_application_capture_is_refused_without_opening_a_backend -- --exact
+
       - name: Test vendored video capture lifecycle and sizing
         working-directory: linux
         run: |

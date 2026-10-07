@@ -118,6 +118,8 @@ pub enum Source {
 
 	/// Every window belonging to one application, by the id [`apps`] reports
 	/// (a bundle identifier). Windows that open later are included. macOS only.
+	/// Linux deliberately supports screens and individual windows, not whole
+	/// applications; use a window source or the system portal instead.
 	App(String),
 }
 
@@ -504,7 +506,13 @@ pub async fn open(config: &Config) -> Result<Stream, Error> {
 			{
 				screencapture::open_app(config, id).await
 			}
-			#[cfg(not(target_os = "macos"))]
+			#[cfg(target_os = "linux")]
+			{
+				Err(Error::Unsupported(
+					"whole-application capture on Linux; select a screen or a single window instead".into(),
+				))
+			}
+			#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 			{
 				Err(Error::Unsupported("application capture".to_string()))
 			}
@@ -699,6 +707,19 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[cfg(target_os = "linux")]
+	#[tokio::test]
+	async fn linux_application_capture_is_refused_without_opening_a_backend() {
+		let config = Config {
+			source: Source::App("org.example.App".into()),
+			..Config::default()
+		};
+		match open(&config).await {
+			Err(Error::Unsupported(message)) => assert!(message.contains("single window")),
+			_ => panic!("whole-application capture must not open a window or screen implicitly"),
+		}
+	}
 
 	#[test]
 	fn camera_selectors_name_their_backend() {

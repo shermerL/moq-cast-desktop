@@ -23,10 +23,13 @@ Per-platform, picked at compile time:
   application), yielding zero-copy `CVPixelBuffer` surfaces straight to
   VideoToolbox.
 - **Linux**: native V4L2 (camera; YUYV resampled, MJPEG via `zune-jpeg`) and
-  xdg-desktop-portal + PipeWire on Wayland (display; behind the `pipewire`
-  feature), with native X11 monitor/window selection and capture as the X11
-  fallback. The Wayland picker dialog chooses the screen, and the portal's
-  restore token is reused so demand-driven reopens don't re-prompt.
+  xdg-desktop-portal + PipeWire on Wayland (screen or single window; behind
+  the `pipewire` feature), with native X11 monitor/window selection and capture
+  as the X11 fallback. In this local vendor, `Source::Portal` delegates selection
+  to the system picker. Clones of its `portal::Selection` reuse authorization
+  across demand-driven reopens; construct a new selection to prompt again.
+  Whole-application capture is deliberately unsupported on Linux: a single
+  window does not include the application's other or subsequently opened windows.
 - **Windows**: native Media Foundation (camera; `IMFSourceReader`) and DXGI
   Desktop Duplication (display), plus GDI single-window capture. Both convert
   BGRA to CPU I420 and use the ids returned by the enumerators.
@@ -34,8 +37,8 @@ Per-platform, picked at compile time:
 `capture::cameras()` lists AVFoundation, V4L2, or Media Foundation cameras with
 identifiers accepted by `capture::Source::Camera`. `capture::displays()` does
 the same for macOS, Windows, and X11 displays. `capture::windows()` lists macOS,
-Windows, and X11 windows. Wayland display selection stays in the desktop portal
-picker, which does not expose a stable display identifier.
+Windows, and X11 windows. Wayland screen/window selection stays in the desktop
+portal picker, which does not expose a window list or a stable display selector.
 
 Embedded applications can consume raw capture without creating a MoQ
 broadcast:

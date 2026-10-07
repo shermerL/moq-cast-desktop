@@ -65,6 +65,12 @@ pub(in crate::app) fn show(
                     "点击开始共享后，在系统弹窗中选择来源。停止后可重新选择。",
                     "Start sharing to choose a source in the system picker. Stop to choose again.",
                 ));
+                if *selected_source == Some(CaptureSource::PortalWindow) {
+                    ui.label(text(
+                        "仅共享选中的窗口，不包含该应用的其他窗口。",
+                        "Only the selected window is shared, not the application's other windows.",
+                    ));
+                }
             }
             SourceCatalog::Failed(error) => {
                 *selected_source = None;
