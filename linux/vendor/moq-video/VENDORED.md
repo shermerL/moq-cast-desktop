@@ -6,6 +6,16 @@ source_path = `rs/moq-video`
 
 The local copy carries these Linux product patches on top of that revision:
 
+- `capture::Source::Portal` requests either one screen or one window without
+  changing `Source::Display` or X11 window-ID semantics. `portal::Selection`
+  owns the single-use restore token for one publication; config clones share
+  it during demand-driven reopens, while a fresh Desktop Start creates a new
+  selection. Capability and returned source-type checks reject unsupported,
+  ambiguous, or mismatched grants. Revocation clears only the affected grant.
+  Source-selection tests run in the application test suite. Real GNOME/KDE
+  Wayland window capture remains unverified. This is a Desktop-only patch,
+  not an upstream API proposal or completion of the Linux capture parity quest.
+
 - `encode::Options::max_size` resizes display capture before probing and
   encoding, keeping the catalog and encoded output within MoQCast's 1080p
   ceiling.
@@ -38,7 +48,7 @@ The upstream revision also includes native camera mode selection, capture-clock
 fixtures, capture-clock reanchoring, V4L2/PipeWire camera deduplication, encoder
 flush timing, and the NVDEC CUDA-context lifetime fix. The
 local cleanup scope is retained across the shared screen/camera capture loop;
-the application still exposes screen sharing only.
+the application exposes screen and single-window sharing through the portal.
 
 The upstream revision already provides primary-display XRandR selection,
 XFixes cursor blending, Frame conversion, stable PipeWire transfer constants,

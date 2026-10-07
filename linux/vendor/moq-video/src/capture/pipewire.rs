@@ -1,7 +1,7 @@
 //! Screen and camera capture via PipeWire (Linux, Wayland and X11).
 //!
 //! The ScreenCast portal owns screen selection: [`open`] pops the compositor's
-//! picker dialog, the user chooses a monitor, and the portal hands us a PipeWire
+//! picker dialog, the user chooses a screen or window, and the portal hands us a PipeWire
 //! fd + node id. Cameras are PipeWire nodes too, reached as described in
 //! [`camera`]. For either, a dedicated thread then runs the PipeWire main loop,
 //! forwarding DMA-BUF frames without copying when the producer offers them and
@@ -12,11 +12,9 @@
 //! Two screen quirks worth knowing:
 //! - `publish_capture` releases the capture while unwatched and reopens it on
 //!   demand. A fresh portal session would re-prompt the picker every time, so the
-//!   portal's restore token is kept in a process-wide slot and replayed on the
-//!   next [`open`], which restores the same grant without a dialog (on
-//!   compositors that support persistence). The token is forgotten when the
-//!   compositor ends the stream (the user hit "stop sharing"), so a revoked
-//!   grant is asked for again rather than silently resumed.
+//!   portal's restore token belongs to a logical source selection. Config clones
+//!   reuse it on demand; a new Desktop publication starts with a fresh selection.
+//!   Revocation clears only that selection's grant.
 //! - Compositors only deliver frames on damage, so a static screen would starve
 //!   the encoder. A loop timer re-emits the last frame whenever a frame interval
 //!   passes without a fresh one, mirroring the Windows Desktop Duplication pacing.
@@ -26,7 +24,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -40,6 +38,7 @@ use spa::param::video::{VideoFormat, VideoInfoRaw};
 use super::channel::FrameChannel;
 use super::cleanup;
 use super::mode::Request;
+use super::portal;
 use super::pump::Geometry;
 use super::{Config, Stream};
 use crate::frame::{DmaBuf, DmaBufFrame, DmaBufPlane, DrmFormat, I420, Surface, wait_dma_buf_readable};
@@ -60,10 +59,9 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 /// A missing D-Bus acknowledgement is an explicit cleanup failure, not success.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The portal restore token from the last grant, replayed on the next [`open`]
-/// so a demand-driven reopen skips the picker dialog. Process-wide because the
-/// capture session (and its `Stream`) is torn down between opens.
-static RESTORE_TOKEN: Mutex<Option<String>> = Mutex::new(None);
+// Preserve the legacy Display entry point; Desktop uses an explicit selection
+// per publication instead of this process-wide screen selection.
+static DISPLAY: LazyLock<portal::Selection> = LazyLock::new(|| portal::Selection::new(portal::Kind::Screen));
 
 fn err(ctx: &str, e: impl std::fmt::Display) -> Error {
 	Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
@@ -77,14 +75,19 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 		tracing::debug!(%device, "portal screen capture ignores the device selector; the picker owns selection");
 	}
 
+	open_selection(config, &DISPLAY).await
+}
+
+pub(super) async fn open_selection(config: &Config, selection: &portal::Selection) -> Result<Stream, Error> {
 	let cleanup = config.cleanup.clone().unwrap_or_default();
-	let (node_id, fd, session) = portal_negotiate(config.cursor, &cleanup).await?;
+	let (node_id, fd, session) = portal_negotiate(config.cursor, &cleanup, selection).await?;
 	let mut config = config.clone();
 	config.cleanup = Some(cleanup);
 	start(
 		&config,
 		Capture {
 			kind: Kind::Screen,
+			selection: Some(selection.clone()),
 			remote: Some(fd),
 			target: Target::Node(node_id),
 			label: format!("pipewire:{node_id}"),
@@ -97,6 +100,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 /// What a capture loop streams, and where it finds it.
 struct Capture {
 	kind: Kind,
+	selection: Option<portal::Selection>,
 	/// A portal's PipeWire remote, or `None` for the session's own socket.
 	remote: Option<OwnedFd>,
 	target: Target,
@@ -145,6 +149,7 @@ async fn start(config: &Config, capture: Capture, session: Option<cleanup::Relea
 	let handle = std::thread::spawn({
 		let chan = chan.clone();
 		let cleanup = cleanup.clone();
+		let selection = capture.selection.clone();
 		move || {
 			let state = Rc::new(RefCell::new(State {
 				cleanup,
@@ -169,8 +174,8 @@ async fn start(config: &Config, capture: Capture, session: Option<cleanup::Relea
 			}) {
 				// Surface a setup failure through the awaiting `open`; a mid-stream
 				// failure ends this publication rather than opening another picker.
-				if kind == Kind::Screen {
-					*RESTORE_TOKEN.lock().unwrap() = None;
+				if let Some(selection) = &selection {
+					selection.replace_restore(None);
 				}
 				state
 					.borrow()
@@ -242,11 +247,27 @@ async fn start(config: &Config, capture: Capture, session: Option<cleanup::Relea
 	))
 }
 
-/// Ask the ScreenCast portal for a monitor: create a session, (re)select the
+/// Ask the ScreenCast portal for the requested source type: create a session, (re)select the
 /// source, and start it, returning the PipeWire node to stream, the fd of the
 /// portal's PipeWire remote, and a guard that closes the session on drop.
-async fn portal_negotiate(cursor: bool, cleanup: &cleanup::Handle) -> Result<(u32, OwnedFd, cleanup::Release), Error> {
+async fn portal_negotiate(
+	cursor: bool,
+	cleanup: &cleanup::Handle,
+	selection: &portal::Selection,
+) -> Result<(u32, OwnedFd, cleanup::Release), Error> {
 	let proxy = Arc::new(Screencast::new().await.map_err(|e| err("screencast portal", e))?);
+	let available = proxy
+		.available_source_types()
+		.await
+		.map_err(|e| err("portal source types", e))?;
+	selection
+		.kind()
+		.validate(available.bits())
+		.map_err(|e| Error::Unsupported(e.into()))?;
+	let requested = match selection.kind() {
+		portal::Kind::Screen => SourceType::Monitor,
+		portal::Kind::Window => SourceType::Window,
+	};
 	let (release, released) = cleanup::Release::new();
 	let (created, result) = tokio::sync::oneshot::channel();
 	// The parent also owns an in-flight CreateSession when the caller cancels.
@@ -279,7 +300,7 @@ async fn portal_negotiate(cursor: bool, cleanup: &cleanup::Handle) -> Result<(u3
 		.map_err(|e| err("portal session task", e))?
 		.map_err(|e| err("portal session", e))?;
 
-	let restore = RESTORE_TOKEN.lock().unwrap().clone();
+	let restore = selection.take_restore();
 	proxy
 		.select_sources(
 			&session,
@@ -289,13 +310,15 @@ async fn portal_negotiate(cursor: bool, cleanup: &cleanup::Handle) -> Result<(u3
 				} else {
 					CursorMode::Hidden
 				})
-				.set_sources(ashpd::enumflags2::BitFlags::from(SourceType::Monitor))
+				.set_sources(ashpd::enumflags2::BitFlags::from(requested))
 				.set_multiple(false)
 				.set_persist_mode(PersistMode::Application)
 				.set_restore_token(restore.as_deref()),
 		)
 		.await
-		.map_err(|e| err("portal select sources", e))?;
+		.map_err(|e| err("portal select sources", e))?
+		.response()
+		.map_err(|e| Error::PermissionDenied(format!("capture source request: {e}")))?;
 
 	// This is where the compositor's picker dialog appears (unless the restore
 	// token silently re-grants), so it blocks on the user.
@@ -305,8 +328,18 @@ async fn portal_negotiate(cursor: bool, cleanup: &cleanup::Handle) -> Result<(u3
 		.map_err(|e| err("portal start", e))?
 		.response()
 		.map_err(|e| Error::PermissionDenied(format!("screen capture request: {e}")))?;
-	*RESTORE_TOKEN.lock().unwrap() = response.restore_token().map(str::to_string);
 
+	selection
+		.kind()
+		.validate_stream(
+			response.streams().len(),
+			response
+				.streams()
+				.first()
+				.and_then(|s| s.source_type())
+				.map(|s| s as u32),
+		)
+		.map_err(|e| Error::SourceUnavailable(e.into()))?;
 	let stream = response
 		.streams()
 		.first()
@@ -317,6 +350,7 @@ async fn portal_negotiate(cursor: bool, cleanup: &cleanup::Handle) -> Result<(u3
 		.open_pipe_wire_remote(&session, Default::default())
 		.await
 		.map_err(|e| err("portal pipewire remote", e))?;
+	selection.replace_restore(response.restore_token().map(str::to_string));
 	Ok((node_id, fd, release))
 }
 
@@ -793,6 +827,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 	let CaptureLoop {
 		capture: Capture {
 			kind,
+			selection,
 			remote,
 			target,
 			label,
@@ -869,8 +904,8 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					// asks again instead of silently resuming a grant the user just
 					// revoked. Our own teardown quits the loop before anything
 					// disconnects, so it never reaches this path.
-					if kind == Kind::Screen {
-						*RESTORE_TOKEN.lock().unwrap() = None;
+					if let Some(selection) = &selection {
+						selection.replace_restore(None);
 					}
 					state.borrow_mut().terminal = Some(Error::SourceUnavailable(match &new {
 						pw::stream::StreamState::Error(error) => format!("PipeWire stream failed: {error}"),

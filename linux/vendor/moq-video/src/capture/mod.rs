@@ -53,6 +53,10 @@ pub mod cleanup;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pipewire;
 
+/// System-picked sources with publication-scoped authorization.
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+pub mod portal;
+
 // Native Media Foundation camera capture on Windows.
 #[cfg(target_os = "windows")]
 mod mediafoundation;
@@ -74,9 +78,9 @@ mod pump;
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 mod settle;
 
-/// What to capture. Each variant carries the identifier that selects it, so a
-/// window can't be captured without saying which one, and a camera id can't
-/// reach the display backend.
+/// What to capture. Explicit identifiers select their matching backend, so
+/// a window ID cannot reach the display backend. Portal selections
+/// instead delegate the exact source choice to the system picker.
 ///
 /// The identifiers come from [`cameras`], [`displays`], [`windows`], and
 /// [`apps`]; each listed item's `source()` builds the matching variant.
@@ -107,6 +111,10 @@ pub enum Source {
 	/// A single window, by the id [`windows`] reports. Supported on macOS,
 	/// Windows, and X11.
 	Window(String),
+
+	/// A screen or window chosen by the Linux system portal.
+	#[cfg(all(target_os = "linux", feature = "pipewire"))]
+	Portal(portal::Selection),
 
 	/// Every window belonging to one application, by the id [`apps`] reports
 	/// (a bundle identifier). Windows that open later are included. macOS only.
@@ -488,6 +496,8 @@ pub async fn open(config: &Config) -> Result<Stream, Error> {
 				Err(Error::Unsupported("window capture".to_string()))
 			}
 		}
+		#[cfg(all(target_os = "linux", feature = "pipewire"))]
+		Source::Portal(selection) => pipewire::open_selection(config, selection).await,
 		Source::App(id) => {
 			let _ = id;
 			#[cfg(target_os = "macos")]

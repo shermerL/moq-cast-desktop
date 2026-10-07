@@ -41,9 +41,29 @@ pub(in crate::app) fn show(
                 });
             }
             SourceCatalog::Portal => {
+                if audio_enabled
+                    && !matches!(
+                        selected_source,
+                        Some(CaptureSource::Portal | CaptureSource::PortalWindow)
+                    )
+                {
+                    *selected_source = Some(CaptureSource::Portal);
+                }
+                ui.horizontal(|ui| {
+                    ui.selectable_value(
+                        selected_source,
+                        Some(CaptureSource::Portal),
+                        text("屏幕", "Screen"),
+                    );
+                    ui.selectable_value(
+                        selected_source,
+                        Some(CaptureSource::PortalWindow),
+                        text("窗口", "Window"),
+                    );
+                });
                 ui.label(text(
-                    "由系统选择共享屏幕",
-                    "Choose a screen in the system picker",
+                    "点击开始共享后，在系统弹窗中选择来源。停止后可重新选择。",
+                    "Start sharing to choose a source in the system picker. Stop to choose again.",
                 ));
             }
             SourceCatalog::Failed(error) => {
@@ -191,7 +211,11 @@ pub(in crate::app) fn show(
                 |ui| {
                     let source = snapshot.sources.selected(selected_source.as_ref());
                     let label = if matches!(snapshot.sources, SourceCatalog::Portal) {
-                        locale.choose_screen()
+                        if source == Some(CaptureSource::PortalWindow) {
+                            text("选择窗口并共享", "Choose window and share")
+                        } else {
+                            locale.choose_screen()
+                        }
                     } else {
                         text("开始共享", "Start sharing")
                     };
@@ -214,6 +238,22 @@ pub(in crate::app) fn show(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portal_window_choice_survives_rendering() {
+        let mut selected = Some(CaptureSource::PortalWindow);
+        let mut audio = false;
+        let snapshot = AppSnapshot {
+            sources: SourceCatalog::Portal,
+            ..AppSnapshot::default()
+        };
+        let context = egui::Context::default();
+        let frame = context.run_ui(egui::RawInput::default(), |ui| {
+            show(ui, Locale::English, &snapshot, &mut audio, &mut selected);
+        });
+        frame.drop_without_applying_deltas();
+        assert_eq!(selected, Some(CaptureSource::PortalWindow));
+    }
 
     #[test]
     fn failed_source_catalog_clears_selection_before_refresh() {
