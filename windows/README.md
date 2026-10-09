@@ -46,3 +46,9 @@ cargo clippy --locked --all-targets -- -D warnings
 ```
 
 macOS 上的纯逻辑测试不会编译或运行 WASAPI、WGC、Media Foundation/D3D11/DXVA 或 Windows 音频输出。Windows CI 只能证明 Windows runner 上能够编译和运行自动测试。真实 Found/Updated/Lost、多网卡、IPv4/IPv6、TLS/QUIC、防火墙、GPU codec、系统音频采集、默认输出设备、设备切换、音画表现与 shutdown 行为仍需 Windows 真机和 Android/Linux peer 联调。
+
+## Nearby 多地址连接
+
+普通 LAN 设备的同一份广告地址作为一个连接目标，复用上游 QUIC 交错拨号；某个地址不响应时，后续候选不必等待它超时。地址保留 IPv6 scope，沿用证书指纹与凭据校验、原有连接预算和取消机制。只有握手赢家进入业务会话；显式 node URL 保持原有处理。单独的 mDNS Lost 仍不会拆除健康连接。
+
+三端消费者锁文件使用 `mdns-sd 0.21.4`，包括冲突改名后的 goodbye 修复。这不能代替跨重启身份管理，也不保证所有网络环境都能连接；关联 [#39](https://github.com/shermerL/moq-cast-desktop/issues/39)，尚未认定重复设备问题完全解决。

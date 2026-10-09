@@ -19,6 +19,8 @@ pub(crate) enum DialError {
     NoAddresses,
     #[error(transparent)]
     Native(#[from] moq_tokio::Error),
+    #[error(transparent)]
+    Target(#[from] moq_tokio::connect::Error),
 }
 
 pub(crate) fn dial(
@@ -30,13 +32,7 @@ pub(crate) fn dial(
         .fingerprint
         .as_ref()
         .ok_or(DialError::MissingFingerprint)?;
-    let urls = peer.urls.iter().cloned().map(|mut url| {
-        if !peer.has_node {
-            url.set_path(&peer_path(&peer.credential));
-        }
-        url
-    });
-    let addrs = moq_tokio::Addrs::collect(urls).ok_or(DialError::NoAddresses)?;
+    let addrs = targets(peer)?;
 
     let mut config = moq_tokio::connect::Config::default();
     config.bind = Some("[::]:0".parse().expect("valid ephemeral bind"));
@@ -58,6 +54,21 @@ pub(crate) fn dial(
         .with_publisher(publish_origin)
         .with_subscriber(receive_origin);
     Ok(client.connect(addrs))
+}
+
+fn targets(peer: &PeerRecord) -> Result<moq_tokio::Addrs, DialError> {
+    if peer.has_node {
+        return moq_tokio::Addrs::collect(peer.urls.iter().cloned()).ok_or(DialError::NoAddresses);
+    }
+    let mut url = peer.urls.first().cloned().ok_or(DialError::NoAddresses)?;
+    url.set_path(&peer_path(&peer.credential));
+    // One advertisement shares authentication across interfaces. Race its
+    // handshakes inside one target instead of spending the budget per URL.
+    let mut candidates = peer.addrs.clone();
+    candidates.sort_by_key(|addr| (addr.ip().is_loopback(), addr.is_ipv6()));
+    Ok(moq_tokio::Addrs::new(moq_tokio::connect::Addr::pinned(
+        url, candidates,
+    )?))
 }
 
 fn carries_request_path(version: &moq_net::Version) -> bool {
@@ -380,6 +391,7 @@ mod tests {
         });
 
         let mut record = peer(addr, fingerprint, "proof");
+        record.addrs.insert(0, "127.0.0.1:9".parse().unwrap());
         record.urls.insert(0, "moqt://127.0.0.1:9".parse().unwrap());
         let (client_publish_origin, client_receive_origin) = origin_pair();
         let connection = dial(&record, &client_publish_origin, client_receive_origin)
@@ -392,5 +404,77 @@ mod tests {
         assert!(connection.connected());
         connection.abort(moq_net::Error::Cancel);
         session.abort(moq_net::Error::Cancel);
+    }
+
+    #[test]
+    fn lan_addresses_share_one_target_and_keep_ipv6_scope() {
+        let mut record = peer("192.0.2.1:4443".parse().unwrap(), "00".repeat(32), "proof");
+        let scoped = std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+            "fe80::1".parse().unwrap(),
+            4443,
+            0,
+            7,
+        ));
+        record.addrs.push(scoped);
+        let targets = super::targets(&record).unwrap();
+        assert_eq!(targets.as_slice().len(), 1);
+        let target = &targets.as_slice()[0];
+        assert_eq!(target.addresses().unwrap(), record.addrs);
+        assert_eq!(target.url().path(), super::peer_path("proof"));
+    }
+
+    #[test]
+    fn node_target_retains_authority_and_does_not_pin_lan_addresses() {
+        let mut record = peer("192.0.2.1:4443".parse().unwrap(), "00".repeat(32), "proof");
+        record.has_node = true;
+        record.urls = vec!["https://relay.example/custom-path".parse().unwrap()];
+        let targets = super::targets(&record).unwrap();
+        assert_eq!(targets.as_slice()[0].url(), &record.urls[0]);
+        assert!(targets.as_slice()[0].addresses().is_none());
+    }
+
+    #[test]
+    fn lan_without_socket_addresses_is_rejected() {
+        let mut record = peer("192.0.2.1:4443".parse().unwrap(), "00".repeat(32), "proof");
+        record.addrs.clear();
+        assert!(matches!(
+            super::targets(&record),
+            Err(super::DialError::Target(
+                moq_tokio::connect::Error::EmptyAddresses
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn connects_while_first_candidate_is_unresponsive() {
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let (server, addr, fingerprint) = listener().await;
+        let (server_publish, server_receive) = origin_pair();
+        let accept = tokio::spawn(async move {
+            let mut listener = server.listen().await.unwrap();
+            let request = listener.accept().await.unwrap();
+            server::accept(request, "proof", &server_publish, server_receive).await
+        });
+        // A bound socket absorbs datagrams without sending an ICMP refusal.
+        let blackhole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let blocked = blackhole.local_addr().unwrap();
+        let mut record = peer(addr, fingerprint, "proof");
+        record.addrs.insert(0, blocked);
+        record
+            .urls
+            .insert(0, format!("moqt://{blocked}").parse().unwrap());
+        let (publish, receive) = origin_pair();
+        let connecting = dial(&record, &publish, receive).unwrap();
+        let started = std::time::Instant::now();
+        let connection = tokio::time::timeout(Duration::from_secs(5), connecting.established())
+            .await
+            .expect("bounded connection")
+            .expect("second candidate established");
+        eprintln!("blackhole first candidate: {:?}", started.elapsed());
+        let session = accept.await.expect("accept task").expect("accepted");
+        assert!(connection.connected());
+        connection.abort(moq_net::Error::Cancel);
+        session.abort(moq_net::Error::Cancel);
+        drop(blackhole);
     }
 }

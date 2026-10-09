@@ -64,3 +64,9 @@ M0-M6 开发包使用 ad hoc 签名。测试者可以手动批准 Gatekeeper 提
 ```
 
 各架构编译设置 `MOQCAST_BUILD_IDENTITY=macos-universal2-adhoc` 和 `MOQCAST_PROVENANCE_OUTPUT`；Cargo 的实际 target 自动记录，合包时校验共同来源并派生 Universal 2 元数据。
+
+## Nearby 多地址连接
+
+普通 LAN 设备的同一份广告地址作为一个连接目标，复用上游 QUIC 交错拨号；某个地址不响应时，后续候选不必等待它超时。地址保留 IPv6 scope，沿用证书指纹与凭据校验、原有连接预算和取消机制。只有握手赢家进入业务会话；显式 node URL 保持原有处理。单独的 mDNS Lost 仍不会拆除健康连接。
+
+三端消费者锁文件使用 `mdns-sd 0.21.4`，包括冲突改名后的 goodbye 修复。这不能代替跨重启身份管理，也不保证所有网络环境都能连接；关联 [#39](https://github.com/shermerL/moq-cast-desktop/issues/39)，尚未认定重复设备问题完全解决。

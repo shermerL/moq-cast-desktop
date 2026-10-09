@@ -287,6 +287,7 @@ mod tests {
                     .parse()
                     .expect("candidate"),
             ],
+            addrs: vec![advertised.addr],
             has_node: false,
             fingerprint: Some(advertised.fingerprint),
             credential: "proof".to_owned(),

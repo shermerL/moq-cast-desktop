@@ -27,3 +27,9 @@ Wayland 会话提供“屏幕／窗口”切换，点击共享后由系统 Porta
 这里复用 Desktop 自己的 `linux/src/publish/audio.rs`，不需要先向 moq-dev 投稿，也没有将系统声音伪装为上游 `moq_audio::capture::Source::System` 的 Linux 实现。系统声音默认关闭，只在本次发布选中时启动；发布与观看共用一个媒体状态，不能同时占用。该互斥是应用行为，不代表音频后端具备上游所要求的通用“排除本进程”能力。
 
 这批只对齐 quest 在 Desktop 的功能范围，不关闭上游 quest。完整上游系统音频接口不在本批范围内，真实 Wayland 音画、停止重开与授权验证仍须以测试包验收。
+
+## Nearby 多地址连接
+
+普通 LAN 设备的同一份广告地址作为一个连接目标，复用上游 QUIC 交错拨号；某个地址不响应时，后续候选不必等待它超时。地址保留 IPv6 scope，沿用证书指纹与凭据校验、原有连接预算和取消机制。只有握手赢家进入业务会话；显式 node URL 保持原有处理。单独的 mDNS Lost 仍不会拆除健康连接。
+
+三端消费者锁文件使用 `mdns-sd 0.21.4`，包括冲突改名后的 goodbye 修复。这不能代替跨重启身份管理，也不保证所有网络环境都能连接；关联 [#39](https://github.com/shermerL/moq-cast-desktop/issues/39)，尚未认定重复设备问题完全解决。

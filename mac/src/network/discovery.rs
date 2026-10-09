@@ -9,6 +9,7 @@ use url::Url;
 pub(crate) struct PeerRecord {
     pub(crate) id: String,
     pub(crate) urls: Vec<Url>,
+    pub(crate) addrs: Vec<std::net::SocketAddr>,
     pub(crate) fingerprint: Option<String>,
     pub(crate) has_node: bool,
     pub(crate) credential: String,
@@ -20,6 +21,7 @@ impl PeerRecord {
         Self {
             id: peer.id,
             urls,
+            addrs: peer.addrs,
             fingerprint: peer.fingerprint,
             has_node: peer.node.is_some(),
             credential: peer.credential,
@@ -34,6 +36,12 @@ impl PeerRecord {
 
     fn merge_candidates(&mut self, other: Self) -> bool {
         let mut changed = false;
+        for addr in other.addrs {
+            if !self.addrs.contains(&addr) {
+                self.addrs.push(addr);
+                changed = true;
+            }
+        }
         for url in other.urls {
             if !self.urls.contains(&url) {
                 self.urls.push(url);
@@ -109,6 +117,7 @@ mod tests {
         PeerRecord {
             id: id.to_owned(),
             urls: vec![format!("moqt://{addr}").parse().expect("candidate")],
+            addrs: vec![addr],
             fingerprint: Some(format!("fingerprint-{credential}")),
             has_node: false,
             credential: credential.to_owned(),
@@ -132,6 +141,7 @@ mod tests {
             PeerUpdate::CandidatesMerged
         );
         assert_eq!(peers.get("android").expect("peer").urls.len(), 2);
+        assert_eq!(peers.get("android").expect("peer").addrs.len(), 2);
     }
 
     #[test]
@@ -148,6 +158,7 @@ mod tests {
 
         let peer = peers.get("linux").expect("peer");
         assert_eq!(peer.urls.len(), 1);
+        assert_eq!(peer.addrs, record("linux", 3, "new-proof").addrs);
         assert_eq!(peer.credential, "new-proof");
         assert!(peers.lost("linux"));
         assert!(peers.get("linux").is_none());
