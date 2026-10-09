@@ -4,6 +4,24 @@
 
 This file documents notable changes to MoQCast Desktop.
 
+## 0.6.0 - 2026-10-09
+
+### 中文
+
+- Windows 支持选择屏幕或窗口共享，并捕获鼠标指针。
+- Linux 支持 X11 显示器选择和 Wayland 系统选择器中的窗口共享，优化 X11 采集效率。
+- 三端播放器新增音量、静音和播放信息面板，简化工具栏。
+- 改善播放连续性、音画同步及共享停止时的资源清理。
+- 更新媒体与传输依赖，统一构建和诊断日志中的版本来源。
+
+### English
+
+- Select a screen or window to share on Windows, with mouse cursor capture.
+- Select displays on X11 and share windows through the Wayland system picker, with more efficient X11 capture.
+- Add volume, mute, and playback information controls across desktop platforms, and simplify the player toolbar.
+- Improve playback continuity, audio/video synchronization, and cleanup when sharing stops.
+- Update media and transport dependencies and unify build provenance in diagnostics.
+
 ## 0.4.1-dev.4 - 2026-08-30
 
 ### 中文
