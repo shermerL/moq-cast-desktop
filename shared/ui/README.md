@@ -4,6 +4,8 @@
 
 It owns design tokens, semantic typography, interaction-state resolution, centered role-based page shells, caller-data-only components, and the visual catalog. Platform crates continue to own windows, page composition, locale, discovery, media, permissions, diagnostics, and product lifecycle.
 
+Share pages reserve `page_actions` inside the finite page viewport before rendering their scrollable source and status content. Keep the page itself outside any outer scroll area so long lists cannot move the start/stop action off screen.
+
 Run the catalog locally:
 
 ```sh

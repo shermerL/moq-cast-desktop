@@ -30,15 +30,26 @@ impl Kind {
 		Ok(())
 	}
 
-	pub(crate) fn validate_stream(self, count: usize, source: Option<u32>) -> Result<(), &'static str> {
+	pub(crate) fn validate_stream(self, version: u32, count: usize, source: Option<u32>) -> Result<(), &'static str> {
 		if count != 1 {
 			return Err("The system portal must grant exactly one source.");
+		}
+		// ScreenCast v1/v2 omit source_type; SelectSources still constrains the kind.
+		if source.is_none() && version < 3 {
+			return Ok(());
 		}
 		if source != Some(self.bits()) {
 			return Err("The system portal did not confirm the requested source type.");
 		}
 		Ok(())
 	}
+}
+
+/// The source and restore token returned by a successful portal Start.
+pub(crate) struct Grant<'a> {
+	pub streams: usize,
+	pub source: Option<u32>,
+	pub token: Option<&'a str>,
 }
 
 /// One user's selection, shared only across automatic reopens of that publication.
@@ -49,7 +60,7 @@ pub struct Selection {
 }
 
 impl Selection {
-	/// Create a fresh selection that will prompt rather than restore an older publication.
+	/// Create a selection without a grant from an earlier publication.
 	pub fn new(kind: Kind) -> Self {
 		Self {
 			kind,
@@ -64,6 +75,13 @@ impl Selection {
 	// Restore tokens are single-use, including when the next request fails.
 	pub(crate) fn take_restore(&self) -> Option<String> {
 		self.restore.lock().unwrap().take()
+	}
+
+	// Commit a validated grant before opening the remote can suspend or be cancelled.
+	pub(crate) fn accept(&self, version: u32, grant: Grant<'_>) -> Result<(), &'static str> {
+		self.kind.validate_stream(version, grant.streams, grant.source)?;
+		self.replace_restore(grant.token.map(str::to_string));
+		Ok(())
 	}
 
 	pub(crate) fn replace_restore(&self, token: Option<String>) {
@@ -104,6 +122,54 @@ mod tests {
 	}
 
 	#[test]
+	fn cancelling_remote_open_keeps_the_validated_replacement() {
+		use std::future::{Future, pending};
+		use std::task::{Context, Poll, Waker};
+
+		let selection = Selection::new(Kind::Window);
+		selection.replace_restore(Some("old".into()));
+		assert_eq!(selection.take_restore().as_deref(), Some("old"));
+		let mut opening = Box::pin(async {
+			// Start has returned; opening the remote has not completed yet.
+			selection.accept(
+				4,
+				Grant {
+					streams: 1,
+					source: Some(2),
+					token: Some("replacement"),
+				},
+			)?;
+			pending::<Result<(), &'static str>>().await
+		});
+		assert_eq!(
+			opening.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+			Poll::Pending
+		);
+		drop(opening);
+
+		assert_eq!(selection.clone().take_restore().as_deref(), Some("replacement"));
+		assert_eq!(selection.take_restore(), None);
+	}
+
+	#[test]
+	fn rejected_source_does_not_save_a_restore_grant() {
+		let selection = Selection::new(Kind::Window);
+		assert!(
+			selection
+				.accept(
+					4,
+					Grant {
+						streams: 1,
+						source: Some(1),
+						token: Some("wrong-screen")
+					}
+				)
+				.is_err()
+		);
+		assert_eq!(selection.take_restore(), None);
+	}
+
+	#[test]
 	fn new_share_reselects_even_when_the_source_type_is_unchanged() {
 		let old = Selection::new(Kind::Window);
 		old.replace_restore(Some("old-window".into()));
@@ -133,12 +199,48 @@ mod tests {
 
 	#[test]
 	fn mismatched_or_ambiguous_grants_are_rejected() {
-		assert!(Kind::Window.validate_stream(1, Some(2)).is_ok());
-		assert!(Kind::Screen.validate_stream(1, Some(1)).is_ok());
-		assert!(Kind::Window.validate_stream(1, Some(1)).is_err());
-		assert!(Kind::Window.validate_stream(1, None).is_err());
-		assert!(Kind::Window.validate_stream(0, None).is_err());
-		assert!(Kind::Window.validate_stream(2, Some(2)).is_err());
+		assert!(Kind::Window.validate_stream(3, 1, Some(2)).is_ok());
+		assert!(Kind::Screen.validate_stream(3, 1, Some(1)).is_ok());
+		assert!(Kind::Window.validate_stream(3, 1, Some(1)).is_err());
+		assert!(Kind::Window.validate_stream(3, 1, None).is_err());
+		assert!(Kind::Window.validate_stream(3, 0, None).is_err());
+		assert!(Kind::Window.validate_stream(3, 2, Some(2)).is_err());
+	}
+
+	#[test]
+	fn older_portals_can_omit_source_type() {
+		for version in [1, 2] {
+			for kind in [Kind::Screen, Kind::Window] {
+				let selection = Selection::new(kind);
+				assert!(
+					selection
+						.accept(
+							version,
+							Grant {
+								streams: 1,
+								source: None,
+								token: None
+							}
+						)
+						.is_ok()
+				);
+				assert_eq!(selection.take_restore(), None);
+			}
+		}
+	}
+
+	#[test]
+	fn portal_versions_do_not_relax_mismatched_or_multiple_sources() {
+		for version in [1, 2, 3, 4, 6] {
+			assert!(Kind::Window.validate_stream(version, 1, Some(1)).is_err());
+			assert!(Kind::Screen.validate_stream(version, 1, Some(2)).is_err());
+			assert!(Kind::Window.validate_stream(version, 0, None).is_err());
+			assert!(Kind::Window.validate_stream(version, 2, Some(2)).is_err());
+			assert!(Kind::Window.validate_stream(version, 1, Some(2)).is_ok());
+			if version >= 3 {
+				assert!(Kind::Window.validate_stream(version, 1, None).is_err());
+			}
+		}
 	}
 
 	#[test]

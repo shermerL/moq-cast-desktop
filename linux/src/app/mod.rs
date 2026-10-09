@@ -390,6 +390,33 @@ impl eframe::App for MoqCastApp {
         egui::CentralPanel::default()
             .frame(Frame::new().fill(COLORS.surface.into()))
             .show(ui, |ui| {
+                if self.page == Page::ScreenShare {
+                    moqcast_ui::page_shell(ui, self.page.content_width(), |ui| {
+                        components::page_header(
+                            ui,
+                            self.locale.screen_share(),
+                            self.locale.share_description(),
+                        );
+                        if self.command_error.is_some() || snapshot.last_error.is_some() {
+                            components::error_banner(
+                                ui,
+                                self.locale.attention_required(),
+                                self.locale.operation_failed(),
+                                None,
+                            );
+                        }
+                        if let Some(command) = pages::screen_share::show(
+                            ui,
+                            self.locale,
+                            &snapshot,
+                            &mut self.system_audio,
+                            &mut self.selected_source,
+                        ) {
+                            self.send(command);
+                        }
+                    });
+                    return;
+                }
                 egui::ScrollArea::vertical()
                     .id_salt(self.page.scroll_id())
                     .auto_shrink([false, false])
@@ -449,13 +476,9 @@ impl eframe::App for MoqCastApp {
                                     &mut self.selected_peer,
                                     device_workspace_layout(content.width()),
                                 ),
-                                Page::ScreenShare => pages::screen_share::show(
-                                    ui,
-                                    self.locale,
-                                    &snapshot,
-                                    &mut self.system_audio,
-                                    &mut self.selected_source,
-                                ),
+                                Page::ScreenShare => {
+                                    unreachable!("Screen Share owns its scroll region")
+                                }
                                 Page::Watch => match pages::watch::show(
                                     ui,
                                     self.locale,

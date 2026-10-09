@@ -12,9 +12,15 @@ The local copy carries these Linux product patches on top of that revision:
   it during demand-driven reopens, while a fresh Desktop Start creates a new
   selection. Capability and returned source-type checks reject unsupported,
   ambiguous, or mismatched grants. Revocation clears only the affected grant.
-  Source-selection tests run in the application test suite. Real GNOME/KDE
-  Wayland window capture remains unverified. This is a Desktop-only patch,
-  not an upstream API proposal or completion of the Linux capture parity quest.
+  The source-selection API and fixes were accepted upstream in PR #5089
+  (3ce2159a5826175bf3c2b23c4e9d0f49b0ac632c), but remain a backport over
+  the baseline above. Validated replacement tokens are saved before the
+  cancellable remote-open await. ScreenCast v1/v2 may omit source_type;
+  newer versions and explicit mismatches retain strict validation.
+  Source-selection tests run in the application test suite. The earlier
+  Desktop integration was manually exercised on Ubuntu 24.04.3 LTS;
+  these backported fixes and other compositors still need runtime validation.
+  This does not complete the broader Linux capture parity quest.
 
 - `encode::Options::max_size` resizes display capture before probing and
   encoding, keeping the catalog and encoded output within MoQCast's 1080p

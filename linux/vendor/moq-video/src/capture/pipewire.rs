@@ -330,16 +330,20 @@ async fn portal_negotiate(
 		.map_err(|e| Error::PermissionDenied(format!("screen capture request: {e}")))?;
 
 	selection
-		.kind()
-		.validate_stream(
-			response.streams().len(),
-			response
-				.streams()
-				.first()
-				.and_then(|s| s.source_type())
-				.map(|s| s as u32),
+		.accept(
+			proxy.version(),
+			portal::Grant {
+				streams: response.streams().len(),
+				source: response
+					.streams()
+					.first()
+					.and_then(|stream| stream.source_type())
+					.map(|kind| kind as u32),
+				token: response.restore_token(),
+			},
 		)
 		.map_err(|e| Error::SourceUnavailable(e.into()))?;
+
 	let stream = response
 		.streams()
 		.first()
@@ -350,7 +354,6 @@ async fn portal_negotiate(
 		.open_pipe_wire_remote(&session, Default::default())
 		.await
 		.map_err(|e| err("portal pipewire remote", e))?;
-	selection.replace_restore(response.restore_token().map(str::to_string));
 	Ok((node_id, fd, release))
 }
 

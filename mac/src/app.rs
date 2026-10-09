@@ -835,6 +835,14 @@ impl MoqCastApp {
     }
 
     fn screen_share(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
+        moqcast_ui::page_actions(ui, |ui| self.screen_share_actions(ui, snapshot));
+        egui::ScrollArea::vertical()
+            .id_salt("screen-share-content")
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.screen_share_content(ui, snapshot));
+    }
+
+    fn screen_share_content(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
         page_header(
             ui,
             self.text("屏幕共享", "Screen Share"),
@@ -1064,27 +1072,32 @@ impl MoqCastApp {
             )
         };
 
+        status_section(ui, title, body, tone, |_| {});
+    }
+
+    fn screen_share_actions(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
+        let share_owned = snapshot.media_owner == Some(MediaOwner::Share);
+        let watch_owned = snapshot.media_owner == Some(MediaOwner::Watch);
+        let can_start = share_action_available(self.capture_permission, snapshot);
         let mut action = None;
-        status_section(ui, title, body, tone, |ui| {
-            if share_owned
-                && matches!(
-                    snapshot.media.phase(),
-                    MediaPhase::PreparingShare | MediaPhase::Sharing
-                )
-            {
-                if danger_button(ui, self.text("停止共享", "Stop Sharing"), true).clicked() {
-                    action = Some(false);
-                }
-            } else if share_owned && snapshot.media.phase() == MediaPhase::Failed {
-                if secondary_button(ui, self.text("返回", "Return"), true).clicked() {
-                    action = Some(false);
-                }
-            } else if !watch_owned
-                && primary_button(ui, self.text("开始共享", "Start Sharing"), can_start).clicked()
-            {
-                action = Some(true);
+        if share_owned
+            && matches!(
+                snapshot.media.phase(),
+                MediaPhase::PreparingShare | MediaPhase::Sharing
+            )
+        {
+            if danger_button(ui, self.text("停止共享", "Stop Sharing"), true).clicked() {
+                action = Some(false);
             }
-        });
+        } else if share_owned && snapshot.media.phase() == MediaPhase::Failed {
+            if secondary_button(ui, self.text("返回", "Return"), true).clicked() {
+                action = Some(false);
+            }
+        } else if !watch_owned
+            && primary_button(ui, self.text("开始共享", "Start Sharing"), can_start).clicked()
+        {
+            action = Some(true);
+        }
         match action {
             Some(true) => {
                 self.runtime.start_sharing();
@@ -1271,8 +1284,11 @@ impl eframe::App for MoqCastApp {
             .frame(Frame::new().fill(COLORS.surface.into()))
             .show(ui, |ui| {
                 let page = self.page;
-                if page == Page::Watch {
-                    page_shell(ui, page.content_width(), |ui| self.watch(ui, &snapshot));
+                if matches!(page, Page::Watch | Page::ScreenShare) {
+                    page_shell(ui, page.content_width(), |ui| match page {
+                        Page::ScreenShare => self.screen_share(ui, &snapshot),
+                        _ => self.watch(ui, &snapshot),
+                    });
                 } else {
                     egui::ScrollArea::vertical()
                         .id_salt(page.scroll_id())
@@ -1280,10 +1296,9 @@ impl eframe::App for MoqCastApp {
                         .show(ui, |ui| {
                             page_shell(ui, page.content_width(), |ui| match page {
                                 Page::Nearby => self.nearby(ui, &snapshot),
-                                Page::ScreenShare => self.screen_share(ui, &snapshot),
                                 Page::Settings => self.settings(ui),
-                                Page::Watch => {
-                                    unreachable!("Watch does not use the page scroller")
+                                Page::Watch | Page::ScreenShare => {
+                                    unreachable!("Media pages own their scroll regions")
                                 }
                             });
                         });

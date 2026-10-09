@@ -16,11 +16,12 @@ pub use components::{
     PlayerInfoSnapshot, PlayerInfoState, PlayerRects, PlayerSurfaceResponse, PlayerVolumeResponse,
     PlayerVolumeState, SelectError, SelectSpec, SettingRowSpec, StatePanelKind, StatePanelSpec,
     SwitchSpec, app_bar_content_rect, checkbox, control_button, danger_button, detail_row,
-    device_list, device_row, dialog, icon_button, major_section_break, nav_item, page_content_rect,
-    page_header, page_horizontal_inset, page_shell, player_button, player_icon_button,
-    player_info_control, player_rects, player_stage, player_stage_at, player_surface,
-    player_toolbar, player_toolbar_at, player_volume_control, primary_button, secondary_button,
-    section_header, select, setting_row, state_panel, status_badge, status_strip, switch,
+    device_list, device_row, dialog, icon_button, major_section_break, nav_item, page_actions,
+    page_content_rect, page_header, page_horizontal_inset, page_shell, player_button,
+    player_icon_button, player_info_control, player_rects, player_stage, player_stage_at,
+    player_surface, player_toolbar, player_toolbar_at, player_volume_control, primary_button,
+    secondary_button, section_header, select, setting_row, state_panel, status_badge, status_strip,
+    switch,
 };
 pub use interaction::{ControlRole, Interaction, ResolvedVisual, resolve_control_visual};
 pub use theme::{Theme, install_ui_font};
