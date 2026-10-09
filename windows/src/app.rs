@@ -642,6 +642,26 @@ impl MoqCastApp {
     }
 
     fn screen_share(&mut self, ui: &mut egui::Ui) {
+        let status = match (self.locale, self.snapshot.media.phase) {
+            (Locale::Chinese, MediaPhase::Idle) => "准备共享",
+            (Locale::English, MediaPhase::Idle) => "Ready to share",
+            (Locale::Chinese, MediaPhase::Preparing) => "正在准备共享",
+            (Locale::English, MediaPhase::Preparing) => "Preparing screen share",
+            (Locale::Chinese, MediaPhase::Sharing) => "正在共享屏幕",
+            (Locale::English, MediaPhase::Sharing) => "Sharing screen",
+            (Locale::Chinese, MediaPhase::Stopping) => "正在停止共享",
+            (Locale::English, MediaPhase::Stopping) => "Stopping screen share",
+            (Locale::Chinese, MediaPhase::Failed) => "无法开始共享",
+            (Locale::English, MediaPhase::Failed) => "Screen share could not start",
+        };
+        moqcast_ui::page_actions(ui, |ui| self.screen_share_actions(ui, status));
+        egui::ScrollArea::vertical()
+            .id_salt("screen-share-content")
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.screen_share_content(ui, status));
+    }
+
+    fn screen_share_content(&mut self, ui: &mut egui::Ui, status: &str) {
         page_header(
             ui,
             match self.locale {
@@ -681,18 +701,6 @@ impl MoqCastApp {
         );
         major_section_break(ui);
 
-        let status = match (self.locale, self.snapshot.media.phase) {
-            (Locale::Chinese, MediaPhase::Idle) => "准备共享",
-            (Locale::English, MediaPhase::Idle) => "Ready to share",
-            (Locale::Chinese, MediaPhase::Preparing) => "正在准备共享",
-            (Locale::English, MediaPhase::Preparing) => "Preparing screen share",
-            (Locale::Chinese, MediaPhase::Sharing) => "正在共享屏幕",
-            (Locale::English, MediaPhase::Sharing) => "Sharing screen",
-            (Locale::Chinese, MediaPhase::Stopping) => "正在停止共享",
-            (Locale::English, MediaPhase::Stopping) => "Stopping screen share",
-            (Locale::Chinese, MediaPhase::Failed) => "无法开始共享",
-            (Locale::English, MediaPhase::Failed) => "Screen share could not start",
-        };
         ui.label(typography(
             status,
             TypographyRole::Section,
@@ -744,6 +752,25 @@ impl MoqCastApp {
             COLORS.muted.into(),
         ));
         ui.add_space(Spacing::LG);
+        if let Some(error) = self.snapshot.media.last_error {
+            ui.add_space(Spacing::SM);
+            ui.label(typography(
+                error,
+                TypographyRole::Help,
+                COLORS.danger.into(),
+            ));
+        }
+        if let Some(error) = self.snapshot.media.audio.last_error {
+            ui.add_space(Spacing::SM);
+            ui.label(typography(
+                error,
+                TypographyRole::Help,
+                COLORS.warning.into(),
+            ));
+        }
+    }
+
+    fn screen_share_actions(&mut self, ui: &mut egui::Ui, status: &str) {
         match self.snapshot.media.phase {
             MediaPhase::Idle | MediaPhase::Failed => {
                 let enabled = self.snapshot.discovery.is_active()
@@ -786,22 +813,6 @@ impl MoqCastApp {
             MediaPhase::Preparing | MediaPhase::Stopping => {
                 secondary_button(ui, status, false);
             }
-        }
-        if let Some(error) = self.snapshot.media.last_error {
-            ui.add_space(Spacing::SM);
-            ui.label(typography(
-                error,
-                TypographyRole::Help,
-                COLORS.danger.into(),
-            ));
-        }
-        if let Some(error) = self.snapshot.media.audio.last_error {
-            ui.add_space(Spacing::SM);
-            ui.label(typography(
-                error,
-                TypographyRole::Help,
-                COLORS.warning.into(),
-            ));
         }
     }
 

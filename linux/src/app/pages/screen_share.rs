@@ -16,6 +16,32 @@ pub(in crate::app) fn show(
     system_audio: &mut bool,
     selected_source: &mut Option<CaptureSource>,
 ) -> Option<UserCommand> {
+    let action = moqcast_ui::page_actions(ui, |ui| {
+        show_actions(
+            ui,
+            locale,
+            snapshot,
+            *system_audio,
+            selected_source.as_ref(),
+        )
+    });
+    let content = egui::ScrollArea::vertical()
+        .id_salt("screen-share-content")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            show_content(ui, locale, snapshot, system_audio, selected_source)
+        })
+        .inner;
+    action.or(content)
+}
+
+fn show_content(
+    ui: &mut egui::Ui,
+    locale: Locale,
+    snapshot: &AppSnapshot,
+    system_audio: &mut bool,
+    selected_source: &mut Option<CaptureSource>,
+) -> Option<UserCommand> {
     section_header(
         ui,
         locale.share_local_screen(),
@@ -155,15 +181,7 @@ pub(in crate::app) fn show(
                     locale.sharing_screen(),
                     locale.media_keeps_mesh(),
                 ),
-                |ui| {
-                    let stopping = snapshot.media == MediaState::StoppingPublish;
-                    if stopping {
-                        ui.spinner();
-                        danger_button(ui, locale.stopping_share(), false);
-                    } else if danger_button(ui, locale.stop_sharing(), true).clicked() {
-                        command = Some(UserCommand::StopScreenShare);
-                    }
-                },
+                |_| {},
             );
         }
         MediaState::PreparingPublish => {
@@ -174,10 +192,7 @@ pub(in crate::app) fn show(
                     locale.preparing_share(),
                     locale.share_description(),
                 ),
-                |ui| {
-                    ui.spinner();
-                    primary_button(ui, locale.preparing_share(), false);
-                },
+                |_| {},
             );
         }
         MediaState::Idle => {
@@ -188,27 +203,64 @@ pub(in crate::app) fn show(
                     locale.media_idle(),
                     locale.media_idle_hint(),
                 ),
-                |ui| {
-                    let source = snapshot.sources.selected(selected_source.as_ref());
-                    let label = if matches!(snapshot.sources, SourceCatalog::Portal) {
-                        locale.choose_screen()
-                    } else {
-                        text("开始共享", "Start sharing")
-                    };
-                    if primary_button(ui, label, source.is_some()).clicked()
-                        && let Some(source) = source
-                    {
-                        command = Some(UserCommand::StartScreenShare {
-                            system_audio: *system_audio,
-                            source,
-                        });
-                    }
-                },
+                |_| {},
             );
         }
     }
 
     command
+}
+
+fn show_actions(
+    ui: &mut egui::Ui,
+    locale: Locale,
+    snapshot: &AppSnapshot,
+    system_audio: bool,
+    selected_source: Option<&CaptureSource>,
+) -> Option<UserCommand> {
+    if !snapshot.has_mesh_session() && snapshot.media == MediaState::Idle {
+        return None;
+    }
+    match snapshot.media {
+        MediaState::Publishing => {
+            if danger_button(ui, locale.stop_sharing(), true).clicked() {
+                return Some(UserCommand::StopScreenShare);
+            }
+        }
+        MediaState::StoppingPublish => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                danger_button(ui, locale.stopping_share(), false);
+            });
+        }
+        MediaState::PreparingPublish => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                primary_button(ui, locale.preparing_share(), false);
+            });
+        }
+        MediaState::Idle => {
+            let source = snapshot.sources.selected(selected_source);
+            let label = if matches!(snapshot.sources, SourceCatalog::Portal) {
+                locale.choose_screen()
+            } else {
+                match locale {
+                    Locale::Chinese => "开始共享",
+                    Locale::English => "Start sharing",
+                }
+            };
+            if primary_button(ui, label, source.is_some()).clicked()
+                && let Some(source) = source
+            {
+                return Some(UserCommand::StartScreenShare {
+                    system_audio,
+                    source,
+                });
+            }
+        }
+        _ => {}
+    }
+    None
 }
 
 #[cfg(test)]
