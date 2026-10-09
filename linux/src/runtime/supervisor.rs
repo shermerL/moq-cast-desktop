@@ -14,7 +14,7 @@ use crate::app::{
     AppSnapshot, DialRole, DiscoveredPeer, RemoteAudioSnapshot, RemoteVideoSnapshot,
     TransportState, UserCommand,
 };
-use crate::network::discovery::{PeerRecord, PeerRegistry, PeerUpdate};
+use crate::network::discovery::{PeerRegistry, PeerUpdate};
 use crate::network::{peer, server, service};
 use crate::publish::session::{Failure as PublishFailure, Options as PublishOptions, Publication};
 use crate::publish::source::{self, CaptureSource, SourceCatalog};
@@ -770,7 +770,7 @@ impl Supervisor {
         }
         match event.kind {
             service::EventKind::Found { peer, should_dial } => {
-                let record = PeerRecord::from_mdns(peer);
+                let record = peer;
                 let peer_id = record.id.clone();
                 let Some(peers) = self.discovery.peers.as_mut() else {
                     return LoopAction::Unchanged;
@@ -781,7 +781,10 @@ impl Supervisor {
                     let active = self.mesh.outbound.get(&peer_id).is_some_and(|resources| {
                         resources.session.is_some() || resources.pending.is_some()
                     });
-                    self.ensure_outbound(&peer_id, reset_outbound_for(update, active));
+                    let reset = reset_outbound_for(update, active);
+                    if reset || update == PeerUpdate::Added {
+                        self.ensure_outbound(&peer_id, reset);
+                    }
                 } else {
                     self.accept_inbound_role(&peer_id);
                 }
@@ -1854,6 +1857,186 @@ mod tests {
             crate::network::discovery::PeerUpdate::Unchanged,
             true
         ));
+    }
+
+    fn discovered_outbound() -> (Supervisor, crate::network::discovery::PeerRecord) {
+        let mut supervisor = supervisor();
+        supervisor.state.start_discovery();
+        let record = peer_record("peer-b");
+        let mut peers = crate::network::discovery::PeerRegistry::new("local");
+        peers.found(record.clone());
+        supervisor.discovery.peers = Some(peers);
+        supervisor.project_peer(&record.id, true);
+        (supervisor, record)
+    }
+
+    async fn rediscover(supervisor: &mut Supervisor, peer: crate::network::discovery::PeerRecord) {
+        supervisor
+            .handle_service_event(service::Event {
+                generation: supervisor.discovery.generation,
+                kind: service::EventKind::Found {
+                    peer,
+                    should_dial: true,
+                },
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn rediscovery_preserves_pending_dial_and_merges_new_addresses() {
+        let (mut supervisor, mut advert) = discovered_outbound();
+        let task = tokio::spawn(std::future::pending::<()>());
+        let dial = task.abort_handle();
+        let resources = supervisor
+            .mesh
+            .outbound
+            .entry(advert.id.clone())
+            .or_default();
+        resources.generation = 7;
+        resources.pending = Some(task);
+        supervisor
+            .state
+            .set_transport(&advert.id, TransportState::Connecting);
+
+        rediscover(&mut supervisor, advert.clone()).await;
+        advert.addrs.push("192.0.2.2:4443".parse().unwrap());
+        advert.urls.push("moqt://192.0.2.2:4443".parse().unwrap());
+        rediscover(&mut supervisor, advert.clone()).await;
+        tokio::task::yield_now().await;
+
+        let resources = &supervisor.mesh.outbound[&advert.id];
+        assert_eq!(resources.generation, 7);
+        assert_eq!(resources.pending.as_ref().unwrap().id(), dial.id());
+        assert!(!dial.is_finished());
+        assert_eq!(
+            supervisor.state.peers[&advert.id].transport,
+            TransportState::Connecting
+        );
+        assert_eq!(
+            supervisor
+                .discovery
+                .peers
+                .as_ref()
+                .unwrap()
+                .get(&advert.id)
+                .unwrap()
+                .addrs
+                .len(),
+            2
+        );
+        supervisor
+            .mesh
+            .outbound
+            .get_mut(&advert.id)
+            .unwrap()
+            .close();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rediscovery_preserves_backoff_and_retry_still_starts() {
+        let (mut supervisor, advert) = discovered_outbound();
+        supervisor
+            .mesh
+            .outbound
+            .entry(advert.id.clone())
+            .or_default();
+        supervisor
+            .state
+            .set_transport(&advert.id, TransportState::Failed);
+        supervisor.schedule_outbound_retry(&advert.id);
+        let resources = &supervisor.mesh.outbound[&advert.id];
+        let generation = resources.generation;
+        let timer = resources.pending.as_ref().unwrap().id();
+
+        rediscover(&mut supervisor, advert.clone()).await;
+        let resources = &supervisor.mesh.outbound[&advert.id];
+        assert_eq!(resources.generation, generation);
+        assert_eq!(resources.pending.as_ref().unwrap().id(), timer);
+        assert_eq!(resources.retry_budget.attempts, 1);
+        assert_eq!(
+            supervisor.state.peers[&advert.id].transport,
+            TransportState::Failed
+        );
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(super::PEER_RETRY_MAX_DELAY).await;
+        let event = supervisor.operation_rx.recv().await.unwrap();
+        assert!(
+            matches!(&event, OperationEvent::RetryOutbound { peer_id, generation: current }
+            if peer_id == &advert.id && *current == generation)
+        );
+        supervisor.handle_operation_event(event).await;
+
+        let resources = &supervisor.mesh.outbound[&advert.id];
+        assert_eq!(resources.generation, generation + 1);
+        assert_ne!(resources.pending.as_ref().unwrap().id(), timer);
+        assert_eq!(resources.retry_budget.attempts, 1);
+        assert_eq!(
+            supervisor.state.peers[&advert.id].transport,
+            TransportState::Connecting
+        );
+        supervisor
+            .mesh
+            .outbound
+            .get_mut(&advert.id)
+            .unwrap()
+            .close();
+    }
+
+    #[tokio::test]
+    async fn rediscovery_replaces_rotated_credentials_and_ignores_old_dial_result() {
+        for lost in [false, true] {
+            let (mut supervisor, mut advert) = discovered_outbound();
+            let task = tokio::spawn(std::future::pending::<()>());
+            let dial = task.abort_handle();
+            let resources = supervisor
+                .mesh
+                .outbound
+                .entry(advert.id.clone())
+                .or_default();
+            resources.generation = 7;
+            resources.pending = Some(task);
+            if lost {
+                supervisor
+                    .handle_service_event(service::Event {
+                        generation: supervisor.discovery.generation,
+                        kind: service::EventKind::Lost(advert.id.clone()),
+                    })
+                    .await;
+            }
+            advert.credential = "replacement-proof".into();
+
+            rediscover(&mut supervisor, advert.clone()).await;
+            let resources = &supervisor.mesh.outbound[&advert.id];
+            let replacement = resources.pending.as_ref().unwrap().id();
+            assert_eq!(resources.generation, 8);
+            assert_ne!(replacement, dial.id());
+            supervisor.session_ready(
+                SessionKey::Outbound(advert.id.clone()),
+                7,
+                Err("old dial".into()),
+            );
+            assert_eq!(
+                supervisor.mesh.outbound[&advert.id]
+                    .pending
+                    .as_ref()
+                    .unwrap()
+                    .id(),
+                replacement
+            );
+            assert_eq!(
+                supervisor.state.peers[&advert.id].transport,
+                TransportState::Connecting
+            );
+            supervisor
+                .mesh
+                .outbound
+                .get_mut(&advert.id)
+                .unwrap()
+                .close();
+            tokio::task::yield_now().await;
+            assert!(dial.is_finished());
+        }
     }
 
     #[tokio::test]

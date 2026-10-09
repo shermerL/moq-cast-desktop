@@ -7,7 +7,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use super::server;
+use super::{discovery::PeerRecord, server};
 
 const INITIAL_SCAN_WINDOW: Duration = Duration::from_secs(3);
 
@@ -17,7 +17,7 @@ pub(crate) struct Event {
 }
 
 pub(crate) enum EventKind {
-    Found { peer: mdns::Peer, should_dial: bool },
+    Found { peer: PeerRecord, should_dial: bool },
     Lost(String),
     InitialScanFinished,
     DiscoveryStopped,
@@ -106,7 +106,7 @@ async fn run_discovery(
         let kind = match event {
             mdns::Event::Found(peer) => EventKind::Found {
                 should_dial: discovery.should_dial(&peer.id),
-                peer,
+                peer: PeerRecord::from_mdns(peer),
             },
             mdns::Event::Lost(id) => EventKind::Lost(id),
             _ => continue,

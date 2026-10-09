@@ -34,7 +34,7 @@ moq-video = { path = "vendor/moq-video", default-features = false, features = ["
 pipewire = "0.10"
 
 [dev-dependencies]
-tokio = { version = "1.53.1", features = ["macros"] }
+tokio = { version = "1.53.1", features = ["macros", "test-util"] }
 
 [build-dependencies]
 moqcast-build-provenance = { path = "../shared/build-provenance" }
