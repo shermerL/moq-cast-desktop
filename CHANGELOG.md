@@ -22,6 +22,24 @@ This file documents notable changes to MoQCast Desktop.
 - Improve playback continuity, audio/video synchronization, and cleanup when sharing stops.
 - Update media and transport dependencies and unify build provenance in diagnostics.
 
+## 0.5.0-dev.1 - 2026-09-02
+
+### 中文
+
+- 更新桌面界面与应用图标，统一附近设备、屏幕共享、观看和设置页面。
+- 改善设备列表点击、列表高度和播放器控制栏布局。
+- 改进附近设备发现暂时中断时的屏幕路由状态处理。
+- 首次提供 macOS Universal 2 预发布包，支持屏幕共享、主显示器系统音频共享和远端播放。
+- 修复 macOS 无音轨视频播放时可能累积延迟的问题。
+
+### English
+
+- Refresh the desktop interface and application icons across Nearby, Screen share, Watch, and Settings.
+- Improve device-row interaction, list sizing, and player control layout.
+- Improve screen-route handling during transient nearby discovery loss.
+- Introduce the macOS Universal 2 preview with screen sharing, main-display system audio sharing, and remote playback.
+- Fix accumulating playback delay for video-only streams on macOS.
+
 ## 0.4.1-dev.4 - 2026-08-30
 
 ### 中文
