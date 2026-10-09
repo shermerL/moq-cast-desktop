@@ -128,8 +128,17 @@ mod tests {
         path: &str,
     ) -> Option<moq_net::broadcast::Consumer> {
         while let Some(update) = announcements.next().await {
-            if update.prefix.as_str() == path && update.kind.is_active() {
-                return origin.consume().request_broadcast(path).await.ok();
+            let update = match update {
+                moq_net::announce::Event::Start(update)
+                | moq_net::announce::Event::Update(update) => update,
+                moq_net::announce::Event::End(_) => continue,
+            };
+            if update.prefix.as_str() == path {
+                return origin
+                    .consume()
+                    .request_broadcast(path, update.route.epoch)
+                    .await
+                    .ok();
             }
         }
         None

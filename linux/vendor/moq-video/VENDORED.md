@@ -1,39 +1,23 @@
 # Vendored moq-video
 
 source_repository = `https://github.com/moq-dev/moq`
-source_revision = `24ccc98a2853d22c77178bf4713cad6d88f1e36d`
+source_revision = `f8215bc47199b48512d805ae9fc710cc6586de51`
 source_path = `rs/moq-video`
 
-The local copy carries these Linux product patches on top of that revision:
+The baseline includes the accepted Portal selection API (PR #5089), including
+per-selection restore tokens, cancellation-safe grant storage and older Portal
+source-type compatibility, and the X11 MIT-SHM/event-update backend (PR #4749).
+Those implementations now come directly from upstream, rather than backports.
 
-- `capture::Source::Portal` requests either one screen or one window without
-  changing `Source::Display` or X11 window-ID semantics. `portal::Selection`
-  owns the single-use restore token for one publication; config clones share
-  it during demand-driven reopens, while a fresh Desktop Start creates a new
-  selection. Capability and returned source-type checks reject unsupported,
-  ambiguous, or mismatched grants. Revocation clears only the affected grant.
-  The source-selection API and fixes were accepted upstream in PR #5089
-  (3ce2159a5826175bf3c2b23c4e9d0f49b0ac632c), but remain a backport over
-  the baseline above. Validated replacement tokens are saved before the
-  cancellable remote-open await. ScreenCast v1/v2 may omit source_type;
-  newer versions and explicit mismatches retain strict validation.
-  Source-selection tests run in the application test suite. The earlier
-  Desktop integration was manually exercised on Ubuntu 24.04.3 LTS;
-  these backported fixes and other compositors still need runtime validation.
-  This does not complete the broader Linux capture parity quest.
+The retained Linux product patches are:
 
 - `encode::Options::max_size` resizes display capture before probing and
   encoding, keeping the catalog and encoded output within MoQCast's 1080p
-  ceiling.
-- X11 backend selection prioritizes `XDG_SESSION_TYPE`. The local
-  `quest/m2/x11-capture-shm` candidate uses MIT-SHM 1.2 fd-backed buffers on
-  Unix connections, with XGetImage for remote connections or missing support.
-  Shared pixels are converted directly and the RGB buffer is reused. Setup
-  and read failures are reported rather than silently disabling SHM. Monitor
-  layout changes refresh from RandR events, and ConfigureNotify updates window
-  sizes. Window viewability checks remain in place for ancestor unmapping.
-  The candidate is carried as a local patch, not part of the upstream baseline
-  above; XRandR selection and XFixes cursor handling originate upstream.
+  ceiling. It is applied through the upstream `encode::Capture` driver.
+- X11 backend selection prioritizes `XDG_SESSION_TYPE`, so stale display
+  environment variables do not redirect an X11 session or expose XWayland
+  windows as native Wayland sources. The upstream SHM implementation remains
+  intact, including the GetImage fallback and event-driven geometry handling.
 - `capture::cleanup::Owner` retains portal acquisition and close tasks outside
   a cancellable capture future. The application stops capture, joins its
   PipeWire thread, and awaits session close acknowledgement before completing

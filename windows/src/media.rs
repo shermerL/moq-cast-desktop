@@ -564,12 +564,13 @@ impl ReadyPublication {
                 generation,
                 audio_updates,
             );
+            let mut options = moq_video::encode::Capture::default();
+            options.capture = capture;
+            options.encode = encode;
             let video = moq_video::encode::publish_capture(
                 self.publication.broadcast.clone(),
                 self.publication.catalog.clone(),
-                capture,
-                encode,
-                clock,
+                options,
             );
             tokio::pin!(audio);
             tokio::pin!(video);

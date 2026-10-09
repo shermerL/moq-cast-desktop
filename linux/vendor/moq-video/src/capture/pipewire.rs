@@ -1,8 +1,8 @@
 //! Screen and camera capture via PipeWire (Linux, Wayland and X11).
 //!
 //! The ScreenCast portal owns screen selection: [`open`] pops the compositor's
-//! picker dialog, the user chooses a screen or window, and the portal hands us a PipeWire
-//! fd + node id. Cameras are PipeWire nodes too, reached as described in
+//! picker dialog, the user chooses a monitor or window, and the portal hands us
+//! a PipeWire fd + node id. Cameras are PipeWire nodes too, reached as described in
 //! [`camera`]. For either, a dedicated thread then runs the PipeWire main loop,
 //! forwarding DMA-BUF frames without copying when the producer offers them and
 //! converting shared-memory frames to CPU [`I420`] otherwise. It pushes both into
@@ -12,12 +12,14 @@
 //! Two screen quirks worth knowing:
 //! - `publish_capture` releases the capture while unwatched and reopens it on
 //!   demand. A fresh portal session would re-prompt the picker every time, so the
-//!   portal's restore token belongs to a logical source selection. Config clones
-//!   reuse it on demand; a new Desktop publication starts with a fresh selection.
-//!   Revocation clears only that selection's grant.
+//!   portal's restore token is kept with the selection and consumed by the
+//!   next [`open`], which restores the same grant without a dialog (on
+//!   compositors that support persistence). The token is forgotten when the
+//!   compositor ends the stream (the user hit "stop sharing"), so a revoked
+//!   grant is asked for again rather than silently resumed.
 //! - Compositors only deliver frames on damage, so a static screen would starve
 //!   the encoder. A loop timer re-emits the last frame whenever a frame interval
-//!   passes without a fresh one, mirroring the Windows Desktop Duplication pacing.
+//!   passes without a fresh one.
 //!   Cameras deliver every interval, so their streams have no such timer.
 
 use std::borrow::Cow;
@@ -41,7 +43,7 @@ use super::mode::Request;
 use super::portal;
 use super::pump::Geometry;
 use super::{Config, Stream};
-use crate::frame::{DmaBuf, DmaBufFrame, DmaBufPlane, DrmFormat, I420, Surface, wait_dma_buf_readable};
+use crate::frame::{DmaBuf, DmaBufFrame, DmaBufLayout, DmaBufPlane, DrmFormat, I420, Surface, wait_dma_buf_readable};
 use crate::{Color, Error, Size};
 
 const DEFAULT_FRAMERATE: u32 = 30;
@@ -59,8 +61,8 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 /// A missing D-Bus acknowledgement is an explicit cleanup failure, not success.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
-// Preserve the legacy Display entry point; Desktop uses an explicit selection
-// per publication instead of this process-wide screen selection.
+// Display sources share the implicit screen selection across demand reopens.
+// Explicit Portal sources instead own a separate grant for each selection.
 static DISPLAY: LazyLock<portal::Selection> = LazyLock::new(|| portal::Selection::new(portal::Kind::Screen));
 
 fn err(ctx: &str, e: impl std::fmt::Display) -> Error {
@@ -69,16 +71,9 @@ fn err(ctx: &str, e: impl std::fmt::Display) -> Error {
 
 pub(super) mod camera;
 
-/// Open a portal screen capture and stream its frames from a PipeWire loop thread.
-pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream, Error> {
-	if let Some(device) = device {
-		tracing::debug!(%device, "portal screen capture ignores the device selector; the picker owns selection");
-	}
-
-	open_selection(config, &DISPLAY).await
-}
-
-pub(super) async fn open_selection(config: &Config, selection: &portal::Selection) -> Result<Stream, Error> {
+/// Open a system-picked screen or window and stream frames from a PipeWire thread.
+pub(super) async fn open(config: &Config, selection: Option<&portal::Selection>) -> Result<Stream, Error> {
+	let selection = selection.unwrap_or(&DISPLAY);
 	let cleanup = config.cleanup.clone().unwrap_or_default();
 	let (node_id, fd, session) = portal_negotiate(config.cursor, &cleanup, selection).await?;
 	let mut config = config.clone();
@@ -1185,7 +1180,16 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						modifier,
 						color,
 					});
-					match DmaBuf::new(format, modifier, layout.width, layout.height, planes, color, inner) {
+					match DmaBuf::adopt(
+						DmaBufLayout {
+							format,
+							modifier,
+							size: Size::new(layout.width, layout.height),
+							planes,
+							color,
+						},
+						inner,
+					) {
 						Ok(frame) => {
 							chan.push(Surface::DmaBuf(frame.clone()));
 							// Only the pacing timer reads `last`. A camera must not
@@ -2228,13 +2232,14 @@ mod tests {
 			modifier: 0,
 			color: Some(Color::Bt709Full),
 		});
-		let frame = DmaBuf::new(
-			DrmFormat::NV12,
-			0,
-			2,
-			2,
-			vec![DmaBufPlane::new(0, 2), DmaBufPlane::new(4, 2)],
-			Some(Color::Bt709Full),
+		let frame = DmaBuf::adopt(
+			DmaBufLayout {
+				format: DrmFormat::NV12,
+				modifier: 0,
+				size: Size::new(2, 2),
+				planes: vec![DmaBufPlane::new(0, 2), DmaBufPlane::new(4, 2)],
+				color: Some(Color::Bt709Full),
+			},
 			inner,
 		)
 		.expect("DMA-BUF");

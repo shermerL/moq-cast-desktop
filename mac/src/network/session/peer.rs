@@ -222,6 +222,11 @@ mod tests {
                 result = async {
                     loop {
                         let update = b_announcements.next().await.expect("B receive origin");
+                        let update = match update {
+                            moq_net::announce::Event::Start(update)
+                            | moq_net::announce::Event::Update(update) => update,
+                            moq_net::announce::Event::End(_) => continue,
+                        };
                         if update.prefix.as_str() == "moqcast.screen/a" {
                             break;
                         }
@@ -245,6 +250,11 @@ mod tests {
                 result = async {
                     loop {
                         let update = a_announcements.next().await.expect("A receive origin");
+                        let update = match update {
+                            moq_net::announce::Event::Start(update)
+                            | moq_net::announce::Event::Update(update) => update,
+                            moq_net::announce::Event::End(_) => continue,
+                        };
                         if update.prefix.as_str() == "moqcast.screen/b" {
                             break;
                         }
@@ -260,6 +270,11 @@ mod tests {
         let c_saw_a_before_b = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let update = c_announcements.next().await.expect("C receive origin");
+                let update = match update {
+                    moq_net::announce::Event::Start(update)
+                    | moq_net::announce::Event::Update(update) => update,
+                    moq_net::announce::Event::End(_) => continue,
+                };
                 match update.prefix.as_str() {
                     "moqcast.screen/a" => break true,
                     "moqcast.screen/b" => break false,
@@ -274,6 +289,11 @@ mod tests {
         let forwarded = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let update = c_announcements.next().await.expect("C receive origin");
+                let update = match update {
+                    moq_net::announce::Event::Start(update)
+                    | moq_net::announce::Event::Update(update) => update,
+                    moq_net::announce::Event::End(_) => continue,
+                };
                 if update.prefix.as_str() == "moqcast.screen/a" {
                     break;
                 }

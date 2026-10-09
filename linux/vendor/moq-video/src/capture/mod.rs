@@ -4,9 +4,9 @@
 //!   zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
 //! - Linux camera -> native V4L2 (YUYV / MJPEG -> CPU I420), or a PipeWire
 //!   camera node (`pipewire` feature), X11 display and window -> X11, Wayland
-//!   display -> xdg-desktop-portal + PipeWire (`pipewire` feature).
-//! - Windows camera -> native Media Foundation (`IMFSourceReader`), screen ->
-//!   DXGI Desktop Duplication, window -> GDI (BGRA -> CPU I420).
+//!   display and window -> xdg-desktop-portal + PipeWire (`pipewire` feature).
+//! - Windows camera -> native Media Foundation (`IMFSourceReader`), display and
+//!   window -> Windows.Graphics.Capture (GPU NV12, Windows 10 2004 or newer).
 //!
 //! [`encode::publish_capture`](crate::encode::publish_capture) consumes [`Config`].
 
@@ -53,20 +53,17 @@ pub mod cleanup;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pipewire;
 
-/// System-picked sources with publication-scoped authorization.
-#[cfg(all(target_os = "linux", feature = "pipewire"))]
+/// System-picked screen or window selection and its restore grant.
+#[cfg(any(all(target_os = "linux", feature = "pipewire"), test))]
 pub mod portal;
 
 // Native Media Foundation camera capture on Windows.
 #[cfg(target_os = "windows")]
 mod mediafoundation;
 
-// DXGI Desktop Duplication screen capture on Windows.
-#[cfg(target_os = "windows")]
-mod desktopduplication;
-// Native GDI window enumeration and capture on Windows.
-#[cfg(target_os = "windows")]
-mod window;
+// The WGC notification state and selector tests also run on headless hosts.
+#[cfg(any(target_os = "windows", test))]
+mod wgc;
 
 // Blocking-device -> async-channel bridge used by V4L2 / Media Foundation.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -78,9 +75,7 @@ mod pump;
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 mod settle;
 
-/// What to capture. Explicit identifiers select their matching backend, so
-/// a window ID cannot reach the display backend. Portal selections
-/// instead delegate the exact source choice to the system picker.
+/// What to capture, selected by a native identifier or the system picker.
 ///
 /// The identifiers come from [`cameras`], [`displays`], [`windows`], and
 /// [`apps`]; each listed item's `source()` builds the matching variant.
@@ -112,15 +107,18 @@ pub enum Source {
 	/// Windows, and X11.
 	Window(String),
 
-	/// A screen or window chosen by the Linux system portal.
-	#[cfg(all(target_os = "linux", feature = "pipewire"))]
-	Portal(portal::Selection),
-
 	/// Every window belonging to one application, by the id [`apps`] reports
 	/// (a bundle identifier). Windows that open later are included. macOS only.
 	/// Linux deliberately supports screens and individual windows, not whole
 	/// applications; use a window source or the system portal instead.
 	App(String),
+
+	/// A screen or window chosen through the Linux system picker.
+	///
+	/// Clone the selection for demand-driven reopens; create a new one to ask
+	/// for a different source. Restoration depends on compositor support.
+	#[cfg(all(target_os = "linux", feature = "pipewire"))]
+	Portal(portal::Selection),
 }
 
 /// The default camera, matching the historical `Config::default()`.
@@ -134,19 +132,21 @@ impl Source {
 	/// A short human-readable name for the source, used in logs and as the
 	/// captured device label.
 	///
-	/// macOS-only: one ScreenCaptureKit backend serves display, window, and app,
-	/// so it names the source from the config. The other backends label a stream
+	/// ScreenCaptureKit and WGC serve multiple source kinds, so they name the
+	/// source from the config. The other backends label a stream
 	/// with the device they resolved (`/dev/video0`, a Media Foundation friendly
 	/// name), which the config doesn't know.
-	#[cfg(target_os = "macos")]
+	#[cfg(any(target_os = "macos", target_os = "windows", test))]
 	pub(crate) fn label(&self) -> String {
 		match self {
 			Self::Camera(None) => "camera".to_string(),
 			Self::Camera(Some(id)) => format!("camera:{id}"),
 			Self::Display(None) => "display".to_string(),
-			Self::Display(Some(id)) => format!("display:{id}"),
-			Self::Window(id) => format!("window:{id}"),
+			Self::Display(Some(id)) => format!("display:{}", id.strip_prefix("display:").unwrap_or(id)),
+			Self::Window(id) => format!("window:{}", id.strip_prefix("window:").unwrap_or(id)),
 			Self::App(id) => format!("app:{id}"),
+			#[cfg(all(target_os = "linux", feature = "pipewire"))]
+			Self::Portal(selection) => format!("portal:{:?}", selection.kind()),
 		}
 	}
 }
@@ -460,14 +460,17 @@ pub async fn open(config: &Config) -> Result<Stream, Error> {
 			}
 			#[cfg(target_os = "windows")]
 			{
-				desktopduplication::open(config, device.as_deref()).await
+				wgc::open(config).await
 			}
 			#[cfg(all(target_os = "linux", feature = "pipewire"))]
 			{
 				if x11::selected(device.as_deref()) {
 					x11::open_display(config, device.as_deref()).await
 				} else {
-					pipewire::open(config, device.as_deref()).await
+					if let Some(device) = device {
+						tracing::debug!(%device, "portal screen capture ignores the device selector; the picker owns selection");
+					}
+					pipewire::open(config, None).await
 				}
 			}
 			#[cfg(all(target_os = "linux", not(feature = "pipewire")))]
@@ -491,7 +494,7 @@ pub async fn open(config: &Config) -> Result<Stream, Error> {
 			}
 			#[cfg(target_os = "windows")]
 			{
-				window::open(config, id).await
+				wgc::open(config).await
 			}
 			#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 			{
@@ -499,7 +502,7 @@ pub async fn open(config: &Config) -> Result<Stream, Error> {
 			}
 		}
 		#[cfg(all(target_os = "linux", feature = "pipewire"))]
-		Source::Portal(selection) => pipewire::open_selection(config, selection).await,
+		Source::Portal(selection) => pipewire::open(config, Some(selection)).await,
 		Source::App(id) => {
 			let _ = id;
 			#[cfg(target_os = "macos")]
@@ -602,7 +605,7 @@ pub async fn displays() -> Result<Vec<Display>, Error> {
 	}
 	#[cfg(target_os = "windows")]
 	{
-		blocking(desktopduplication::displays).await
+		blocking(wgc::displays).await
 	}
 	#[cfg(target_os = "linux")]
 	{
@@ -626,7 +629,7 @@ pub async fn windows() -> Result<Vec<Window>, Error> {
 	}
 	#[cfg(target_os = "windows")]
 	{
-		blocking(window::windows).await
+		blocking(wgc::windows).await
 	}
 	#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 	{
@@ -719,6 +722,26 @@ mod tests {
 			Err(Error::Unsupported(message)) => assert!(message.contains("single window")),
 			_ => panic!("whole-application capture must not open a window or screen implicitly"),
 		}
+	}
+
+	#[test]
+	fn source_labels_add_the_source_kind() {
+		assert_eq!(Source::Camera(None).label(), "camera");
+		assert_eq!(Source::Camera(Some("camera-id".into())).label(), "camera:camera-id");
+		assert_eq!(Source::Display(None).label(), "display");
+		assert_eq!(Source::Display(Some("0".into())).label(), "display:0");
+		assert_eq!(Source::Window("123".into()).label(), "window:123");
+		assert_eq!(Source::App("com.example.app".into()).label(), "app:com.example.app");
+	}
+
+	#[test]
+	fn source_labels_preserve_prefixed_display_ids() {
+		assert_eq!(Source::Display(Some("display:0".into())).label(), "display:0");
+	}
+
+	#[test]
+	fn source_labels_preserve_prefixed_window_ids() {
+		assert_eq!(Source::Window("window:123".into()).label(), "window:123");
 	}
 
 	#[test]

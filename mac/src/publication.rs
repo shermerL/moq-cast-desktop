@@ -207,7 +207,6 @@ struct Publication {
     path: String,
     broadcast: moq_net::broadcast::Producer,
     catalog: moq_mux::catalog::Producer,
-    clock: moq_mux::Clock,
     source: moq_video::capture::Source,
     audio: AudioPlan,
 }
@@ -234,23 +233,19 @@ impl Publication {
         encode.codec = moq_video::encode::Codec::H264;
         encode.kind = moq_video::encode::Kind::Auto;
 
-        let clock = self.clock;
         let video_broadcast = self.broadcast.clone();
         let video_catalog = self.catalog.clone();
+        let mut options = moq_video::encode::Capture::default();
+        options.capture = capture;
+        options.encode = encode;
         let video: Running = Box::pin(async move {
             tracing::info!(codec = "H.264", "screen publication requested");
-            moq_video::encode::publish_capture(
-                video_broadcast,
-                video_catalog,
-                capture,
-                encode,
-                clock,
-            )
-            .await
-            .map_err(|error| {
-                tracing::warn!(%error, "screen publication ended");
-                Failure::pipeline("Screen sharing stopped because capture or encoding failed.")
-            })
+            moq_video::encode::publish_capture(video_broadcast, video_catalog, options)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "screen publication ended");
+                    Failure::pipeline("Screen sharing stopped because capture or encoding failed.")
+                })
         });
 
         let audio = match self.audio {
@@ -264,10 +259,9 @@ impl Publication {
                 encode.settings.codec = moq_audio::encode::Codec::Opus;
                 encode.settings.sample_rate = 48_000;
                 encode.settings.layout = moq_audio::Layout::Stereo;
-                let mut options = moq_audio::encode::PublicationOptions::default();
+                let mut options = moq_audio::encode::Capture::default();
                 options.capture = capture;
                 options.encode = encode;
-                options.clock = clock;
 
                 let audio_broadcast = self.broadcast.clone();
                 let audio_catalog = self.catalog.clone();
@@ -356,7 +350,6 @@ async fn prepare(
         path,
         broadcast,
         catalog,
-        clock,
         source,
         audio,
     })

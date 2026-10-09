@@ -44,13 +44,22 @@ impl Directory {
         let task = tokio::spawn(async move {
             let mut announcements = origin.consume().announced();
             while let Some(update) = announcements.next().await {
+                let (update, active) = match update {
+                    moq_net::announce::Event::Start(update)
+                    | moq_net::announce::Event::Update(update) => (update, true),
+                    moq_net::announce::Event::End(update) => (update, false),
+                };
                 let path = update.prefix.to_string();
                 let Some(peer_id) = announcement_peer(&path, &local_peer_id).map(str::to_owned)
                 else {
                     continue;
                 };
-                let broadcast = if update.kind.is_active() {
-                    match origin.consume().request_broadcast(path.as_str()).await {
+                let broadcast = if active {
+                    match origin
+                        .consume()
+                        .request_broadcast(path.as_str(), update.route.epoch.clone())
+                        .await
+                    {
                         Ok(broadcast) => Some(broadcast),
                         Err(error) => {
                             tracing::warn!(%error, "remote screen announcement could not resolve");
@@ -133,7 +142,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn announced_broadcast_resolves_and_withdraws() {
+    async fn announced_broadcast_resolves_withdraws_and_restarts() {
         let origin = moq_tokio::origin::spawn();
         let mut directory = Directory::start(origin.clone(), "local".to_owned());
         let broadcast = origin
@@ -148,7 +157,9 @@ mod tests {
             .expect("announcement bounded")
             .expect("available");
         assert_eq!(available.view.availability, ScreenAvailability::Available);
-        assert!(directory.broadcast(&available.path).is_some());
+        let previous = directory
+            .broadcast(&available.path)
+            .expect("first broadcast");
 
         broadcast.close();
         let withdrawn = tokio::time::timeout(Duration::from_secs(3), directory.recv())
@@ -157,6 +168,20 @@ mod tests {
             .expect("withdrawn");
         assert_eq!(withdrawn.view.availability, ScreenAvailability::Withdrawn);
         assert!(directory.broadcast(&withdrawn.path).is_none());
+
+        let restarted = origin.create_broadcast(&available.path).expect("restart");
+        restarted
+            .announce(moq_tokio::moq_net::origin::Route::default())
+            .expect("new announcement");
+        let available = tokio::time::timeout(Duration::from_secs(3), directory.recv())
+            .await
+            .expect("restart bounded")
+            .expect("available again");
+        assert_eq!(available.view.availability, ScreenAvailability::Available);
+        let current = directory.broadcast(&available.path).expect("new broadcast");
+        assert!(!current.is_closed());
+        assert!(!current.is_clone(&previous));
+        restarted.close();
         directory.stop().await;
     }
 }

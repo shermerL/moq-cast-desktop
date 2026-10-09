@@ -1316,11 +1316,16 @@ fn watch_announcements(
     tokio::spawn(async move {
         let mut announcements = receive_origin.consume().announced();
         while let Some(update) = announcements.next().await {
+            let (update, active) = match update {
+                moq_net::announce::Event::Start(update)
+                | moq_net::announce::Event::Update(update) => (update, true),
+                moq_net::announce::Event::End(update) => (update, false),
+            };
             let path = update.prefix.to_string();
-            let broadcast = if update.kind.is_active() {
+            let broadcast = if active {
                 match receive_origin
                     .consume()
-                    .request_broadcast(path.as_str())
+                    .request_broadcast(path.as_str(), update.route.epoch.clone())
                     .await
                 {
                     Ok(broadcast) => Some(broadcast),

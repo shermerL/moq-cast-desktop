@@ -1,11 +1,11 @@
 //! [`Frame`]: one raw picture, and [`Surface`]: its pixels and where they live.
 //!
 //! Representations chosen so the common path stays zero-copy:
-//! - `Surface::PixelBuffer` is a macOS `CVPixelBuffer` (IOSurface-backed NV12).
+//! - `Surface::PixelBuffer` is an Apple `CVPixelBuffer` (IOSurface-backed NV12).
 //!   Capture and the VideoToolbox decoder both produce it, and the VideoToolbox
 //!   encoder consumes it directly, no copy and no color conversion.
 //! - `Surface::Texture` is a Windows Direct3D11 NV12 texture, produced by Media
-//!   Foundation capture and decode one GPU blit removed from their own pools
+//!   Foundation capture/decode and Windows.Graphics.Capture, one GPU blit removed from their pools
 //!   (which they recycle, so a frame has to be lifted out of them), and consumed
 //!   by the hardware encoder MFT on the same device with no copy at all, so a
 //!   camera or a decoder reaches an encoder without touching the CPU. Drawing one
@@ -16,10 +16,9 @@
 //! - `Surface::DmaBuf` is a Linux DRM allocation, produced by PipeWire capture.
 //!   The Vulkan renderer imports supported packed formats directly, while CPU
 //!   consumers map linear allocations only.
-//! - `Surface::Vulkan` is a Linux/NVIDIA Vulkan RGBA or BGRA image imported into
-//!   CUDA with an explicit timeline semaphore. It deliberately has no CPU
-//!   download fallback: a `cuda::Converter` turns it into a `Surface::Cuda` on
-//!   the GPU, and consumers return its producer slot after CUDA completion.
+//! - `Surface::Vulkan` is an external Linux Vulkan image with an explicit
+//!   timeline semaphore. Encoders import and convert it on its device, with
+//!   no CPU download fallback, then return its producer slot after GPU completion.
 //! - `Surface::HardwareBuffer` is an Android `AHardwareBuffer`, produced by the
 //!   MediaCodec decoder rendering into an `ImageReader`. A GPU consumer imports
 //!   it as a GL or Vulkan image; `into_i420` reads the planes back instead.
@@ -28,7 +27,7 @@
 //!
 //! A backend that consumes a GPU surface takes the frame as-is; a CPU encoder
 //! asks for I420 via [`Surface::into_i420`], which downloads GPU frames that
-//! permit readback. Vulkan/CUDA surfaces intentionally refuse that fallback.
+//! permit readback. External Vulkan surfaces intentionally refuse that fallback.
 
 use std::borrow::Cow;
 
@@ -42,6 +41,9 @@ use moq_net::Timestamp;
 use yuv::{YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, rgba_to_yuv420};
 
 use crate::{Color, Error, Size};
+
+#[cfg(any(target_os = "windows", test))]
+mod processor;
 
 /// One raw (uncompressed) video frame: the pixels plus when they are shown.
 ///
@@ -128,12 +130,8 @@ pub struct DmaBufPlane {
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 impl DmaBufPlane {
-	// The producers that build a real one: PipeWire capture and, since it can
-	// hand its decode surfaces out, the VA-API decoder. Plus the importer's own
-	// tests, which build them without a producer to check how a layout is split
-	// up, and so need `render`.
-	#[cfg(any(feature = "pipewire", feature = "vaapi", all(feature = "render", test)))]
-	pub(crate) const fn new(offset: u32, stride: u32) -> Self {
+	/// Describe a plane's byte offset and row stride.
+	pub const fn new(offset: u32, stride: u32) -> Self {
 		Self { offset, stride }
 	}
 
@@ -279,27 +277,33 @@ impl std::fmt::Debug for DmaBuf {
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 impl DmaBuf {
-	// The two producers: PipeWire capture, and the VA-API decoder describing a
-	// picture it is handing out rather than downloading.
-	#[cfg(any(feature = "pipewire", feature = "vaapi"))]
-	pub(crate) fn new(
-		format: DrmFormat,
-		modifier: u64,
-		width: u32,
-		height: u32,
-		planes: Vec<DmaBufPlane>,
-		color: Option<Color>,
-		inner: Arc<dyn DmaBufFrame>,
-	) -> Result<Self, Error> {
-		Size::new(width, height).validate("DMA-BUF")?;
-		if planes.is_empty() {
-			return Err(Error::Codec(anyhow::anyhow!("DMA-BUF has no planes")));
+	/// Retain an external DMA-BUF and its producer's release guard.
+	///
+	/// Clones share the descriptor and guard; exports duplicate the FD as needed.
+	/// External buffers refuse CPU download, including linear allocations.
+	pub fn new<T: Send + Sync + 'static>(fd: OwnedFd, layout: DmaBufLayout, owner: T) -> Result<Self, Error> {
+		Self::adopt(layout, Arc::new(ExternalDmaBuf { fd, _owner: owner }))
+	}
+
+	pub(crate) fn adopt(layout: DmaBufLayout, inner: Arc<dyn DmaBufFrame>) -> Result<Self, Error> {
+		let DmaBufLayout {
+			format,
+			modifier,
+			size,
+			planes,
+			color,
+		} = layout;
+		size.validate("DMA-BUF")?;
+		if planes.is_empty() || planes.len() > 4 || planes.iter().any(|plane| plane.stride == 0) {
+			return Err(Error::Unsupported(
+				"DMA-BUF requires one to four planes with non-zero strides".into(),
+			));
 		}
 		Ok(Self {
 			format,
 			modifier,
-			width,
-			height,
+			width: size.width,
+			height: size.height,
 			planes,
 			color,
 			inner,
@@ -356,6 +360,55 @@ impl DmaBuf {
 	}
 }
 
+/// The format, tiling, and plane layout of an external DMA-BUF.
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct DmaBufLayout {
+	/// DRM fourcc describing the pixel format.
+	pub format: DrmFormat,
+	/// DRM modifier describing memory tiling; defaults to linear.
+	pub modifier: u64,
+	/// Visible image dimensions.
+	pub size: Size,
+	/// Plane offsets and row strides, in format order.
+	pub planes: Vec<DmaBufPlane>,
+	/// Color space of YUV samples, when the producer knows it.
+	pub color: Option<Color>,
+}
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+impl DmaBufLayout {
+	/// Describe linear planes and set optional tiling and color fields afterward.
+	pub fn new(format: DrmFormat, size: Size, planes: Vec<DmaBufPlane>) -> Self {
+		Self {
+			format,
+			modifier: 0,
+			size,
+			planes,
+			color: None,
+		}
+	}
+}
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+struct ExternalDmaBuf<T: Send + Sync + 'static> {
+	fd: OwnedFd,
+	_owner: T,
+}
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+impl<T: Send + Sync + 'static> DmaBufFrame for ExternalDmaBuf<T> {
+	fn export(&self) -> std::io::Result<OwnedFd> {
+		self.fd.try_clone()
+	}
+	fn download_i420(&self) -> Result<I420, Error> {
+		Err(Error::Unsupported(
+			"external DMA-BUF surfaces have no CPU download fallback".into(),
+		))
+	}
+}
+
 /// The producer-owned half of a DMA-BUF surface.
 ///
 /// Kept private to the crate so backend lifetimes and download mechanisms do
@@ -375,7 +428,7 @@ pub(crate) trait DmaBufFrame: Send + Sync {
 ///
 /// ```ignore
 /// match surface {
-///     #[cfg(target_os = "macos")]
+///     #[cfg(any(target_os = "macos", target_os = "ios"))]
 ///     Surface::PixelBuffer(buffer) => draw_metal(buffer),
 ///     other => upload(other.into_i420()?),
 /// }
@@ -386,20 +439,19 @@ pub(crate) trait DmaBufFrame: Send + Sync {
 /// building everywhere.
 #[non_exhaustive]
 pub enum Surface {
-	/// Zero-copy GPU surface (macOS `CVPixelBuffer`), from capture or a
+	/// Zero-copy GPU surface (Apple `CVPixelBuffer`), from capture or a
 	/// VideoToolbox decode.
-	#[cfg(target_os = "macos")]
-	PixelBuffer(macos::PixelBuffer),
+	#[cfg(apple)]
+	PixelBuffer(apple::PixelBuffer),
 	/// Zero-copy GPU texture (Windows Direct3D11 NV12).
 	#[cfg(target_os = "windows")]
 	Texture(d3d11::Texture),
 	/// Zero-copy GPU buffer (Linux CUDA NV12). Produced by the NVDEC decoder or
-	/// a [`cuda::Converter`], consumed in place by the NVENC encoder.
+	/// the GPU color converter, consumed in place by the NVENC encoder.
 	#[cfg(all(target_os = "linux", feature = "nvidia"))]
 	Cuda(cuda::Frame),
-	/// Vulkan RGBA8 / BGRA8 image imported into CUDA with explicit GPU
-	/// synchronization. A [`cuda::Converter`] turns it into `Cuda` on the GPU.
-	#[cfg(all(target_os = "linux", feature = "nvidia"))]
+	/// External Vulkan RGBA8 / BGRA8 image with explicit GPU synchronization.
+	#[cfg(target_os = "linux")]
 	Vulkan(vulkan::Frame),
 	/// Linux DMA-BUF, exported on access and retained until the last clone drops.
 	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
@@ -416,13 +468,13 @@ impl Surface {
 	/// The frame width in pixels.
 	pub fn width(&self) -> u32 {
 		match self {
-			#[cfg(target_os = "macos")]
+			#[cfg(apple)]
 			Surface::PixelBuffer(s) => s.width,
 			#[cfg(target_os = "windows")]
 			Surface::Texture(t) => t.width,
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(c) => c.width,
-			#[cfg(all(target_os = "linux", feature = "nvidia"))]
+			#[cfg(target_os = "linux")]
 			Surface::Vulkan(v) => v.width(),
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => d.width,
@@ -435,13 +487,13 @@ impl Surface {
 	/// The frame height in pixels.
 	pub fn height(&self) -> u32 {
 		match self {
-			#[cfg(target_os = "macos")]
+			#[cfg(apple)]
 			Surface::PixelBuffer(s) => s.height,
 			#[cfg(target_os = "windows")]
 			Surface::Texture(t) => t.height,
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(c) => c.height,
-			#[cfg(all(target_os = "linux", feature = "nvidia"))]
+			#[cfg(target_os = "linux")]
 			Surface::Vulkan(v) => v.height(),
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => d.height,
@@ -484,7 +536,7 @@ impl Surface {
 	/// which is what you usually want since it carries the timestamp across too.
 	///
 	/// A GPU scaler that a driver refuses falls back to downloading and scaling
-	/// on the CPU where the surface permits readback. Vulkan/CUDA surfaces fail
+	/// on the CPU where the surface permits readback. External Vulkan surfaces fail
 	/// instead because their contract forbids CPU pixel access.
 	pub fn resize(&self, size: Size, config: &crate::resize::Config) -> Result<Surface, Error> {
 		// Counts as a use on builds where every GPU arm is compiled out.
@@ -493,11 +545,11 @@ impl Surface {
 
 		Ok(match self {
 			Surface::I420(i420) => Surface::I420(i420.resize(size)?),
-			#[cfg(target_os = "macos")]
+			#[cfg(apple)]
 			Surface::PixelBuffer(pixels) if config.output == crate::Output::Cpu => {
 				Surface::I420(pixels.download_i420()?.resize(size)?)
 			}
-			#[cfg(target_os = "macos")]
+			#[cfg(apple)]
 			Surface::PixelBuffer(pixels) => match pixels.resize(size.width, size.height) {
 				Ok(scaled) => Surface::PixelBuffer(scaled),
 				// A transfer session or pool can fail on older hardware. Keep the
@@ -521,10 +573,10 @@ impl Surface {
 					Surface::I420(cuda.download_i420()?.resize(size)?)
 				}
 			},
-			#[cfg(all(target_os = "linux", feature = "nvidia"))]
+			#[cfg(target_os = "linux")]
 			Surface::Vulkan(_) => {
 				return Err(Error::Unsupported(
-					"Vulkan/CUDA surfaces require a GPU consumer and cannot be resized or downloaded".into(),
+					"External Vulkan surfaces require a GPU consumer and cannot be resized or downloaded".into(),
 				));
 			}
 			#[cfg(target_os = "windows")]
@@ -566,7 +618,7 @@ impl Surface {
 	///
 	/// Free for `Surface::I420`; downloads native GPU surfaces that permit
 	/// readback, so it is the universal arm of a `match` on every other
-	/// platform. A Vulkan/CUDA surface returns [`Error::Unsupported`] because
+	/// platform. A external Vulkan surface returns [`Error::Unsupported`] because
 	/// its contract deliberately exposes no CPU pixel path.
 	pub fn into_i420(self) -> Result<I420, Error> {
 		match self {
@@ -579,7 +631,7 @@ impl Surface {
 	/// Convert to owned, tightly packed RGBA8 pixels on the CPU.
 	///
 	/// Native GPU surfaces that permit readback are downloaded first; CPU I420 is
-	/// converted directly. Vulkan/CUDA surfaces return [`Error::Unsupported`].
+	/// converted directly. External Vulkan surfaces return [`Error::Unsupported`].
 	/// The conversion honors [`color`](Self::color) and otherwise falls back to
 	/// [`Color::infer`].
 	pub fn to_rgba(&self, config: &crate::convert::Config) -> Result<crate::convert::Rgba, Error> {
@@ -610,13 +662,13 @@ impl Surface {
 	///
 	/// A decoded buffer comes from the decoder's pool, so holding many frames holds
 	/// pool slots and eventually stalls decoding. Draw and drop.
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	pub fn into_pixel_buffer(
 		self,
 	) -> Result<objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>, Error> {
 		match self {
 			Surface::PixelBuffer(pixels) => Ok(pixels.buffer),
-			Surface::I420(i420) => macos::upload_i420(&i420),
+			Surface::I420(i420) => apple::upload_i420(&i420),
 		}
 	}
 
@@ -631,13 +683,13 @@ impl Surface {
 	/// honest.
 	pub fn color(&self) -> Option<Color> {
 		match self {
-			#[cfg(target_os = "macos")]
+			#[cfg(apple)]
 			Surface::PixelBuffer(s) => s.color(),
 			#[cfg(target_os = "windows")]
-			Surface::Texture(_) => None,
+			Surface::Texture(texture) => texture.color,
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(c) => c.color(),
-			#[cfg(all(target_os = "linux", feature = "nvidia"))]
+			#[cfg(target_os = "linux")]
 			Surface::Vulkan(_) => None,
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => d.color,
@@ -650,22 +702,22 @@ impl Surface {
 	/// A CPU I420 view, downloading a GPU frame only if necessary.
 	///
 	/// Borrowed for `Surface::I420`, owned for a GPU surface that permits
-	/// readback, and unsupported for Vulkan/CUDA. The borrowing counterpart to
+	/// readback, and unsupported for external Vulkan. The borrowing counterpart to
 	/// [`into_i420`](Self::into_i420), for a
 	/// caller that cannot give up the surface: a publisher's preview frame is
 	/// shared with every rendition's encoder, so its `Arc` never has a refcount
 	/// of one and no consuming exit is reachable from it.
 	pub fn to_i420(&self) -> Result<Cow<'_, I420>, Error> {
 		match self {
-			#[cfg(target_os = "macos")]
+			#[cfg(apple)]
 			Surface::PixelBuffer(s) => Ok(Cow::Owned(s.download_i420()?)),
 			#[cfg(target_os = "windows")]
 			Surface::Texture(t) => Ok(Cow::Owned(t.download_i420()?)),
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(c) => Ok(Cow::Owned(c.download_i420()?)),
-			#[cfg(all(target_os = "linux", feature = "nvidia"))]
+			#[cfg(target_os = "linux")]
 			Surface::Vulkan(_) => Err(Error::Unsupported(
-				"Vulkan/CUDA surfaces have no CPU mapping or download fallback".into(),
+				"External Vulkan surfaces have no CPU mapping or download fallback".into(),
 			)),
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => Ok(Cow::Owned(d.inner.download_i420()?)),
@@ -1089,14 +1141,14 @@ pub(crate) fn deinterleave_uv(uv: &[u8], u: &mut [u8], v: &mut [u8]) {
 /// once, while a rendition ladder resizes on a thread per rung. So each key owns
 /// a serialized value, rungs share rather than contend, and a long-lived process
 /// does not retain every size it has ever seen.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(apple, target_os = "windows"))]
 struct Cache<K, T> {
 	values: std::collections::HashMap<K, std::sync::Arc<std::sync::Mutex<T>>>,
 	order: std::collections::VecDeque<K>,
 	capacity: usize,
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(apple, target_os = "windows"))]
 impl<K: Clone + Eq + std::hash::Hash, T> Cache<K, T> {
 	fn new(capacity: usize) -> Self {
 		Self {
@@ -1146,7 +1198,7 @@ impl<K: Clone + Eq + std::hash::Hash, T> Cache<K, T> {
 	}
 }
 
-#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+#[cfg(all(test, any(apple, target_os = "windows")))]
 mod cache_tests {
 	use super::Cache;
 
@@ -1285,7 +1337,7 @@ pub mod android {
 	// (`AImage_getPlane*`, `AImage_getHardwareBuffer`) of an image nothing else can
 	// reach: the decoder acquires it and hands ownership straight out, and it is
 	// never re-acquired. The reader alongside it carries its own assertion. `Sync`
-	// is load-bearing the same way it is for the macOS pixel buffer, since
+	// is load-bearing the same way it is for the CoreVideo pixel buffer, since
 	// moq-transcode fans decoded frames out as `Arc<Frame>`.
 	unsafe impl Send for HardwareBuffer {}
 	unsafe impl Sync for HardwareBuffer {}
@@ -1464,9 +1516,9 @@ pub mod android {
 	}
 }
 
-#[cfg(target_os = "macos")]
-pub mod macos {
-	//! macOS CoreVideo surfaces: the [`PixelBuffer`] behind
+#[cfg(apple)]
+pub mod apple {
+	//! CoreVideo surfaces on macOS and iOS: the [`PixelBuffer`] behind
 	//! `Surface::PixelBuffer`, GPU resize, and download/upload between it and CPU
 	//! I420.
 
@@ -1921,9 +1973,13 @@ pub mod macos {
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "nvidia"))]
+#[cfg(target_os = "linux")]
 #[path = "frame/vulkan.rs"]
 pub mod vulkan;
+
+#[cfg(all(target_os = "linux", feature = "nvidia"))]
+#[path = "frame/cuda_vulkan.rs"]
+mod cuda_vulkan;
 
 #[cfg(all(target_os = "linux", feature = "nvidia"))]
 #[path = "frame/cuda.rs"]
@@ -1957,6 +2013,7 @@ pub mod d3d11 {
 		D3D11_FORMAT_SUPPORT_VIDEO_ENCODER, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION,
 		D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
 		D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+		D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT,
 		D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
 		D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
 		D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
@@ -1964,23 +2021,23 @@ pub mod d3d11 {
 		ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
 		ID3D11VideoProcessorOutputView,
 	};
-	#[cfg(test)]
-	use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
 	use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
+	use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12};
 	use windows::Win32::Media::MediaFoundation::{IMFDXGIBuffer, IMFSample};
 	use windows::core::Interface;
 
+	use super::processor::Plan;
 	use super::{Cache, I420};
-	use crate::{Error, Size};
+	use crate::{Color, Error, Size};
 
 	fn err(ctx: &str, e: windows::core::Error) -> Error {
 		Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
 	}
 
 	/// Create a hardware Direct3D11 device, multithread-protected (Media
-	/// Foundation's internal threads or DXGI duplication and our capture thread
+	/// Foundation's internal threads or WGC and our capture thread
 	/// both touch it). The shared low-level constructor behind the Media
-	/// Foundation device manager and the Desktop Duplication capture path.
+	/// Foundation device manager and Windows.Graphics.Capture.
 	pub(crate) fn create_device() -> Result<ID3D11Device, Error> {
 		let mut device: Option<ID3D11Device> = None;
 		unsafe {
@@ -2008,8 +2065,8 @@ pub mod d3d11 {
 		Ok(device)
 	}
 
-	/// A GPU texture (NV12) on the Direct3D11 device of whichever Media Foundation
-	/// object produced it: the capture source reader, or the DXVA decoder. Holds
+	/// A GPU texture (NV12) on its producer's Direct3D11 device: a Media Foundation
+	/// source reader, DXVA decoder, or Windows.Graphics.Capture session. Holds
 	/// that device so the download fallback and the hardware encoder run on the
 	/// device that owns the texture. Cloning the COM handles is a cheap `AddRef`,
 	/// which is what keeps capture -> encode and decode -> encode zero-copy.
@@ -2018,6 +2075,7 @@ pub mod d3d11 {
 		pub(crate) texture: ID3D11Texture2D,
 		pub(crate) width: u32,
 		pub(crate) height: u32,
+		pub(crate) color: Option<Color>,
 	}
 
 	impl Texture {
@@ -2076,6 +2134,27 @@ pub mod d3d11 {
 				texture,
 				width,
 				height,
+				color: None,
+			})
+		}
+
+		/// Convert a recycled WGC BGRA surface to an owned, even-sized NV12 texture.
+		#[cfg(feature = "capture")]
+		pub(crate) fn capture(device: &ID3D11Device, source: &ID3D11Texture2D, size: Size) -> Result<Self, Error> {
+			let plan = Plan::capture(size)?;
+			let mut desc = D3D11_TEXTURE2D_DESC::default();
+			unsafe { source.GetDesc(&mut desc) };
+			if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM || desc.Width < size.width || desc.Height < size.height {
+				return Err(Error::Codec(anyhow::anyhow!(
+					"invalid WGC BGRA surface geometry or format"
+				)));
+			}
+			Ok(Self {
+				device: device.clone(),
+				texture: process(device, source, plan)?,
+				width: plan.target.width,
+				height: plan.target.height,
+				color: Some(Color::infer(plan.target)),
 			})
 		}
 
@@ -2183,9 +2262,7 @@ pub mod d3d11 {
 				width: self.width,
 				height: self.height,
 				data,
-				// A deinterleave, not a color conversion, and nothing here names
-				// the space these samples are in. Left unknown to be inferred.
-				color: None,
+				color: self.color,
 			})
 		}
 
@@ -2201,51 +2278,58 @@ pub mod d3d11 {
 		pub(crate) fn resize(&self, width: u32, height: u32) -> Result<Self, Error> {
 			let source = Size::new(self.width, self.height);
 			let target = Size::new(width, height);
-			let key = ScalerKey::new(&self.device, source, target);
-
-			let scaler = {
-				let mut scalers = SCALERS
-					.lock()
-					.map_err(|_| Error::Codec(anyhow::anyhow!("video-processor cache lock poisoned")))?;
-				scalers
-					.get_or_insert_with(key, || {
-						Ok::<_, std::convert::Infallible>(ScalerState::discover(&self.device, source, target))
-					})
-					.expect("scaler discovery is infallible")
-			};
-			let mut state = scaler
-				.lock()
-				.map_err(|_| Error::Codec(anyhow::anyhow!("video processor lock poisoned")))?;
-			let result = match &*state {
-				ScalerState::Ready(scaler) => scaler.scale(&self.texture),
-				ScalerState::Unsupported { reason, .. } => {
-					return Err(Error::Codec(anyhow::anyhow!("GPU resize is unsupported: {reason}")));
-				}
-			};
-			let texture = match result {
-				Ok(texture) => texture,
-				Err(ScaleError::Unsupported(err)) => {
-					*state = ScalerState::Unsupported {
-						_device: self.device.clone(),
-						reason: err.to_string(),
-					};
-					return Err(err);
-				}
-				Err(ScaleError::Transient(err)) => return Err(err),
-			};
-			drop(state);
-			drop(scaler);
-			if let Ok(mut scalers) = SCALERS.lock() {
-				scalers.prune();
-			}
-
+			let texture = process(&self.device, &self.texture, Plan::resize(source, target, self.color))?;
 			Ok(Self {
 				device: self.device.clone(),
 				texture,
 				width,
 				height,
+				color: self.color,
 			})
 		}
+	}
+
+	fn process(device: &ID3D11Device, source: &ID3D11Texture2D, plan: Plan) -> Result<ID3D11Texture2D, Error> {
+		let key = ScalerKey {
+			device: device.as_raw() as usize,
+			plan,
+		};
+		let scaler = {
+			let mut scalers = SCALERS
+				.lock()
+				.map_err(|_| Error::Codec(anyhow::anyhow!("video-processor cache lock poisoned")))?;
+			scalers
+				.get_or_insert_with(key, || {
+					Ok::<_, std::convert::Infallible>(ScalerState::discover(device, plan))
+				})
+				.expect("processor discovery is infallible")
+		};
+		let mut state = scaler
+			.lock()
+			.map_err(|_| Error::Codec(anyhow::anyhow!("video processor lock poisoned")))?;
+		let result = match &*state {
+			ScalerState::Ready(scaler) => scaler.scale(source),
+			ScalerState::Unsupported { reason, .. } => {
+				return Err(Error::Codec(anyhow::anyhow!("GPU processing is unsupported: {reason}")));
+			}
+		};
+		let texture = match result {
+			Ok(texture) => texture,
+			Err(ScaleError::Unsupported(err)) => {
+				*state = ScalerState::Unsupported {
+					_device: device.clone(),
+					reason: err.to_string(),
+				};
+				return Err(err);
+			}
+			Err(ScaleError::Transient(err)) => return Err(err),
+		};
+		drop(state);
+		drop(scaler);
+		if let Ok(mut scalers) = SCALERS.lock() {
+			scalers.prune();
+		}
+		Ok(texture)
 	}
 
 	/// Enough reusable video processors for a large rendition ladder without
@@ -2270,8 +2354,8 @@ pub mod d3d11 {
 	}
 
 	impl ScalerState {
-		fn discover(device: &ID3D11Device, source: Size, target: Size) -> Self {
-			match Scaler::new(device, source, target) {
+		fn discover(device: &ID3D11Device, plan: Plan) -> Self {
+			match Scaler::new(device, plan) {
 				Ok(scaler) => Self::Ready(scaler),
 				Err(err) => Self::Unsupported {
 					_device: device.clone(),
@@ -2290,22 +2374,11 @@ pub mod d3d11 {
 	#[derive(Clone, PartialEq, Eq, Hash)]
 	struct ScalerKey {
 		device: usize,
-		source: Size,
-		target: Size,
-	}
-
-	impl ScalerKey {
-		fn new(device: &ID3D11Device, source: Size, target: Size) -> Self {
-			Self {
-				device: device.as_raw() as usize,
-				source,
-				target,
-			}
-		}
+		plan: Plan,
 	}
 
 	/// One Direct3D11 video processor, configured for a single source and target
-	/// size. The GPU scaler behind [`Texture::resize`].
+	/// size, crop, format and color conversion. Shared by resize and WGC capture.
 	struct Scaler {
 		/// Keeps the device keying this entry alive, so its address stays unique.
 		device: ID3D11Device,
@@ -2314,6 +2387,7 @@ pub mod d3d11 {
 		enumerator: ID3D11VideoProcessorEnumerator,
 		processor: ID3D11VideoProcessor,
 		target: Size,
+		input_format: DXGI_FORMAT,
 	}
 
 	/// Whether a failed scale proves this key unsupported or can succeed later.
@@ -2323,7 +2397,8 @@ pub mod d3d11 {
 	}
 
 	impl Scaler {
-		fn new(device: &ID3D11Device, source: Size, target: Size) -> Result<Self, Error> {
+		fn new(device: &ID3D11Device, plan: Plan) -> Result<Self, Error> {
+			let (source, target) = (plan.source, plan.target);
 			let video = device
 				.cast::<ID3D11VideoDevice>()
 				.map_err(|e| err("query ID3D11VideoDevice", e))?;
@@ -2351,14 +2426,31 @@ pub mod d3d11 {
 
 			let enumerator = unsafe { video.CreateVideoProcessorEnumerator(&desc) }
 				.map_err(|e| err("CreateVideoProcessorEnumerator", e))?;
+			let input_format = if plan.bgra {
+				DXGI_FORMAT_B8G8R8A8_UNORM
+			} else {
+				DXGI_FORMAT_NV12
+			};
+			for (format, required) in [
+				(input_format, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT),
+				(DXGI_FORMAT_NV12, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT),
+			] {
+				let support = unsafe { enumerator.CheckVideoProcessorFormat(format) }
+					.map_err(|e| err("CheckVideoProcessorFormat", e))?;
+				if support & required.0 as u32 == 0 {
+					return Err(Error::Codec(anyhow::anyhow!(
+						"video processor does not support {format:?} as {required:?}"
+					)));
+				}
+			}
 			let processor =
 				unsafe { video.CreateVideoProcessor(&enumerator, 0) }.map_err(|e| err("CreateVideoProcessor", e))?;
 
 			let full = RECT {
 				left: 0,
 				top: 0,
-				right: source.width as i32,
-				bottom: source.height as i32,
+				right: plan.picture.width as i32,
+				bottom: plan.picture.height as i32,
 			};
 			let scaled = RECT {
 				left: 0,
@@ -2368,19 +2460,20 @@ pub mod d3d11 {
 			};
 			unsafe {
 				context.VideoProcessorSetStreamFrameFormat(&processor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
-				// The whole picture into the whole destination: the scale itself.
+				// Capture crops odd edges; resize maps the entire input picture.
 				context.VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&full));
 				context.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&scaled));
 				// Drivers ship denoise and edge enhancement on by default here.
 				// This is a resize, not a filter chain, so a rung must not come out
 				// looking different from the frame it was scaled from.
 				context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
-				// One space in, the same space out. Resampling moves samples
-				// around, it must not reinterpret them, and a processor left to
-				// its own devices will happily convert between ranges.
-				let space = D3D11_VIDEO_PROCESSOR_COLOR_SPACE::default();
-				context.VideoProcessorSetStreamColorSpace(&processor, 0, &space);
-				context.VideoProcessorSetOutputColorSpace(&processor, &space);
+				let input = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+					_bitfield: plan.input_space(),
+				};
+				let output = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: plan.space };
+				context.VideoProcessorSetStreamColorSpace(&processor, 0, &input);
+				context.VideoProcessorSetOutputColorSpace(&processor, &output);
+				context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&scaled));
 			}
 
 			Ok(Self {
@@ -2390,6 +2483,7 @@ pub mod d3d11 {
 				enumerator,
 				processor,
 				target,
+				input_format,
 			})
 		}
 
@@ -2397,7 +2491,12 @@ pub mod d3d11 {
 		fn scale(&self, source: &ID3D11Texture2D) -> Result<ID3D11Texture2D, ScaleError> {
 			let mut desc = D3D11_TEXTURE2D_DESC::default();
 			unsafe { source.GetDesc(&mut desc) };
-			let output = alloc(&self.device, self.target.width, self.target.height, desc.Format)
+			if desc.Format != self.input_format {
+				return Err(ScaleError::Transient(Error::Codec(anyhow::anyhow!(
+					"video processor input format changed"
+				))));
+			}
+			let output = alloc(&self.device, self.target.width, self.target.height, DXGI_FORMAT_NV12)
 				.map_err(ScaleError::Transient)?;
 
 			let input_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
@@ -2518,7 +2617,27 @@ pub mod d3d11 {
 			texture,
 			width,
 			height,
+			color: frame.color,
 		})
+	}
+
+	/// A synthetic pool surface for the opt-in WGC conversion/encoding tests.
+	#[cfg(all(test, feature = "capture"))]
+	pub(crate) fn upload_bgra(device: &ID3D11Device, size: Size, pixels: &[u8]) -> ID3D11Texture2D {
+		assert_eq!(pixels.len(), size.pixels() as usize * 4);
+		let texture = alloc(device, size.width, size.height, DXGI_FORMAT_B8G8R8A8_UNORM).unwrap();
+		let context = unsafe { device.GetImmediateContext() }.unwrap();
+		unsafe {
+			context.UpdateSubresource(
+				&texture,
+				0,
+				None,
+				pixels.as_ptr().cast(),
+				size.width * 4,
+				pixels.len() as u32,
+			);
+		}
+		texture
 	}
 
 	/// The Direct3D11 texture behind a Media Foundation sample, and which slice of
@@ -2581,6 +2700,94 @@ pub mod d3d11 {
 	impl Drop for UnmapGuard<'_> {
 		fn drop(&mut self) {
 			unsafe { self.context.Unmap(self.resource, 0) };
+		}
+	}
+
+	#[cfg(all(test, feature = "capture"))]
+	mod tests {
+		use super::*;
+
+		#[test]
+		#[ignore = "requires a Windows GPU with BGRA-to-NV12 video processing"]
+		fn wgc_conversion_crops_odd_edges_and_preserves_color() {
+			let device = create_device().expect("D3D11 hardware device");
+			for size in [Size::new(641, 481), Size::new(1281, 721)] {
+				let mut pixels = Vec::with_capacity(size.pixels() as usize * 4);
+				for y in 0..size.height {
+					for x in 0..size.width {
+						// A green odd edge must be cropped, not scaled into the red picture.
+						pixels.extend_from_slice(if x + 1 == size.width || y + 1 == size.height {
+							&[0, 255, 0, 255]
+						} else {
+							&[0, 0, 255, 255]
+						});
+					}
+				}
+				let source = upload_bgra(&device, size, &pixels);
+				let output = Texture::capture(&device, &source, size).expect("BGRA to NV12");
+				let expected_size = Size::new(size.width & !1, size.height & !1);
+				let color = Color::infer(expected_size);
+				assert_eq!(Size::new(output.width, output.height), expected_size);
+				assert_eq!(output.color, Some(color));
+				assert_eq!(output.device.as_raw(), device.as_raw());
+				assert_ne!(output.texture.as_raw(), source.as_raw(), "must own the output");
+
+				// Simulate immediate reuse of a WGC pool frame after conversion.
+				pixels.fill(0);
+				unsafe {
+					device.GetImmediateContext().unwrap().UpdateSubresource(
+						&source,
+						0,
+						None,
+						pixels.as_ptr().cast(),
+						size.width * 4,
+						pixels.len() as u32,
+					);
+				}
+				drop(source);
+				assert_red(&output.download_i420().unwrap(), color);
+				// HD -> SD scaling must keep 709, not infer 601 from the new height.
+				let scaled = output.resize(320, 240).expect("NV12 GPU resize");
+				assert_eq!(scaled.color, Some(color));
+				assert_red(&scaled.download_i420().unwrap(), color);
+			}
+		}
+
+		fn assert_red(frame: &I420, color: Color) {
+			assert_eq!(frame.color(), Some(color));
+			let expected = color.coefficients().apply([255, 0, 0]);
+			for (plane, value) in [frame.y(), frame.u(), frame.v()].into_iter().zip(expected) {
+				assert!(
+					plane.iter().all(|sample| sample.abs_diff(value) <= 3),
+					"{color:?}: expected {value}"
+				);
+			}
+		}
+
+		#[test]
+		#[ignore = "Windows GPU workload; reports submission and batch completion, not capture latency"]
+		fn wgc_conversion_workload() {
+			let device = create_device().expect("D3D11 hardware device");
+			for size in [Size::new(640, 480), Size::new(1280, 720), Size::new(1920, 1080)] {
+				let pixels = [0, 0, 255, 255].repeat(size.pixels() as usize);
+				let source = upload_bgra(&device, size, &pixels);
+				Texture::capture(&device, &source, size)
+					.unwrap()
+					.download_i420()
+					.unwrap();
+				let start = std::time::Instant::now();
+				let mut output = None;
+				for _ in 0..32 {
+					output = Some(Texture::capture(&device, &source, size).unwrap());
+				}
+				let submitted = start.elapsed();
+				// Mapping the final result fences the preceding ordered GPU blits.
+				output.unwrap().download_i420().unwrap();
+				eprintln!(
+					"WGC {size}: 32 frames, submit={submitted:?}, complete_with_one_readback={:?}",
+					start.elapsed()
+				);
+			}
 		}
 	}
 }
@@ -2843,7 +3050,7 @@ mod tests {
 	/// `into_pixel_buffer` is total: a CPU frame uploads rather than failing, so a
 	/// renderer never has to write the upload itself. Software-decoded frames take
 	/// this path.
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[test]
 	fn into_pixel_buffer_uploads_a_cpu_frame() {
 		use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
@@ -2907,7 +3114,7 @@ mod tests {
 
 	/// VideoToolbox and the CPU convolution agree on a smooth NV12 gradient.
 	/// The result remains a pixel buffer, pinning the residency regression.
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[test]
 	fn pixel_buffer_resize_matches_cpu() {
 		let src_i420 = gradient_i420(320, 240);
@@ -2928,8 +3135,8 @@ mod tests {
 		assert!(mae(gpu.v(), cpu.v()) < 4, "GPU and CPU v disagree");
 	}
 
-	/// CPU output downloads a macOS pixel buffer before scaling.
-	#[cfg(target_os = "macos")]
+	/// CPU output downloads a CoreVideo pixel buffer before scaling.
+	#[cfg(apple)]
 	#[test]
 	fn pixel_buffer_resize_can_force_the_cpu() {
 		let config = crate::resize::Config {
@@ -2944,7 +3151,7 @@ mod tests {
 
 	/// The packed-pixel exit is total for a hardware surface and produces the
 	/// same image as its CPU representation, including padded CoreVideo rows.
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[test]
 	fn pixel_buffer_converts_to_rgba() {
 		let source = gradient_i420(322, 242);
@@ -2961,8 +3168,8 @@ mod tests {
 		assert_eq!(actual.data(), expected.data());
 	}
 
-	#[cfg(target_os = "macos")]
-	use super::macos::nv12_surface;
+	#[cfg(apple)]
+	use super::apple::nv12_surface;
 
 	/// A Direct3D11 texture stays on the GPU by default.
 	#[cfg(target_os = "windows")]
@@ -3094,5 +3301,47 @@ mod tests {
 		assert!(mae(gpu.y(), cpu.y()) < 4, "GPU and CPU luma disagree");
 		assert!(mae(gpu.u(), cpu.u()) < 4, "GPU and CPU u disagree");
 		assert!(mae(gpu.v(), cpu.v()) < 4, "GPU and CPU v disagree");
+	}
+}
+
+#[cfg(all(test, target_os = "linux", feature = "dmabuf"))]
+mod external_dmabuf_tests {
+	use super::*;
+	use std::sync::atomic::{AtomicUsize, Ordering};
+
+	#[test]
+	fn external_buffer_retains_lease_and_refuses_cpu_download() {
+		struct Guard(Arc<AtomicUsize>);
+		impl Drop for Guard {
+			fn drop(&mut self) {
+				self.0.fetch_add(1, Ordering::SeqCst);
+			}
+		}
+		let released = Arc::new(AtomicUsize::new(0));
+		let layout = DmaBufLayout::new(
+			DrmFormat::NV12,
+			Size::new(4, 2),
+			vec![DmaBufPlane::new(0, 4), DmaBufPlane::new(8, 4)],
+		);
+		let buffer = DmaBuf::new(
+			std::fs::File::open("/dev/zero").unwrap().into(),
+			layout,
+			Guard(released.clone()),
+		)
+		.unwrap();
+		assert!(Surface::DmaBuf(buffer.clone()).to_i420().is_err());
+		let export = buffer.export().unwrap();
+		drop(buffer);
+		assert_eq!(released.load(Ordering::SeqCst), 0);
+		drop(export);
+		assert_eq!(released.load(Ordering::SeqCst), 1);
+	}
+
+	#[test]
+	fn external_buffer_refuses_empty_or_zero_stride_planes() {
+		for planes in [vec![], vec![DmaBufPlane::new(0, 0)]] {
+			let layout = DmaBufLayout::new(DrmFormat::NV12, Size::new(4, 2), planes);
+			assert!(DmaBuf::new(std::fs::File::open("/dev/zero").unwrap().into(), layout, ()).is_err());
+		}
 	}
 }

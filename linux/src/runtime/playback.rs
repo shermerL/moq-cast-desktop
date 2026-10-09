@@ -91,7 +91,7 @@ impl VideoSelection {
         max_age: Duration,
     ) -> anyhow::Result<moq_video::decode::Consumer> {
         let mut options = moq_video::decode::Options::new();
-        options.max_age = max_age;
+        options.max_delay = max_age;
         options.decoder.output = moq_video::Output::Cpu;
         options.start = moq_video::decode::Start::Latest;
         moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), options)

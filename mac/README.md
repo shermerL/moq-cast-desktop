@@ -1,6 +1,6 @@
 # MoQCast macOS
 
-更新时间：2026-08-30 CST
+更新时间：2026-10-09 Asia/Shanghai
 
 `mac/` 是 MoQCast macOS 桌面端的唯一产品代码目录。当前工作树实现 M0-M2 的原生基础与 Nearby direct-only session。观看和发布媒体仍未实现。
 
@@ -12,12 +12,14 @@
 - discovery、session、media、capture 与 decoder 的独立 typed lifecycle 和 generation 边界。
 - 固定 `_moq._udp.local.`、`/.cluster/<credential>` 与 `moqcast.screen/<peer-id>` 契约。
 - 一个本地 publish Origin 与独立 remote receive Origin。健康 session 不因 mDNS Lost 被拆除。
-- 按冻结原型实现的 Nearby、Screen Share 不可用页和 Settings。普通 UI 只显示语言与公开版本。
-- 固定 moq-dev revision `24ccc98a2853d22c77178bf4713cad6d88f1e36d`，`network` 与 `foundation` feature 分开锁定依赖。
+- Nearby、Screen Share、播放器和 Settings；播放器支持音量、静音与播放信息。
+- 固定 moq-dev main revision `f8215bc47199b48512d805ae9fc710cc6586de51`，Cargo manifest、锁文件与构建来源一致。
 - 结构化且不含内部身份的普通日志，以及仅供应用内部消费的 typed snapshot。
 - macOS 14.2 deployment target、bundle ID `dev.moq.moqcast.macos` 和 ad hoc 签名 Universal 2 `.app` 打包。
 
-尚未实现：远端 H.264 Watch、ScreenCaptureKit、VideoToolbox 媒体管线、Opus 播放、持久化 DLOG/export、Developer ID 签名、公证与跨平台真机验收。M2 不显示 Watch、手动 Connect/Disconnect 或未实现的 Screen Share 控件。
+ScreenCaptureKit 系统选择器负责屏幕/窗口选择，VideoToolbox 与上游编码接口负责媒体处理；Opus 播放、诊断日志导出已接入。系统声音是否可用按所选来源明确提示。Developer ID 签名、公证尚未接入。
+
+升级后的采集使用上游 `encode::Capture`，音视频共享 catalog 时钟；实时播放从最新缓存组开始，保留音视频 80ms、纯视频 0ms 的 freshness budget。该预算不是端到端延迟保证；新基线仍需真机验证。
 
 ## 本地验证
 
@@ -31,7 +33,7 @@ cargo test --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-`app` 默认包含 `network`。当前 macOS CI 运行同一组默认 feature 测试和 Clippy，另行执行 no-default 契约测试；双架构 release build 也使用默认 feature。`foundation` 另外编译 moq-video、moq-audio、hang 与 moq-mux，留给后续媒体 milestone 按实现范围启用和验证。
+`app` 默认包含 `publish`，并通过 `watch` 包含 `network`。当前 macOS CI 运行同一组默认 feature 测试和 Clippy，另行执行 no-default 契约测试；双架构 release build 也使用默认 feature。`foundation` 同样启用 `publish` 媒体依赖。
 
 默认测试包含 loopback listener、credential/fingerprint 拒绝、direct-only Origin 与 generation 状态测试。同机 mDNS smoke 需要本地网络套接字，因此默认忽略并单独运行：
 

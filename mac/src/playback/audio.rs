@@ -101,8 +101,9 @@ fn supported_audio(config: &hang::catalog::AudioConfig) -> bool {
 
 fn decode_config() -> moq_audio::decode::Options {
     let mut options = moq_audio::decode::Options::new();
+    options.start = moq_audio::decode::Start::Latest;
     options.output.format = moq_audio::Format::F32;
-    options.max_age = LIVE_EDGE_BUDGET;
+    options.max_delay = LIVE_EDGE_BUDGET;
     options
 }
 
@@ -730,7 +731,8 @@ mod tests {
         let config = decode_config();
 
         assert_eq!(config.output.format, moq_audio::Format::F32);
-        assert_eq!(config.max_age, Duration::from_millis(80));
+        assert!(matches!(config.start, moq_audio::decode::Start::Latest));
+        assert_eq!(config.max_delay, Duration::from_millis(80));
     }
 
     #[test]

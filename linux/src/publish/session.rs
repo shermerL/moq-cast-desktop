@@ -112,12 +112,13 @@ impl Publication {
             let clock = self.clock;
             let result = {
                 let media = async {
+                    let mut options = moq_video::encode::Capture::default();
+                    options.capture = capture;
+                    options.encode = encode;
                     let video = moq_video::encode::publish_capture(
                         self.broadcast.clone(),
                         self.catalog.clone(),
-                        capture,
-                        encode,
-                        clock,
+                        options,
                     );
                     if self.system_audio {
                         let audio =

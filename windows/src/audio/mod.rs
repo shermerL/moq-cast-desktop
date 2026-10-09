@@ -637,7 +637,7 @@ mod tests {
             .unwrap()
             .subscribe(
                 moq_tokio::moq_net::track::Subscription::default()
-                    .with_max_age(Duration::from_secs(1)),
+                    .with_max_delay(Duration::from_secs(1)),
             )
             .await
             .unwrap();

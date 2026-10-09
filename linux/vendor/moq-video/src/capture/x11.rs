@@ -1176,8 +1176,158 @@ mod tests {
 		assert!(format.required_len(1, 1).is_err());
 	}
 
+	// The display must be a dedicated local server with a >=1920x1080 screen.
+	// Xvfb exercises the actual protocol and shared segment, not GPU capture.
 	#[test]
-	#[ignore = "conversion benchmark; run explicitly in release mode with --ignored"]
+	#[ignore = "local X11 capture benchmark; run with just rs x11-bench (also run nightly)"]
+	fn x11_capture_workload() {
+		use x11rb::protocol::xproto::{CreateGCAux, CreateWindowAux, Rectangle, WindowClass};
+
+		const WARMUP: usize = 8;
+		const SAMPLES: usize = 41;
+		let (drawing, screen) = connect().expect("a dedicated local X11 display is required");
+		let screen = &drawing.setup().roots[screen];
+		assert!(
+			screen.width_in_pixels >= 1920 && screen.height_in_pixels >= 1080,
+			"the X11 benchmark needs a screen of at least 1920x1080"
+		);
+		let config = Config {
+			cursor: false,
+			..Default::default()
+		};
+		for (width, height) in [(640u16, 480u16), (1280, 720), (1920, 1080)] {
+			let window = drawing.generate_id().unwrap();
+			drawing
+				.create_window(
+					screen.root_depth,
+					window,
+					screen.root,
+					0,
+					0,
+					width,
+					height,
+					0,
+					WindowClass::INPUT_OUTPUT,
+					screen.root_visual,
+					&CreateWindowAux::new().override_redirect(1).background_pixel(0),
+				)
+				.unwrap()
+				.check()
+				.unwrap();
+			drawing.map_window(window).unwrap().check().unwrap();
+			let mut shared = Capture::open(&config, Target::Window(window as usize)).unwrap();
+			assert!(
+				shared.shm.is_some(),
+				"the benchmark requires active MIT-SHM, not fallback"
+			);
+			let mut socket = Capture::open(&config, Target::Window(window as usize)).unwrap();
+			// Select the existing production fallback on the same server and drawable.
+			drop(socket.shm.take());
+			let black = drawing.generate_id().unwrap();
+			let white = drawing.generate_id().unwrap();
+			drawing
+				.create_gc(black, window, &CreateGCAux::new().foreground(0))
+				.unwrap()
+				.check()
+				.unwrap();
+			drawing
+				.create_gc(
+					white,
+					window,
+					&CreateGCAux::new()
+						.foreground(shared.format.red_mask | shared.format.green_mask | shared.format.blue_mask),
+				)
+				.unwrap()
+				.check()
+				.unwrap();
+			let expected: Vec<_> = [false, true]
+				.into_iter()
+				.map(|inverted| {
+					let rgb: Vec<_> = (0..height)
+						.flat_map(|_| (0..width).flat_map(|x| [if (x < width / 2) ^ inverted { 0 } else { 255 }; 3]))
+						.collect();
+					let frame = I420::from_rgb(&rgb, crate::Size::new(width.into(), height.into())).unwrap();
+					(rgb, frame)
+				})
+				.collect();
+			for mode in ["static", "dynamic"] {
+				let mut shared_times = Vec::with_capacity(SAMPLES);
+				let mut socket_times = Vec::with_capacity(SAMPLES);
+				for sample in 0..WARMUP + SAMPLES {
+					let inverted = mode == "dynamic" && !sample.is_multiple_of(2);
+					// Drawing and its server round-trip are outside both measured reads.
+					// Static samples leave the drawable untouched after the first draw.
+					if sample == 0 || mode == "dynamic" {
+						for (x, gc) in [
+							(0, if inverted { white } else { black }),
+							(width / 2, if inverted { black } else { white }),
+						] {
+							drawing
+								.poly_fill_rectangle(
+									window,
+									gc,
+									&[Rectangle {
+										x: x as i16,
+										y: 0,
+										width: width / 2,
+										height,
+									}],
+								)
+								.unwrap();
+						}
+						drawing.get_input_focus().unwrap().reply().unwrap();
+					}
+					let (shared_read, socket_read) = if sample.is_multiple_of(2) {
+						(measure_capture(&mut shared), measure_capture(&mut socket))
+					} else {
+						let socket_read = measure_capture(&mut socket);
+						(measure_capture(&mut shared), socket_read)
+					};
+					let (rgb, frame) = &expected[usize::from(inverted)];
+					assert!(&shared.rgb == rgb, "SHM pixels differ from the drawn pattern");
+					assert!(&socket.rgb == rgb, "GetImage pixels differ from the drawn pattern");
+					assert_eq!(shared_read.1.size(), frame.size());
+					assert_eq!(socket_read.1.size(), frame.size());
+					assert!(shared_read.1.data() == frame.data(), "SHM output differs");
+					assert!(socket_read.1.data() == frame.data(), "GetImage output differs");
+					if sample >= WARMUP {
+						shared_times.push(shared_read.0.as_nanos());
+						socket_times.push(socket_read.0.as_nanos());
+					}
+				}
+				shared_times.sort_unstable();
+				socket_times.sort_unstable();
+				let shm = shared_times[SAMPLES / 2];
+				let get_image = socket_times[SAMPLES / 2];
+				// Keep the paired baseline instead of asserting a machine-specific time.
+				println!(
+					"X11_CAPTURE_BENCH {{\"width\":{width},\"height\":{height},\"mode\":\"{mode}\",\"samples\":{SAMPLES},\"shm_median_ns\":{shm},\"get_image_median_ns\":{get_image},\"shm_over_get_image\":{:.6}}}",
+					shm as f64 / get_image as f64
+				);
+			}
+			drop(shared);
+			drop(socket);
+			drawing.free_gc(black).unwrap().check().unwrap();
+			drawing.free_gc(white).unwrap().check().unwrap();
+			drawing.destroy_window(window).unwrap().check().unwrap();
+		}
+	}
+
+	fn measure_capture(capture: &mut Capture) -> (Duration, I420) {
+		// Bypass only frame-rate sleeping; geometry checks, transport, buffer reuse
+		// and RGB-to-I420 conversion remain on the production Capture::read path.
+		capture.next = Instant::now();
+		let start = Instant::now();
+		let result = capture.read().expect("X11 capture read failed");
+		let elapsed = start.elapsed();
+		let pump::Read::Frame(Surface::I420(frame)) = result else {
+			panic!("the unchanged benchmark window must yield an I420 frame");
+		};
+		(elapsed, frame)
+	}
+
+	#[test]
+	#[ignore = "conversion benchmark; run with just rs x11-rgb-bench"]
 	fn x11_rgb_workload() {
 		use std::hint::black_box;
 		let format = bgra();
