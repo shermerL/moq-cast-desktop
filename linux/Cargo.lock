@@ -3198,7 +3198,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cast-desktop"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "eframe",

@@ -4,6 +4,20 @@
 
 This file documents notable changes to MoQCast Desktop.
 
+## 0.6.1 - 2026-10-11
+
+### 中文
+
+- 修复 Linux 重复发现附近设备时可能中断正在建立的连接的问题。
+- 更新三端 mDNS 发现组件，改善设备服务改名后的离线通知处理。
+- 改善附近设备的多地址连接，减少单个不可达地址对连接建立的影响。
+
+### English
+
+- Fix pending connections being interrupted when nearby devices are rediscovered on Linux.
+- Update mDNS discovery across desktop platforms to improve goodbye handling after service renaming.
+- Improve connection establishment for nearby devices with multiple addresses, reducing the impact of an unreachable candidate.
+
 ## 0.6.0 - 2026-10-09
 
 ### 中文
