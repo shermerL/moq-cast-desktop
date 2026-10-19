@@ -255,14 +255,13 @@ impl MoqCastApp {
                     if response.details {
                         self.selected_peer = Some(peer.id.clone());
                     }
-                    if response.watch {
-                        if current {
-                            self.page = Page::Watch;
-                        } else if self.send(RuntimeCommand::WatchScreen {
-                            path: crate::screen_path::for_peer(&peer.id),
-                        }) {
-                            self.page = Page::Watch;
-                        }
+                    if response.watch
+                        && (current
+                            || self.send(RuntimeCommand::WatchScreen {
+                                path: crate::screen_path::for_peer(&peer.id),
+                            }))
+                    {
+                        self.page = Page::Watch;
                     }
                     ui.add_space(8.0);
                 }
@@ -800,8 +799,10 @@ mod tests {
             moqcast_diagnostics::BuildInfo::new("test"),
             "UI fixture",
         ));
-        let mut snapshot = RuntimeSnapshot::default();
-        snapshot.discovery = DiscoveryState::Stopped;
+        let snapshot = RuntimeSnapshot {
+            discovery: DiscoveryState::Stopped,
+            ..Default::default()
+        };
         (
             MoqCastApp {
                 page: Page::Nearby,
@@ -926,9 +927,11 @@ mod tests {
     }
     #[test]
     fn source_tab_must_match_the_source_sent_for_sharing() {
-        let mut s = RuntimeSnapshot::default();
-        s.discovery = DiscoveryState::Ready;
-        s.local_id = Some("local".into());
+        let mut s = RuntimeSnapshot {
+            discovery: DiscoveryState::Ready,
+            local_id: Some("local".into()),
+            ..Default::default()
+        };
         s.media.capture_sources.phase = CaptureSourceCatalogPhase::Ready;
         s.media.capture_sources.selected = Some(CaptureSourceChoice {
             kind: CaptureSourceKind::Display,
@@ -944,9 +947,11 @@ mod tests {
     }
     #[test]
     fn missing_advertisement_does_not_hide_an_available_route() {
-        let mut s = RuntimeSnapshot::default();
-        s.discovery = DiscoveryState::Ready;
-        s.inbound_sessions = 1;
+        let mut s = RuntimeSnapshot {
+            discovery: DiscoveryState::Ready,
+            inbound_sessions: 1,
+            ..Default::default()
+        };
         let p = PeerView {
             id: "peer".into(),
             candidates: vec![],
