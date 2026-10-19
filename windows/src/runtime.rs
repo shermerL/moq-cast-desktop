@@ -475,6 +475,22 @@ pub(crate) struct RuntimeOwner {
 }
 
 impl RuntimeOwner {
+    #[cfg(test)]
+    pub(crate) fn isolated_for_ui_test() -> (Self, mpsc::Receiver<RuntimeCommand>) {
+        let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        let (_, snapshots) = watch::channel(RuntimeSnapshot::default());
+        let (_, playback) = watch::channel(None);
+        (
+            Self {
+                commands,
+                snapshots,
+                playback,
+                thread: None,
+            },
+            receiver,
+        )
+    }
+
     pub(crate) fn start(config: RuntimeConfig) -> Result<Self, RuntimeStartError> {
         let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (snapshot_tx, snapshots) = watch::channel(RuntimeSnapshot::default());

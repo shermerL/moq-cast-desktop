@@ -16,6 +16,21 @@ use objc2_screen_capture_kit::{
 
 use crate::publication::Selection;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Kind {
+    #[default]
+    Display,
+    Window,
+}
+impl Kind {
+    pub(super) fn matches(self, selection: &Selection) -> bool {
+        matches!(
+            (self, selection),
+            (Self::Display, Selection::Display { .. }) | (Self::Window, Selection::Window { .. })
+        )
+    }
+}
+
 pub(super) enum Event {
     Selected(Selection),
     Cancelled,
@@ -101,8 +116,17 @@ impl Picker {
         }
     }
 
-    pub(super) fn present(&self) {
-        unsafe { self.picker.present() };
+    pub(super) fn present(&self, kind: Kind) {
+        let configuration = unsafe { SCContentSharingPickerConfiguration::new() };
+        unsafe {
+            configuration.setAllowedPickerModes(match kind {
+                Kind::Display => SCContentSharingPickerMode::SingleDisplay,
+                Kind::Window => SCContentSharingPickerMode::SingleWindow,
+            });
+            configuration.setAllowsChangingSelectedContent(false);
+            self.picker.setDefaultConfiguration(&configuration);
+            self.picker.present();
+        }
     }
 
     pub(super) fn poll(&self) -> Option<Event> {

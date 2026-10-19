@@ -198,15 +198,26 @@ pub fn player_info_control(
     snapshot: PlayerInfoSnapshot<'_>,
     enabled: bool,
 ) -> PlayerInfoResponse {
-    state.sync_generation(snapshot.generation);
-    if !enabled && state.open {
-        state.close();
-    }
-
     let button = player_icon_button(
         ui,
         IconButtonSpec::player("ⓘ", info_button_label(locale)).enabled(enabled),
     );
+    player_info_from_button(ui, state, locale, now, snapshot, button, None)
+}
+
+pub(crate) fn player_info_from_button(
+    ui: &mut Ui,
+    state: &mut PlayerInfoState,
+    locale: PlayerInfoLocale,
+    now: f64,
+    snapshot: PlayerInfoSnapshot<'_>,
+    button: egui::Response,
+    palette: Option<crate::v2::Palette>,
+) -> PlayerInfoResponse {
+    state.sync_generation(snapshot.generation);
+    if !button.enabled() && state.open {
+        state.close();
+    }
     let button_active =
         button.contains_pointer() || button.has_focus() || button.is_pointer_button_down_on();
     if button.clicked() {
@@ -230,15 +241,24 @@ pub fn player_info_control(
         .width(available)
         .frame(
             egui::Frame::popup(ui.style())
-                .fill(COLORS.player_bar.into())
+                .fill(palette.map_or(COLORS.player_bar.into(), |p| p.surface))
                 .stroke(Stroke::new(
                     1.0,
-                    Color32::from(COLORS.player_muted).gamma_multiply(0.45),
+                    palette.map_or(
+                        Color32::from(COLORS.player_muted).gamma_multiply(0.45),
+                        |p| p.border,
+                    ),
                 ))
                 .corner_radius(CornerRadius::same(Radius::MD as u8))
                 .inner_margin(Margin::same(Spacing::MD as i8)),
         )
-        .show(|ui| show_player_info(ui, locale, snapshot, state.meter.updates_per_second));
+        .show(|ui| {
+            ui.visuals_mut().override_text_color =
+                Some(palette.map_or(COLORS.player_text.into(), |p| p.text));
+            ui.visuals_mut().weak_text_color =
+                Some(palette.map_or(COLORS.player_muted.into(), |p| p.muted));
+            show_player_info(ui, locale, snapshot, state.meter.updates_per_second);
+        });
     if was_open && !state.open {
         state.meter.reset();
     }
@@ -259,7 +279,7 @@ fn show_player_info(
     ui.label(typography(
         panel_title(locale),
         TypographyRole::Section,
-        COLORS.player_text.into(),
+        ui.visuals().text_color(),
     ));
     ui.add_space(Spacing::XS);
     if let Some(source) = snapshot.source {
@@ -332,7 +352,7 @@ fn info_section(ui: &mut Ui, label: &str) {
     ui.label(typography(
         label,
         TypographyRole::Meta,
-        COLORS.player_text.into(),
+        ui.visuals().text_color(),
     ));
     ui.add_space(Spacing::XS);
 }
@@ -346,7 +366,7 @@ fn info_row(ui: &mut Ui, label: &str, value: String) {
                 Label::new(typography(
                     label,
                     TypographyRole::Meta,
-                    COLORS.player_muted.into(),
+                    ui.visuals().weak_text_color(),
                 )),
             );
             ui.add_sized(
@@ -354,7 +374,7 @@ fn info_row(ui: &mut Ui, label: &str, value: String) {
                 Label::new(typography(
                     value.as_str(),
                     TypographyRole::Meta,
-                    COLORS.player_text.into(),
+                    ui.visuals().text_color(),
                 ))
                 .truncate(),
             );

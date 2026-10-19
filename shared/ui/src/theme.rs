@@ -1,8 +1,8 @@
 use std::borrow::Cow;
 
 use egui::{
-    Context, FontData, FontFamily, Margin, Stroke, Visuals,
-    epaint::text::{FontInsert, FontPriority, InsertFontFamily},
+    Context, FontData, FontFamily, FontTweak, Margin, Stroke, Visuals,
+    epaint::text::{FontInsert, FontPriority, InsertFontFamily, VariationCoords},
 };
 
 use crate::{COLORS, Radius, Size, Spacing};
@@ -44,7 +44,11 @@ pub fn install_ui_font(context: &Context, bytes: Cow<'static, [u8]>) {
     };
     context.add_font(FontInsert::new(
         "Noto Sans SC Variable",
-        data,
+        // This variable font defaults to Thin (100); ordinary labels need Regular.
+        data.tweak(FontTweak {
+            coords: VariationCoords::new([(b"wght", 400.0)]),
+            ..Default::default()
+        }),
         font_families(),
     ));
 }
@@ -65,6 +69,36 @@ fn font_families() -> Vec<InsertFontFamily> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_font_uses_regular_weight_for_unstyled_text() {
+        let ctx = Context::default();
+        install_ui_font(&ctx, Cow::Borrowed(crate::NOTO_SANS_SC));
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.ctx().fonts_mut(|fonts| {
+                let data = &fonts.definitions().font_data["Noto Sans SC Variable"];
+                let weight = data
+                    .tweak
+                    .coords
+                    .as_ref()
+                    .iter()
+                    .find(|(tag, _)| tag.into_bytes() == *b"wght")
+                    .map(|(_, value)| *value)
+                    .or_else(|| {
+                        data.variation_axes()
+                            .iter()
+                            .find(|axis| axis.tag.into_bytes() == *b"wght")
+                            .map(|axis| axis.default)
+                    });
+                assert_eq!(weight, Some(400.0));
+                assert!(fonts.has_glyphs(
+                    &egui::FontId::proportional(14.0),
+                    "附近设备屏幕共享设置 MoQCast 0123456789"
+                ));
+            });
+        });
+        output.textures_delta.clear();
+    }
 
     #[test]
     fn shared_font_keeps_default_latin_monospace_primary() {

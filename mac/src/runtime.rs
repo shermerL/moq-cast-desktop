@@ -586,6 +586,20 @@ pub(crate) struct RuntimeOwner {
 }
 
 impl RuntimeOwner {
+    #[cfg(test)]
+    pub(crate) fn isolated_for_ui_test() -> (Self, impl FnMut() -> bool) {
+        // Layout fixtures record commands without advertising or opening media sessions.
+        let (commands, mut receiver) = mpsc::channel(COMMAND_CAPACITY);
+        let owner = Self {
+            commands,
+            system_events: mpsc::unbounded_channel().0,
+            snapshot: watch::channel(Arc::new(AppSnapshot::default())).1,
+            frames: watch::channel(None).1,
+            owner: None,
+        };
+        (owner, move || receiver.try_recv().is_ok())
+    }
+
     pub(crate) fn start(
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, RuntimeStartError> {

@@ -1,7 +1,7 @@
 //! Remote screen playback page.
 
 use eframe::egui;
-use moqcast_ui::{PlayerFrameSample, StatePanelKind, StatePanelSpec, primary_button, state_panel};
+use moqcast_ui::{PlayerFrameSample, v2};
 
 use super::super::player::{LivePlayer, PlayerAction, PlayerMode, PlayerPlayback};
 use super::super::{AppSnapshot, Locale, MediaState, UserCommand};
@@ -54,19 +54,25 @@ pub(in crate::app) fn show(
             )
             .map(player_action),
         _ => {
-            let mut open_nearby = false;
-            state_panel(
+            let failed = snapshot.last_error.is_some();
+            v2::canvas_message(
                 ui,
-                StatePanelSpec::new(
-                    StatePanelKind::Empty,
-                    locale.choose_watch_screen(),
-                    locale.choose_watch_screen_hint(),
-                ),
-                |ui| {
-                    open_nearby = primary_button(ui, locale.open_nearby(), true).clicked();
+                v2::CanvasMessage {
+                    title: if failed {
+                        locale.text("播放失败", "Playback failed")
+                    } else {
+                        locale.text("播放已结束", "Playback ended")
+                    },
+                    detail: if failed {
+                        locale.operation_failed()
+                    } else {
+                        ""
+                    },
+                    action: locale.open_nearby(),
                 },
-            );
-            open_nearby.then_some(WatchAction::OpenNearby)
+            )
+            .clicked()
+            .then_some(WatchAction::OpenNearby)
         }
     }
 }

@@ -2,45 +2,11 @@
 
 use std::collections::BTreeMap;
 
-use moqcast_ui::Size;
-
 use crate::{
     network::PeerSession,
     remote::{ScreenAvailability, ScreenView as RemoteScreen},
     runtime::PeerSnapshot,
 };
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ContentLayout {
-    SingleColumn,
-    ListDetail,
-}
-
-impl ContentLayout {
-    pub(super) fn for_width(width: f32) -> Self {
-        if width >= Size::SPLIT_BREAKPOINT {
-            Self::ListDetail
-        } else {
-            Self::SingleColumn
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum NavigationLayout {
-    TwoRows,
-    OneRow,
-}
-
-impl NavigationLayout {
-    pub(super) fn for_width(width: f32) -> Self {
-        if width >= Size::SPLIT_BREAKPOINT {
-            Self::OneRow
-        } else {
-            Self::TwoRows
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PresenceView {
@@ -84,16 +50,6 @@ impl From<&PeerSnapshot> for PeerPresentation {
             connection,
         }
     }
-}
-
-pub(super) fn selected_peer(
-    current: Option<&str>,
-    peers: &BTreeMap<String, PeerSnapshot>,
-) -> Option<String> {
-    current
-        .filter(|id| peers.contains_key(*id))
-        .map(str::to_owned)
-        .or_else(|| peers.keys().next().cloned())
 }
 
 pub(super) fn screen_availability(

@@ -7,8 +7,7 @@ use std::sync::mpsc;
 use eframe::egui::{self};
 use moqcast_diagnostics::{Entry, ExportRequest, FileStatus, Handle, LogLevel, Snapshot};
 use moqcast_ui::{
-    COLORS, SelectSpec, SettingRowSpec, Spacing, SwitchSpec, TypographyRole, secondary_button,
-    section_header, select, setting_row, switch, typography,
+    COLORS, SelectSpec, SwitchSpec, TypographyRole, secondary_button, select, switch, typography,
 };
 
 use crate::app::Locale;
@@ -55,116 +54,83 @@ impl DiagnosticsUi {
         self.visible = false;
     }
 
+    pub(crate) fn visible(&self) -> bool {
+        self.visible
+    }
+
     pub(crate) fn show_settings(&mut self, ui: &mut egui::Ui, locale: Locale) {
-        section_header(
-            ui,
-            text(locale, "诊断日志", "Diagnostic logs"),
-            Some(text(
-                locale,
-                "日志仅保存在本机，由你选择是否导出。",
-                "Logs stay on this device and are exported only when you choose.",
-            )),
-        );
-
-        let mut detailed = self.handle.detailed();
-        let detailed_response = setting_row(
-            ui,
-            SettingRowSpec::new(text(locale, "详细诊断", "Detailed diagnostics")).description(
-                text(
-                    locale,
-                    "仅提高允许模块的日志级别；网络与 mDNS 模块仍限制为警告。",
-                    "Raises only approved targets; transport and mDNS remain capped at warnings.",
-                ),
-            ),
-            |ui| {
-                switch(
-                    ui,
-                    &mut detailed,
-                    SwitchSpec::new(text(locale, "详细诊断", "Detailed diagnostics")),
-                )
-            },
-        );
-        if detailed_response.changed() {
-            self.handle.set_detailed(detailed);
-        }
-        ui.separator();
-        setting_row(
-            ui,
-            SettingRowSpec::new(text(locale, "显示应用日志", "Show application logs")),
-            |ui| {
-                switch(
-                    ui,
-                    &mut self.visible,
-                    SwitchSpec::new(text(locale, "显示应用日志", "Show application logs")),
-                );
-            },
-        );
-
-        ui.add_space(Spacing::MD);
-        let file_available = match self.handle.file_status() {
-            FileStatus::Available(directory) => {
-                ui.label(typography(
-                    format!(
-                        "{}: {}",
-                        text(locale, "日志目录", "Log directory"),
-                        directory.display()
-                    ),
-                    TypographyRole::Meta,
-                    COLORS.muted.into(),
-                ));
-                true
-            }
-            FileStatus::Unavailable(reason) => {
-                ui.label(typography(
-                    match locale {
-                        Locale::Chinese => {
-                            format!("文件诊断不可用：{reason}。应用仍可继续运行。")
-                        }
-                        Locale::English => format!(
-                            "File diagnostics unavailable: {reason}. The application can continue."
-                        ),
-                    },
-                    TypographyRole::Help,
-                    COLORS.danger.into(),
-                ));
-                false
-            }
-        };
-        ui.label(typography(
-            format!(
-                "{}: {}",
-                text(locale, "已丢弃诊断项", "Dropped diagnostics"),
-                self.handle.dropped_count()
-            ),
-            TypographyRole::Meta,
-            COLORS.muted.into(),
-        ));
-        ui.horizontal_wrapped(|ui| {
-            if secondary_button(
-                ui,
-                text(locale, "打开日志目录", "Open log directory"),
-                file_available,
-            )
-            .clicked()
-            {
-                self.open_directory();
-            }
-            if secondary_button(
-                ui,
-                text(locale, "导出本地日志", "Export local logs"),
-                file_available && self.export_rx.is_none(),
-            )
+        use moqcast_ui::v2::{self, Action, ActionTone, StatusTone};
+        let available = matches!(self.handle.file_status(), FileStatus::Available(_));
+        v2::settings_row(ui, text(locale, "日志", "Logs"), |ui| {
+            if (Action {
+                label: text(locale, "导出日志", "Export logs"),
+                size: egui::vec2(100.0, 40.0),
+                enabled: available && self.export_rx.is_none(),
+                tone: ActionTone::Neutral,
+            })
+            .show(ui)
             .clicked()
             {
                 self.choose_export();
             }
+            if (Action {
+                label: text(locale, "打开目录", "Open folder"),
+                size: egui::vec2(100.0, 40.0),
+                enabled: available,
+                tone: ActionTone::Neutral,
+            })
+            .show(ui)
+            .clicked()
+            {
+                self.open_directory();
+            }
         });
+        if !available {
+            v2::notice(
+                ui,
+                StatusTone::Warning,
+                text(locale, "文件日志不可用", "File diagnostics unavailable"),
+            );
+        }
         if let Some(status) = self.localized_status(locale) {
-            ui.label(typography(
-                status,
-                TypographyRole::Meta,
-                COLORS.muted.into(),
-            ));
+            ui.label(status);
+        }
+    }
+    pub(crate) fn show_developer_settings(&mut self, ui: &mut egui::Ui, locale: Locale) {
+        use moqcast_ui::v2::{self, Action, ActionTone, StatusTone};
+        let mut detailed = self.handle.detailed();
+        v2::settings_row(
+            ui,
+            text(locale, "详细诊断", "Detailed diagnostics"),
+            |ui| {
+                if ui.checkbox(&mut detailed, "").changed() {
+                    self.handle.set_detailed(detailed);
+                }
+            },
+        );
+        v2::settings_row(ui, text(locale, "应用日志", "Application logs"), |ui| {
+            if (Action {
+                label: text(locale, "打开日志", "Open logs"),
+                size: egui::vec2(108.0, 40.0),
+                enabled: true,
+                tone: ActionTone::Neutral,
+            })
+            .show(ui)
+            .clicked()
+            {
+                self.visible = true;
+            }
+        });
+        if self.handle.dropped_count() > 0 {
+            v2::notice(
+                ui,
+                StatusTone::Warning,
+                &format!(
+                    "{}: {}",
+                    text(locale, "已丢弃日志", "Dropped log entries"),
+                    self.handle.dropped_count()
+                ),
+            );
         }
     }
 

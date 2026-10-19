@@ -4,7 +4,7 @@
 
 当前 Windows 桌面端已经包含 W1/W2 发现与安全会话基础、deterministic mesh、共享 Origin、单路屏幕发布，以及远端 screen catalog 订阅和 Live Player。Nearby 根据上游 `should_dial` 自动直连，不提供手动 Connect/Disconnect；短暂 mDNS Lost 不会拆除健康 QUIC session。屏幕发布固定使用 `moqcast.screen/<local-peer-id>`，观看与发布互斥，停止媒体不会拆除 mesh。
 
-界面内置 `assets/fonts/NotoSansSC-Regular.otf` 作为 proportional 与 monospace 的最低优先级简体中文 fallback，不替换默认拉丁字体。字体采用 SIL Open Font License，许可证见 `assets/fonts/LICENSE-NOTO`。
+界面由 shared-ui 内嵌 Noto Sans SC，统一中文与英文正文，默认字重400；等宽日志保留等宽字体并使用中文后备。字体与 SIL Open Font License 见 `../shared/ui/assets/fonts/`。
 
 屏幕发布使用上游 moq-video 的 Windows Graphics Capture（WGC）与 H.264。WGC 要求 Windows 10 2004（build 19041）或更新系统及受支持的图形设备；旧系统会明确拒绝采集，不回退到 Desktop Duplication/GDI。默认兼容模式保持显示器原生尺寸，最长边不超过 1920，并由 `Auto` 优先选择 Media Foundation、在硬件 encoder 打开失败时尝试 OpenH264；该兼容规则不新增宽高比限制。可选的原生 QHD 模式当前只接受横屏 2560x1440，并强制使用硬件 H.264；应用在开始共享时验证显示器尺寸和 encoder，失败会明确结束本次发布，绝不降级到 OpenH264。当前应用策略仍不提供竖屏 QHD、4K 或缩放模式；更换采集后端不自动扩大已验证的编码策略。
 
@@ -52,3 +52,9 @@ macOS 上的纯逻辑测试不会编译或运行 WASAPI、WGC、Media Foundation
 普通 LAN 设备的同一份广告地址作为一个连接目标，复用上游 QUIC 交错拨号；某个地址不响应时，后续候选不必等待它超时。地址保留 IPv6 scope，沿用证书指纹与凭据校验、原有连接预算和取消机制。只有握手赢家进入业务会话；显式 node URL 保持原有处理。单独的 mDNS Lost 仍不会拆除健康连接。
 
 三端消费者锁文件使用 `mdns-sd 0.21.4`，包括冲突改名后的 goodbye 修复。这不能代替跨重启身份管理，也不保证所有网络环境都能连接。
+
+## UI v2 开发候选
+
+UI v2 候选复用 shared-ui 的主题、品牌、页头、设备行、弹层与播放器。观看从附近设备进入，返回列表不停止播放；WGC 来源页保持屏幕/窗口切换、刷新和启动前校验，开始/停止区固定。设置保留日志导出、语言及跟随系统/浅色/深色。系统音频沿用既有采集行为，不显示无效的可编辑开关。
+
+Mac 主机上的 UI/状态测试不覆盖 Windows WGC、WASAPI、GPU 或原生窗口；目标编译、125%/150%/200% DPI、全屏和媒体回归仍须分别验收。

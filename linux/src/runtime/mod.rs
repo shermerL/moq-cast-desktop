@@ -86,6 +86,22 @@ pub struct RuntimeHandle {
 }
 
 impl RuntimeHandle {
+    #[cfg(test)]
+    pub(crate) fn isolated_for_ui_test() -> (Self, mpsc::Receiver<UserCommand>) {
+        let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        let (_, snapshot) = watch::channel(Arc::new(AppSnapshot::default()));
+        let (_, playback) = watch::channel(None);
+        (
+            Self {
+                commands,
+                snapshot,
+                playback,
+                owner: None,
+            },
+            receiver,
+        )
+    }
+
     /// Start a bounded command channel and its Tokio owner thread.
     pub fn start() -> Result<Self, RuntimeStartError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()

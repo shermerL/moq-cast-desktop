@@ -1,8 +1,16 @@
 # MoQCast macOS
 
-更新时间：2026-10-09 Asia/Shanghai
+## UI v2 本地候选（dev-ui）
 
-`mac/` 是 MoQCast macOS 桌面端的唯一产品代码目录。当前工作树实现 M0-M2 的原生基础与 Nearby direct-only session。观看和发布媒体仍未实现。
+`dev-ui` 接入 `moqcast_ui::v2`，采用本机卡片、附近设备列表及固定页脚的新布局。设备名称/信息按钮打开详情，观看按钮进入播放器；设置和详情使用弹层。共享设置保留系统选择器，开始/停止操作固定在可见区域。浅色、深色、跟随系统可切换并持久保存。
+
+返回附近设备不停止播放；媒体互斥、Nearby 关闭确认、采集权限与 runtime 状态契约沿用现有实现。播放器保持 LIVE 及原红色，画面按比例使用独立黑色舞台，工具栏跟随主题，等待只保留转圈。字体随二进制内嵌，默认字重明确为400。此候选未合并、未发布，不代表 Windows/Linux 已迁移，也未完成最终视觉或媒体真机验收。
+
+从 `mac/` 目录使用 `cargo +1.95.0 run --release --locked` 运行，以读取本目录的 macOS 14.2 部署配置。组件契约与目录入口见 `../shared/ui/README.md`。
+
+更新时间：2026-10-19 Asia/Shanghai
+
+`mac/` 是 MoQCast macOS 桌面端的唯一产品代码目录。当前实现 Nearby direct-only session、ScreenCaptureKit 屏幕/窗口共享与原生音视频播放。
 
 ## 当前范围
 

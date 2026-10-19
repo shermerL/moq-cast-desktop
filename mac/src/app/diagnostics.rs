@@ -55,54 +55,25 @@ impl DiagnosticsUi {
     }
 
     pub(super) fn show_settings(&mut self, ui: &mut egui::Ui, locale: Locale) {
-        ui.label(RichText::new(text(locale, "本地日志", "Local logs")).strong());
-        ui.small(text(
-            locale,
-            "日志仅保存在这台 Mac 上，只有你主动选择时才会导出。",
-            "Logs stay on this Mac and are exported only when you choose.",
-        ));
-        ui.add_space(8.0);
-
-        ui.checkbox(
-            &mut self.visible,
-            text(locale, "显示应用日志", "Show application logs"),
-        );
-
-        let file_available = match self.handle.file_status() {
-            FileStatus::Available(directory) => {
-                ui.small(format!(
-                    "{}: {}",
-                    text(locale, "日志目录", "Log directory"),
-                    directory.display()
-                ));
-                true
-            }
-            FileStatus::Unavailable(reason) => {
-                ui.colored_label(
-                    ui.visuals().error_fg_color,
-                    match locale {
-                        Locale::Chinese => {
-                            format!("文件日志不可用：{reason}。应用仍可继续运行。")
-                        }
-                        Locale::English => format!(
-                            "File logs are unavailable: {reason}. The application can continue."
-                        ),
-                    },
-                );
-                false
-            }
-        };
-        ui.small(format!(
-            "{}: {}",
-            text(locale, "已丢弃日志项", "Dropped log entries"),
-            self.handle.dropped_count()
-        ));
-        ui.horizontal_wrapped(|ui| {
+        let file_status = self.handle.file_status();
+        let file_available = matches!(file_status, FileStatus::Available(_));
+        if let FileStatus::Unavailable(reason) = &file_status {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                text(locale, "文件日志不可用", "File logs are unavailable"),
+            )
+            .on_hover_text(reason);
+        }
+        moqcast_ui::v2::settings_row(ui, text(locale, "日志", "Logs"), |ui| {
             if ui
                 .add_enabled(
                     file_available && self.open_rx.is_none(),
-                    egui::Button::new(text(locale, "打开日志目录", "Open log directory")),
+                    egui::Button::new(text(locale, "打开目录", "Open folder")),
                 )
+                .on_hover_text(match &file_status {
+                    FileStatus::Available(directory) => directory.display().to_string(),
+                    FileStatus::Unavailable(reason) => reason.clone(),
+                })
                 .clicked()
             {
                 self.open_directory(ui.ctx().clone());
@@ -112,6 +83,11 @@ impl DiagnosticsUi {
                     file_available && self.export_rx.is_none(),
                     egui::Button::new(text(locale, "导出本地日志", "Export local logs")),
                 )
+                .on_hover_text(text(
+                    locale,
+                    "日志仅保存在本机，导出时由你选择位置。",
+                    "Logs stay on this Mac; choose a location when exporting.",
+                ))
                 .clicked()
             {
                 self.choose_export(ui.ctx().clone());
@@ -122,11 +98,20 @@ impl DiagnosticsUi {
         }
     }
 
-    pub(super) fn show_window(&mut self, context: &egui::Context, locale: Locale) {
+    pub(super) fn show_developer_settings(&mut self, ui: &mut egui::Ui, locale: Locale) -> bool {
+        moqcast_ui::v2::settings_row(ui, text(locale, "详细日志", "Detailed logs"), |ui| {
+            if ui.button(text(locale, "查看日志", "Open logs")).clicked() {
+                self.visible = true;
+            }
+        });
+        self.visible
+    }
+
+    pub(super) fn show_window(&mut self, context: &egui::Context, locale: Locale) -> bool {
         self.poll_open();
         self.poll_export();
         if !self.visible {
-            return;
+            return false;
         }
         context.request_repaint_after(Duration::from_millis(250));
         self.refresh_snapshot();
@@ -134,8 +119,10 @@ impl DiagnosticsUi {
         egui::Window::new(text(locale, "应用日志", "Application logs"))
             .id(egui::Id::new("diagnostics-log-window"))
             .open(&mut open)
-            .default_size(egui::vec2(860.0, 520.0))
-            .min_size(egui::vec2(520.0, 320.0))
+            .frame(moqcast_ui::v2::Palette::new(context.global_style().visuals.dark_mode).dialog())
+            .default_size(egui::vec2(700.0, 360.0))
+            .max_size(context.content_rect().size() - egui::vec2(72.0, 96.0))
+            .min_size(egui::vec2(480.0, 280.0))
             .show(context, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(text(locale, "最低级别", "Minimum level"));
@@ -210,6 +197,7 @@ impl DiagnosticsUi {
                 }
             });
         self.visible = open;
+        !open
     }
 
     fn open_directory(&mut self, context: egui::Context) {

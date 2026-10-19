@@ -208,7 +208,7 @@ fn player_volume_icon_button(ui: &mut Ui, muted: bool, accessible_label: &str) -
     response
 }
 
-fn paint_speaker_icon(ui: &Ui, rect: Rect, muted: bool, icon_color: Color32) {
+pub(crate) fn paint_speaker_icon(ui: &Ui, rect: Rect, muted: bool, icon_color: Color32) {
     let center = rect.center();
     let body = vec![
         pos2(center.x - 9.0, center.y - 3.0),

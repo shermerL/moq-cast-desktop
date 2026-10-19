@@ -5,8 +5,8 @@ mod form;
 mod header;
 mod layout;
 mod navigation;
-mod player;
-mod player_info;
+pub(crate) mod player;
+pub(crate) mod player_info;
 mod row;
 mod state_panel;
 
