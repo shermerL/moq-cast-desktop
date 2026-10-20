@@ -619,6 +619,7 @@ impl ServiceOwner {
         let Some(generation) = self.lifecycle.begin_start() else {
             return;
         };
+        tracing::info!(generation, "starting Nearby services");
         snapshot.begin_scan();
         let _ = snapshots.send(snapshot.clone());
         match start_services(config, generation).await {
@@ -626,22 +627,29 @@ impl ServiceOwner {
                 let listener = services.sessions.advertisement().addr.to_string();
                 let local_id = sanitize_identity(services.discovery.id());
                 snapshot.started_scan(listener, local_id);
+                tracing::info!(generation, "Nearby listener and discovery ready");
                 self.services = Some(services);
             }
             Ok(services) => services.shutdown().await,
             Err(message) => {
                 self.lifecycle.fail(generation);
                 snapshot.failed_scan(message);
+                tracing::warn!(generation, reason = message, "Nearby startup failed");
             }
         }
     }
 
     async fn stop(&mut self, snapshot: &mut RuntimeSnapshot) {
+        tracing::info!(
+            generation = self.lifecycle.generation,
+            "stopping Nearby services"
+        );
         self.lifecycle.stop();
         if let Some(services) = self.services.take() {
             services.shutdown().await;
         }
         snapshot.stopped_scan();
+        tracing::info!("Nearby services stopped");
     }
 
     async fn fail(&mut self, snapshot: &mut RuntimeSnapshot, message: &'static str) {
@@ -759,6 +767,17 @@ async fn run(
                         let raw_id = peer.id.clone();
                         let key = sanitize_identity(&raw_id);
                         let change = services.registry.found(&peer, should_dial);
+                        tracing::debug!(
+                            generation,
+                            should_dial,
+                            address_count = peer.addrs.len(),
+                            registry_changed = matches!(
+                                change,
+                                RegistryChange::Added(_) | RegistryChange::Updated(_)
+                            ),
+                            ignored_self = matches!(change, RegistryChange::IgnoredSelf),
+                            "Nearby discovery delivered Found"
+                        );
                         services.raw_peers.insert(key.clone(), peer);
                         snapshot.apply_registry(change);
                         if should_dial {
@@ -777,6 +796,12 @@ async fn run(
                         let key = sanitize_identity(&raw_id);
                         services.raw_peers.remove(&key);
                         snapshot.apply_registry(services.registry.lost(&raw_id));
+                        tracing::debug!(
+                            generation,
+                            present_peers = snapshot.present_peer_count(),
+                            retained_peers = snapshot.peers.len(),
+                            "Nearby discovery delivered Lost"
+                        );
                     }
                     _ => {}
                 }
@@ -1348,6 +1373,11 @@ fn apply_session_update(snapshot: &mut RuntimeSnapshot, update: TransportUpdate)
                 }
             };
             snapshot.set_inbound_session_count(count);
+            tracing::info!(
+                inbound_sessions = count,
+                phase = ?update.state.phase(),
+                "Nearby inbound session state changed"
+            );
         }
     }
 }

@@ -306,7 +306,24 @@ impl MoqCastApp {
 
 impl eframe::App for MoqCastApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.snapshot = self.runtime.snapshot();
+        let next = self.runtime.snapshot();
+        if tracing::enabled!(tracing::Level::DEBUG)
+            && (next.discovery != self.snapshot.discovery
+                || next.peers.len() != self.snapshot.peers.len()
+                || next.present_peer_count() != self.snapshot.present_peer_count()
+                || next.inbound_sessions != self.snapshot.inbound_sessions
+                || visible_peer_views(&next).count() != visible_peer_views(&self.snapshot).count())
+        {
+            tracing::debug!(
+                discovery = ?next.discovery,
+                known_peers = next.peers.len(),
+                present_peers = next.present_peer_count(),
+                visible_peers = visible_peer_views(&next).count(),
+                inbound_sessions = next.inbound_sessions,
+                "Nearby UI snapshot changed"
+            );
+        }
+        self.snapshot = next;
         match self.snapshot.discovery {
             DiscoveryState::Stopping => self.nearby_turn_off_pending = true,
             DiscoveryState::Stopped | DiscoveryState::Failed => {
@@ -412,18 +429,17 @@ fn has_active_media(snapshot: &RuntimeSnapshot) -> bool {
     )
 }
 
+fn visible_peer_views(snapshot: &RuntimeSnapshot) -> impl Iterator<Item = &PeerView> {
+    snapshot.peers.values().filter(|peer| {
+        peer.present
+            || peer.screen == ScreenAvailability::Available
+            || peer.transport.direction == Some(TransportDirectionView::Outbound)
+                && peer.transport.phase == TransportPhaseView::Connected
+    })
+}
+
 fn visible_peers(snapshot: &RuntimeSnapshot) -> Vec<PeerView> {
-    snapshot
-        .peers
-        .values()
-        .filter(|peer| {
-            peer.present
-                || peer.screen == ScreenAvailability::Available
-                || peer.transport.direction == Some(TransportDirectionView::Outbound)
-                    && peer.transport.phase == TransportPhaseView::Connected
-        })
-        .cloned()
-        .collect()
+    visible_peer_views(snapshot).cloned().collect()
 }
 
 fn peer_display_name(locale: Locale, ordinal: usize) -> String {
