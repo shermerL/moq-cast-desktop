@@ -37,7 +37,7 @@ cargo +1.95.0 run --locked --example v2_catalog
 
 It owns design tokens, semantic typography, interaction-state resolution, centered role-based page shells, caller-data-only components, and the visual catalog. Platform crates continue to own windows, page composition, locale, discovery, media, permissions, diagnostics, and product lifecycle.
 
-Share pages reserve `page_actions` inside the finite page viewport before rendering their scrollable source and status content. Keep the page itself outside any outer scroll area so long lists cannot move the start/stop action off screen.
+Share pages reserve their start/stop action area inside the finite viewport. Application-owned source rows use `v2::source_list` with a bounded height and a floating scrollbar. Refresh and encoding/audio settings stay outside that list; any overflow in the settings uses a separate sibling viewport, never a parent scroll area. System-owned macOS and Wayland pickers retain their native scrolling.
 
 Run the catalog locally:
 
@@ -87,6 +87,6 @@ Mac 播放页直接使用窗口剩余空间，不再套 Nearby 页脚或卡片�
 
 ### 共享页头与来源控件
 
-`v2::header` 统一品牌、返回、截断标题与设置入口，仅返回点击结果。`source_row` 提供48pt来源行、截断与完整名称提示。`settings_row` 在窄弹层将控件移到标签下方。`v2::PLAYER_VOLUME_CONTROL_WIDTH` 为148pt，与40pt静音按钮、8pt间距和100pt滑块一致；调用端必须使用对应代际常量预留空间。
+`v2::header` 统一品牌、返回、截断标题与设置入口，仅返回点击结果。`source_row` 提供48pt来源行、截断与完整名称提示。`source_list` 仅包裹来源项，浮动滚动条在列表交互时出现、离开后淡出，预留固定槽位以免遮挡文字；列表之外的刷新、设置和共享动作不随列表移动。`settings_row` 在窄弹层将控件移到标签下方。`v2::PLAYER_VOLUME_CONTROL_WIDTH` 为148pt，与40pt静音按钮、8pt间距和100pt滑块一致；调用端必须使用对应代际常量预留空间。
 
 Linux 的 Portal 选源、X11 显示器列表与 Windows 的 WGC 屏幕/窗口列表由各平台保留；共享组件不实现来源识别或后台重试。Windows 系统音频沿用既有行为，不增加无效开关。

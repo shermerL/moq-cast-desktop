@@ -87,8 +87,7 @@ pub(in crate::app) fn show(
         egui::pos2(outer.right(), (action_rect.top() - 12.0).max(outer.top())),
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(content),|ui| {
-        egui::ScrollArea::vertical().id_salt("v2-capture-content").max_height(content.height())
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).auto_shrink([false,false]).show(ui,|ui| {
+        ui.scope(|ui| {
                 let p=Palette::for_ui(ui);
                 ui.label(egui::RichText::new(locale.text("共享设置","Sharing settings")).size(20.0).variation(b"wght",600.0));ui.add_space(18.0);
                 p.card().show(ui,|ui| {
@@ -106,10 +105,13 @@ pub(in crate::app) fn show(
                                 ui.add_space(12.0);ui.label(locale.text("开始共享时，由系统选择具体屏幕或窗口。","Choose the screen or window in the system picker when sharing starts."));
                             },
                             SourceCatalog::Ready(choices)=>{
+                                // Keep refresh and audio controls outside the source viewport.
+                                v2::source_list(ui, (content.height() - 240.0).clamp(48.0, 240.0), |ui| {
                                 for source in choices {
                                     let label=source.label();
                                     if v2::source_row(ui,&label,selected.as_ref()==Some(source),editable).clicked(){*selected=Some(source.clone());}
                                 }
+                                });
                                 if choices.is_empty(){ui.label(locale.text("没有可共享的屏幕","No screens available"));}
                                 else if selected.is_some() && snapshot.sources.selected(selected.as_ref()).is_none(){v2::notice(ui,StatusTone::Warning,locale.text("来源已变化，请重新选择。","The source changed. Select again."));}
                             },
@@ -119,11 +121,15 @@ pub(in crate::app) fn show(
                     });
                 });
                 ui.add_space(16.0);
+                egui::ScrollArea::vertical().id_salt("sharing-options")
+                    .max_height((content.bottom() - ui.cursor().top()).max(0.0))
+                    .auto_shrink([false,true]).show(ui, |ui| {
                 v2::settings_row(ui,locale.system_audio(),|ui| {ui.add_enabled(editable,egui::Checkbox::new(audio,"")).on_hover_text(locale.system_audio_hint());});
                 ui.label(egui::RichText::new(locale.text("系统声音包含设备输出，不限于所选窗口。","System sound includes device output, not only the selected window.")).small().color(p.muted));
                 if editable&&!snapshot.has_mesh_session(){v2::notice(ui,StatusTone::Neutral,locale.connect_first());}
                 if matches!(snapshot.media,MediaState::PreparingView{..}|MediaState::Viewing{..}|MediaState::StoppingView{..}) {v2::notice(ui,StatusTone::Neutral,locale.text("停止观看后可开始共享。","Stop watching before sharing."));}
                 if snapshot.last_error.is_some(){v2::notice(ui,StatusTone::Error,locale.operation_failed());}
+                });
             });
     });
     command
@@ -275,6 +281,95 @@ mod layout_checks {
         assert!(rect.is_positive() && rect.bottom() <= 420.0);
         assert!(
             matches!(click(&ctx,&s,&mut selected,rect.center()),Some(UserCommand::StartScreenShare{source,..}) if source==expected)
+        );
+    }
+    #[test]
+    fn scrolling_sources_does_not_move_audio_refresh_or_start() {
+        let ctx = egui::Context::default();
+        v2::install(&ctx);
+        let sources = (0..40)
+            .map(|i| CaptureSource::Display {
+                id: format!("x11:{i}"),
+                name: format!("Display {i}"),
+                width: 1920,
+                height: 1080,
+            })
+            .collect::<Vec<_>>();
+        let mut selected = Some(sources[0].clone());
+        let s = AppSnapshot {
+            sources: SourceCatalog::Ready(sources),
+            inbound_session_count: 1,
+            ..Default::default()
+        };
+        let mut frame = |events| {
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1040.0, 640.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        show(ui, Locale::English, &s, &mut false, &mut selected);
+                    });
+                },
+            );
+            out.textures_delta.clear();
+            out
+        };
+        let text_rect = |out: &egui::FullOutput, label: &str| {
+            out.shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.job.text == label => Some(
+                        t.galley
+                            .rect
+                            .translate(t.pos.to_vec2())
+                            .intersect(s.clip_rect),
+                    ),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing {label}"))
+        };
+        let before = frame(vec![]);
+        let labels = ["Refresh sources", "System audio", "Start sharing"];
+        let fixed = labels.map(|l| text_rect(&before, l));
+        assert!(fixed.iter().all(|r| r.is_positive()));
+        let (first, point) = before
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.job.text.starts_with("Display 0") => {
+                    Some((t.galley.job.text.clone(), t.pos + egui::vec2(5.0, 5.0)))
+                }
+                _ => None,
+            })
+            .unwrap();
+        frame(vec![
+            egui::Event::PointerMoved(point),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                phase: egui::TouchPhase::Move,
+                delta: egui::vec2(0.0, -400.0),
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        let mut after = frame(vec![]);
+        for _ in 0..20 {
+            after = frame(vec![]);
+        }
+        for (label, rect) in labels.into_iter().zip(fixed) {
+            assert_eq!(text_rect(&after, label), rect, "{label} must remain fixed");
+        }
+        assert!(
+            !after.shapes.iter().any(|s| matches!(&s.shape,
+                egui::Shape::Text(t) if t.galley.job.text == first
+                && t.galley.rect.translate(t.pos.to_vec2()).intersect(s.clip_rect).is_positive()
+            )),
+            "the source list must actually scroll"
         );
     }
 }

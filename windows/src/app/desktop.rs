@@ -342,36 +342,30 @@ impl MoqCastApp {
             egui::pos2(outer.right(), (action_rect.top() - 12.0).max(outer.top())),
         );
         ui.scope_builder(UiBuilder::new().max_rect(content), |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("v2-sharing-content")
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .max_height(content.height())
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    p.card().show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.add_enabled_ui(editable, |ui| {
-                            ui.horizontal(|ui| {
-                                for (kind, label) in [
-                                    (CaptureSourceKind::Display, self.text("屏幕", "Screen")),
-                                    (CaptureSourceKind::Window, self.text("窗口", "Window")),
-                                ] {
-                                    if ui
-                                        .add(
-                                            egui::Button::selectable(
-                                                self.capture_kind == kind,
-                                                label,
-                                            )
+            ui.scope(|ui| {
+                p.card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.add_enabled_ui(editable, |ui| {
+                        ui.horizontal(|ui| {
+                            for (kind, label) in [
+                                (CaptureSourceKind::Display, self.text("屏幕", "Screen")),
+                                (CaptureSourceKind::Window, self.text("窗口", "Window")),
+                            ] {
+                                if ui
+                                    .add(
+                                        egui::Button::selectable(self.capture_kind == kind, label)
                                             .min_size(vec2(88.0, 40.0)),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.capture_kind = kind;
-                                    }
+                                    )
+                                    .clicked()
+                                {
+                                    self.capture_kind = kind;
                                 }
-                            });
-                            ui.add_space(12.0);
-                            let catalog = self.snapshot.media.capture_sources.clone();
+                            }
+                        });
+                        ui.add_space(12.0);
+                        let catalog = self.snapshot.media.capture_sources.clone();
+                        // Leave room for the tabs, refresh action and encoding/audio settings.
+                        v2::source_list(ui, (content.height() - 320.0).clamp(48.0, 240.0), |ui| {
                             match catalog.phase {
                                 CaptureSourceCatalogPhase::Loading => {
                                     ui.spinner();
@@ -422,108 +416,120 @@ impl MoqCastApp {
                                     }
                                 }
                             }
-                            if (Action {
-                                label: self.text("刷新来源", "Refresh sources"),
-                                size: vec2(124.0, 40.0),
-                                enabled: catalog.phase != CaptureSourceCatalogPhase::Loading,
-                                tone: ActionTone::Neutral,
-                            })
-                            .show(ui)
-                            .clicked()
-                            {
-                                self.send(RuntimeCommand::RefreshCaptureSources);
-                            }
                         });
-                    });
-                    ui.add_space(16.0);
-                    v2::settings_row(ui, self.text("视频编码", "Video encoding"), |ui| {
-                        let mut policy = self.snapshot.media.video_encoding;
-                        ui.add_enabled_ui(editable, |ui| {
-                            egui::ComboBox::from_id_salt("video-policy")
-                                .selected_text(video_encoding_label(self.locale, policy))
-                                .show_ui(ui, |ui| {
-                                    for candidate in [
-                                        VideoEncodingPolicy::Compatible,
-                                        VideoEncodingPolicy::NativeQhdHardware,
-                                    ] {
-                                        ui.selectable_value(
-                                            &mut policy,
-                                            candidate,
-                                            video_encoding_label(self.locale, candidate),
-                                        );
-                                    }
-                                });
-                        });
-                        if policy != self.snapshot.media.video_encoding {
-                            self.send(RuntimeCommand::SetVideoEncodingPolicy(policy));
+                        if (Action {
+                            label: self.text("刷新来源", "Refresh sources"),
+                            size: vec2(124.0, 40.0),
+                            enabled: catalog.phase != CaptureSourceCatalogPhase::Loading,
+                            tone: ActionTone::Neutral,
+                        })
+                        .show(ui)
+                        .clicked()
+                        {
+                            self.send(RuntimeCommand::RefreshCaptureSources);
                         }
                     });
-                    ui.label(
-                        RichText::new(
-                            if self.snapshot.media.video_encoding == VideoEncodingPolicy::Compatible
-                            {
-                                self.text(
-                                    "原生尺寸，最长边不超过 1920。",
-                                    "Native size, longest edge at most 1920.",
-                                )
-                            } else {
-                                self.text(
-                                    "原生横屏 2560×1440，要求硬件 H.264。",
-                                    "Native landscape 2560×1440; hardware H.264 required.",
-                                )
-                            },
-                        )
-                        .small()
-                        .color(p.muted),
-                    );
-                    ui.add_space(12.0);
-                    ui.label(self.text(
-                        "系统声音随共享采集，不限于所选窗口。",
-                        "Sharing captures system sound, not only the selected window.",
-                    ));
-                    if self.capture_kind == CaptureSourceKind::Window {
+                });
+                ui.add_space(16.0);
+                // This sibling viewport cannot consume wheel events from the source list.
+                egui::ScrollArea::vertical()
+                    .id_salt("sharing-options")
+                    .max_height((content.bottom() - ui.cursor().top()).max(0.0))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        v2::settings_row(ui, self.text("视频编码", "Video encoding"), |ui| {
+                            let mut policy = self.snapshot.media.video_encoding;
+                            ui.add_enabled_ui(editable, |ui| {
+                                egui::ComboBox::from_id_salt("video-policy")
+                                    .selected_text(video_encoding_label(self.locale, policy))
+                                    .show_ui(ui, |ui| {
+                                        for candidate in [
+                                            VideoEncodingPolicy::Compatible,
+                                            VideoEncodingPolicy::NativeQhdHardware,
+                                        ] {
+                                            ui.selectable_value(
+                                                &mut policy,
+                                                candidate,
+                                                video_encoding_label(self.locale, candidate),
+                                            );
+                                        }
+                                    });
+                            });
+                            if policy != self.snapshot.media.video_encoding {
+                                self.send(RuntimeCommand::SetVideoEncodingPolicy(policy));
+                            }
+                        });
                         ui.label(
-                            RichText::new(self.text(
-                                "最小化会暂停画面；关闭窗口会结束共享。",
-                                "Minimizing pauses video; closing the window ends sharing.",
-                            ))
+                            RichText::new(
+                                if self.snapshot.media.video_encoding
+                                    == VideoEncodingPolicy::Compatible
+                                {
+                                    self.text(
+                                        "原生尺寸，最长边不超过 1920。",
+                                        "Native size, longest edge at most 1920.",
+                                    )
+                                } else {
+                                    self.text(
+                                        "原生横屏 2560×1440，要求硬件 H.264。",
+                                        "Native landscape 2560×1440; hardware H.264 required.",
+                                    )
+                                },
+                            )
                             .small()
                             .color(p.muted),
                         );
-                    }
-                    if !matches!(
-                        self.snapshot.view.phase,
-                        ViewPhase::Idle | ViewPhase::Failed
-                    ) {
-                        v2::notice(
-                            ui,
-                            StatusTone::Neutral,
-                            self.text("停止观看后可开始共享。", "Stop watching before sharing."),
-                        );
-                    }
-                    if self.snapshot.media.audio.phase == AudioPhase::Failed {
-                        v2::notice(
-                            ui,
-                            StatusTone::Warning,
-                            self.text(
-                                "系统声音不可用，画面共享继续。",
-                                "System sound unavailable; video sharing continues.",
-                            ),
-                        );
-                    }
-                    if let Some(warning) = self.snapshot.media.capture_sources.warning {
-                        v2::notice(ui, StatusTone::Warning, warning);
-                    }
-                    if let Some(error) = self
-                        .snapshot
-                        .media
-                        .capture_sources
-                        .last_error
-                        .or(self.snapshot.media.last_error)
-                    {
-                        v2::notice(ui, StatusTone::Error, error);
-                    }
-                });
+                        ui.add_space(12.0);
+                        ui.label(self.text(
+                            "系统声音随共享采集，不限于所选窗口。",
+                            "Sharing captures system sound, not only the selected window.",
+                        ));
+                        if self.capture_kind == CaptureSourceKind::Window {
+                            ui.label(
+                                RichText::new(self.text(
+                                    "最小化会暂停画面；关闭窗口会结束共享。",
+                                    "Minimizing pauses video; closing the window ends sharing.",
+                                ))
+                                .small()
+                                .color(p.muted),
+                            );
+                        }
+                        if !matches!(
+                            self.snapshot.view.phase,
+                            ViewPhase::Idle | ViewPhase::Failed
+                        ) {
+                            v2::notice(
+                                ui,
+                                StatusTone::Neutral,
+                                self.text(
+                                    "停止观看后可开始共享。",
+                                    "Stop watching before sharing.",
+                                ),
+                            );
+                        }
+                        if self.snapshot.media.audio.phase == AudioPhase::Failed {
+                            v2::notice(
+                                ui,
+                                StatusTone::Warning,
+                                self.text(
+                                    "系统声音不可用，画面共享继续。",
+                                    "System sound unavailable; video sharing continues.",
+                                ),
+                            );
+                        }
+                        if let Some(warning) = self.snapshot.media.capture_sources.warning {
+                            v2::notice(ui, StatusTone::Warning, warning);
+                        }
+                        if let Some(error) = self
+                            .snapshot
+                            .media
+                            .capture_sources
+                            .last_error
+                            .or(self.snapshot.media.last_error)
+                        {
+                            v2::notice(ui, StatusTone::Error, error);
+                        }
+                    });
+            });
         });
     }
     fn watch(&mut self, ui: &mut egui::Ui) {
@@ -1002,6 +1008,106 @@ mod tests {
             Ok(RuntimeCommand::ShareScreen)
         ));
     }
+    #[test]
+    fn source_list_scroll_keeps_refresh_settings_and_start_fixed() {
+        let (mut app, _commands) = fixture();
+        app.page = Page::ScreenShare;
+        app.capture_kind = CaptureSourceKind::Window;
+        app.snapshot.discovery = DiscoveryState::Ready;
+        app.snapshot.local_id = Some("local".into());
+        let catalog = &mut app.snapshot.media.capture_sources;
+        catalog.phase = CaptureSourceCatalogPhase::Ready;
+        catalog.choices = (0..60)
+            .map(|n| CaptureSourceChoice {
+                kind: CaptureSourceKind::Window,
+                id: n.to_string(),
+                name: format!("Window {n}"),
+                application: None,
+                width: 1920,
+                height: 1080,
+            })
+            .collect();
+        catalog.selected = catalog.choices.first().cloned();
+        let ctx = egui::Context::default();
+        v2::install(&ctx);
+        let size = vec2(1040.0, 760.0);
+        let before = render(&ctx, &mut app, size, vec![]);
+        let labels = ["Refresh sources", "Video encoding", "Start sharing"];
+        let fixed = labels.map(|label| painted(&before, label));
+        assert!(
+            fixed.iter().all(|r| r.is_positive()),
+            "all controls must be visible before scrolling"
+        );
+        let first = before
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.job.text.starts_with("Window 0 ·") => Some(
+                    t.galley
+                        .rect
+                        .translate(t.pos.to_vec2())
+                        .intersect(s.clip_rect),
+                ),
+                _ => None,
+            })
+            .unwrap();
+        let mut after = render(
+            &ctx,
+            &mut app,
+            size,
+            vec![
+                egui::Event::PointerMoved(first.center()),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    phase: egui::TouchPhase::Move,
+                    delta: vec2(0.0, -400.0),
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        for _ in 0..20 {
+            after = render(&ctx, &mut app, size, vec![]);
+        }
+        // Reach the end, then keep scrolling to catch propagation into a parent area.
+        for _ in 0..3 {
+            render(
+                &ctx,
+                &mut app,
+                size,
+                vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    phase: egui::TouchPhase::Move,
+                    delta: vec2(0.0, -10000.0),
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            for _ in 0..20 {
+                after = render(&ctx, &mut app, size, vec![]);
+            }
+        }
+        assert!(
+            after.shapes.iter().any(|s| matches!(&s.shape,
+                egui::Shape::Text(t) if t.galley.job.text.starts_with("Window 59 ·")
+                && t.galley.rect.translate(t.pos.to_vec2()).intersect(s.clip_rect).is_positive()
+            )),
+            "the last source must remain reachable"
+        );
+        for (label, rect) in labels.into_iter().zip(fixed) {
+            assert_eq!(
+                painted(&after, label),
+                rect,
+                "{label} moved with the source list"
+            );
+        }
+        assert!(
+            !after.shapes.iter().any(|s| matches!(&s.shape,
+                egui::Shape::Text(t) if t.galley.job.text.starts_with("Window 0 ·")
+                && t.galley.rect.translate(t.pos.to_vec2()).intersect(s.clip_rect).is_positive()
+            )),
+            "the source list must actually scroll"
+        );
+    }
+
     #[test]
     fn active_sharing_takes_precedence_over_a_previous_view_failure() {
         let mut s = RuntimeSnapshot::default();

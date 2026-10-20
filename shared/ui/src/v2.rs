@@ -110,9 +110,10 @@ pub fn install(context: &Context) {
             style.visuals.extreme_bg_color = p.surface;
             style.visuals.widgets.inactive.weak_bg_fill = p.surface;
             style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, p.border);
-            style.visuals.widgets.hovered.weak_bg_fill = p.hover;
-            style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, p.accent);
-            style.visuals.widgets.active.weak_bg_fill = p.soft;
+            style.visuals.widgets.hovered.weak_bg_fill = p.surface.lerp_to_gamma(p.accent, 0.18);
+            style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.5, p.accent);
+            style.visuals.widgets.active.weak_bg_fill = p.surface.lerp_to_gamma(p.accent, 0.28);
+            style.visuals.widgets.active.bg_stroke = Stroke::new(2.0, p.accent);
             style
                 .text_styles
                 .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
@@ -282,9 +283,9 @@ impl Action<'_> {
                 let widgets = &mut ui.style_mut().visuals.widgets;
                 widgets.inactive.weak_bg_fill = fill;
                 widgets.inactive.bg_stroke = Stroke::new(1.0, border);
-                widgets.hovered.weak_bg_fill = fill.lerp_to_gamma(foreground, 0.08);
+                widgets.hovered.weak_bg_fill = fill.lerp_to_gamma(foreground, 0.18);
                 widgets.hovered.bg_stroke = Stroke::new(1.5, foreground);
-                widgets.active.weak_bg_fill = fill.lerp_to_gamma(foreground, 0.16);
+                widgets.active.weak_bg_fill = fill.lerp_to_gamma(foreground, 0.28);
                 widgets.active.bg_stroke = Stroke::new(2.0, foreground);
                 ui.add_enabled(
                     self.enabled,
@@ -293,6 +294,7 @@ impl Action<'_> {
                         .wrap()
                         .corner_radius(6),
                 )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
             },
         )
         .inner
@@ -384,7 +386,7 @@ pub struct NearbyRow<'a> {
     pub id: egui::Id,
     /// User-facing device name, never an authenticated identity.
     pub name: &'a str,
-    /// Supporting identity or compact status text.
+    /// Supporting identity text shown in the wide layout.
     pub subtitle: &'a str,
     /// Current platform-projected availability.
     pub status: &'a str,
@@ -470,6 +472,11 @@ fn label_at(ui: &mut Ui, rect: egui::Rect, label: egui::Label) -> Response {
 pub fn nearby_row(ui: &mut Ui, spec: NearbyRow<'_>) -> RowResponse {
     let p = Palette::for_ui(ui);
     let mut actions = RowResponse::default();
+    let subtitle = if spec.compact {
+        spec.status
+    } else {
+        spec.subtitle
+    };
     ui.push_id(spec.id, |ui| {
         let (row, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), if spec.compact { 76.0 } else { 88.0 }),
@@ -495,9 +502,17 @@ pub fn nearby_row(ui: &mut Ui, spec: NearbyRow<'_>) -> RowResponse {
                 format!("{}: {}", spec.details_label, spec.name),
             )
         });
-        if response.hovered() {
-            ui.painter()
-                .rect_filled(rects.identity.shrink(3.0), 6, p.hover);
+        if response.enabled() && (response.hovered() || response.is_pointer_button_down_on()) {
+            let amount = if response.is_pointer_button_down_on() {
+                0.28
+            } else {
+                0.18
+            };
+            ui.painter().rect_filled(
+                rects.identity.shrink(3.0),
+                6,
+                p.surface.lerp_to_gamma(p.accent, amount),
+            );
         }
         if response.has_focus() {
             ui.painter().rect_stroke(
@@ -542,20 +557,18 @@ pub fn nearby_row(ui: &mut Ui, spec: NearbyRow<'_>) -> RowResponse {
         label_at(
             ui,
             subtitle_rect,
-            egui::Label::new(
-                RichText::new(spec.subtitle)
-                    .size(13.0)
-                    .color(if spec.compact {
-                        spec.tone.color(p)
-                    } else {
-                        p.muted
-                    }),
-            )
+            egui::Label::new(RichText::new(subtitle).size(13.0).color(if spec.compact {
+                spec.tone.color(p)
+            } else {
+                p.muted
+            }))
             .selectable(false)
             .truncate()
             .halign(egui::Align::Min),
         );
-        response.on_hover_text(format!("{}\n{}", spec.name, spec.subtitle));
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(format!("{}\n{}", spec.name, subtitle));
         if !spec.compact {
             if spec.tone == StatusTone::Busy {
                 ui.scope_builder(
@@ -729,6 +742,55 @@ mod tests {
                         });
                 });
                 output.textures_delta.clear();
+            }
+        }
+    }
+
+    #[test]
+    fn nearby_status_remains_visible_without_metadata_in_both_layouts() {
+        for compact in [true, false] {
+            for theme in [egui::Theme::Light, egui::Theme::Dark] {
+                let ctx = Context::default();
+                ctx.set_theme(theme);
+                install(&ctx);
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(740.0, 100.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |root| {
+                        egui::CentralPanel::default().show(root, |ui| {
+                            nearby_row(
+                                ui,
+                                NearbyRow {
+                                    id: egui::Id::new("peer"),
+                                    name: "Device",
+                                    subtitle: "",
+                                    status: "Not sharing",
+                                    tone: StatusTone::Neutral,
+                                    current: false,
+                                    watch_label: "Watch",
+                                    watch_enabled: false,
+                                    details_label: "Details",
+                                    compact,
+                                },
+                            );
+                        });
+                    },
+                );
+                let status_count = output
+                    .shapes
+                    .iter()
+                    .filter(|clipped| {
+                        matches!(&clipped.shape, egui::epaint::Shape::Text(text)
+                        if text.galley.job.text == "Not sharing")
+                    })
+                    .count();
+                output.textures_delta.clear();
+                assert_eq!(status_count, 1, "compact={compact}, theme={theme:?}");
             }
         }
     }
@@ -932,7 +994,10 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str) -> Response {
     );
     let p = Palette::for_ui(ui);
     let center = response.rect.center();
-    let stroke = Stroke::new(1.7, p.muted);
+    let interacting = response.enabled()
+        && (response.hovered() || response.is_pointer_button_down_on() || response.has_focus());
+    let ink = if interacting { p.accent } else { p.muted };
+    let stroke = Stroke::new(if interacting { 2.0 } else { 1.7 }, ink);
     match icon {
         Icon::Close => {
             let id = egui::Id::new("v2-tabler-close");
@@ -956,13 +1021,13 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str) -> Response {
                 texture.id(),
                 egui::Rect::from_center_size(center, egui::vec2(24.0, 24.0)),
                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                p.text,
+                if interacting { p.accent } else { p.text },
             );
         }
         Icon::Information => {
             ui.painter().circle_stroke(center, 9.0, stroke);
             ui.painter()
-                .circle_filled(center - egui::vec2(0.0, 4.0), 1.1, p.muted);
+                .circle_filled(center - egui::vec2(0.0, 4.0), 1.1, ink);
             ui.painter().line_segment(
                 [center - egui::vec2(0.0, 0.5), center + egui::vec2(0.0, 5.0)],
                 stroke,
@@ -996,7 +1061,9 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str) -> Response {
         }
     }
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-    response.on_hover_text(label)
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(label)
 }
 
 /// Height shared by the windowed and fullscreen player controls.
@@ -1072,13 +1139,16 @@ pub fn volume_control(
         let response = ui.add(
             egui::Button::new("")
                 .min_size(egui::vec2(40.0, 40.0))
-                .frame(false),
+                .frame(true)
+                .frame_when_inactive(false),
         );
+        let interacting = response.enabled()
+            && (response.hovered() || response.is_pointer_button_down_on() || response.has_focus());
         crate::components::player::paint_speaker_icon(
             ui,
             egui::Rect::from_center_size(response.rect.center(), egui::vec2(20.0, 20.0)),
             state.muted(),
-            p.muted,
+            if interacting { p.accent } else { p.muted },
         );
         response.widget_info(|| {
             egui::WidgetInfo::selected(
@@ -1090,6 +1160,7 @@ pub fn volume_control(
         });
         if response
             .clone()
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(label)
             .on_disabled_hover_text(label)
             .clicked()
@@ -1358,6 +1429,27 @@ pub fn header(ui: &mut Ui, spec: Header<'_>) -> HeaderResponse {
         Stroke::new(1.0, p.border),
     );
     response
+}
+
+/// Scrolls only source rows with an auto-fading, draggable scrollbar.
+pub fn source_list<R>(
+    ui: &mut Ui,
+    max_height: f32,
+    contents: impl FnOnce(&mut Ui) -> R,
+) -> egui::scroll_area::ScrollAreaOutput<R> {
+    ui.scope(|ui| {
+        let scroll = &mut ui.style_mut().spacing.scroll;
+        *scroll = egui::style::ScrollStyle::floating();
+        // Reserve a stable gutter so the fading handle never covers source text.
+        scroll.floating_allocated_width = 8.0;
+        egui::ScrollArea::vertical()
+            .id_salt("capture-source-list")
+            .max_height(max_height)
+            .auto_shrink([false, true])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+            .show(ui, contents)
+    })
+    .inner
 }
 
 /// A capture source row; the platform owns the selected source and its validation.
