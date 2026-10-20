@@ -231,17 +231,10 @@ impl Locale {
         }
     }
 
-    pub(super) fn not_connected(self) -> &'static str {
+    pub(super) fn enable_nearby_before_sharing(self) -> &'static str {
         match self {
-            Self::Chinese => "尚未连接设备",
-            Self::English => "No device connected",
-        }
-    }
-
-    pub(super) fn connect_first(self) -> &'static str {
-        match self {
-            Self::Chinese => "正在等待同一网络内的设备连接。",
-            Self::English => "Waiting for a device on this network to connect.",
+            Self::Chinese => "开启附近设备后即可共享。",
+            Self::English => "Enable nearby devices before sharing.",
         }
     }
 

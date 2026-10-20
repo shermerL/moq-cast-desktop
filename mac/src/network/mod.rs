@@ -34,6 +34,18 @@ pub(crate) enum PeerSession {
 }
 
 impl PeerSession {
+    pub(crate) fn connection(self) -> moqcast_lan_state::Connection {
+        use moqcast_lan_state::Connection;
+        match self {
+            Self::Waiting => Connection::Unknown,
+            Self::Connecting => Connection::Connecting,
+            Self::Connected => Connection::Connected,
+            Self::Rejected => Connection::Rejected,
+            Self::Failed => Connection::Failed,
+            Self::Disconnected => Connection::Disconnected,
+        }
+    }
+
     pub(crate) fn is_active(self) -> bool {
         matches!(self, Self::Connecting | Self::Connected)
     }
@@ -127,10 +139,12 @@ impl Services {
         }
     }
 
-    pub(crate) async fn shutdown(self) {
-        self.remote.stop().await;
-        self.sessions.shutdown().await;
+    pub(crate) async fn shutdown(self) -> Result<(), String> {
+        let mut errors = crate::cleanup::Errors::default();
+        errors.result("directory", self.remote.stop().await);
+        errors.result("sessions", self.sessions.shutdown().await);
         drop(self.discovery);
+        errors.finish()
     }
 
     pub(crate) fn remote_broadcast(
@@ -232,7 +246,7 @@ impl Services {
             return;
         };
         status.discovered = false;
-        if retain_after_lost(&status, self.inbound.len()) {
+        if retain_after_lost(&status) {
             self.peers.insert(id.to_owned(), status.clone());
             self.pending.push_back(Event::Peer(status));
         } else {
@@ -277,25 +291,8 @@ impl Services {
                 if self.inbound.len() != previous_count {
                     self.pending
                         .push_back(Event::InboundCount(self.inbound.len()));
-                    self.prune_lost_passive_peers();
                 }
             }
-        }
-    }
-
-    fn prune_lost_passive_peers(&mut self) {
-        if !self.inbound.is_empty() {
-            return;
-        }
-        let removed = self
-            .peers
-            .iter()
-            .filter(|(_, peer)| !peer.discovered && peer.role == DialRole::Passive)
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-        for id in removed {
-            self.peers.remove(&id);
-            self.pending.push_back(Event::PeerRemoved(id));
         }
     }
 }
@@ -319,9 +316,18 @@ fn should_connect(update: PeerUpdate, phase: PeerSession) -> bool {
     }
 }
 
-fn retain_after_lost(peer: &PeerStatus, inbound_sessions: usize) -> bool {
-    peer.role == DialRole::Active && peer.session.is_active()
-        || peer.role == DialRole::Passive && inbound_sessions > 0
+fn retain_after_lost(peer: &PeerStatus) -> bool {
+    // Inbound sessions do not authenticate a remote mDNS identity.
+    moqcast_lan_state::Peer {
+        discovered: false,
+        connection: if peer.role == DialRole::Active {
+            peer.session.connection()
+        } else {
+            moqcast_lan_state::Connection::Unknown
+        },
+        available: false,
+    }
+    .visible()
 }
 
 fn map_phase(phase: TransportPhase) -> PeerSession {
@@ -353,23 +359,23 @@ mod tests {
     }
 
     #[test]
-    fn lost_keeps_a_healthy_outbound_or_an_active_passive_session() {
-        assert!(retain_after_lost(
-            &status(DialRole::Active, PeerSession::Connected),
-            0
-        ));
-        assert!(retain_after_lost(
-            &status(DialRole::Active, PeerSession::Connecting),
-            0
-        ));
-        assert!(retain_after_lost(
-            &status(DialRole::Passive, PeerSession::Connected),
-            1
-        ));
-        assert!(!retain_after_lost(
-            &status(DialRole::Passive, PeerSession::Connected),
-            0
-        ));
+    fn nearby_contract_lost_keeps_only_an_attributed_active_session() {
+        assert!(retain_after_lost(&status(
+            DialRole::Active,
+            PeerSession::Connected
+        )));
+        assert!(retain_after_lost(&status(
+            DialRole::Active,
+            PeerSession::Connecting
+        )));
+        assert!(!retain_after_lost(&status(
+            DialRole::Passive,
+            PeerSession::Waiting
+        )));
+        assert!(!retain_after_lost(&status(
+            DialRole::Passive,
+            PeerSession::Connected
+        )));
     }
 
     #[test]
@@ -421,7 +427,7 @@ mod tests {
         .await
         .expect("services discovered and connected");
 
-        first.shutdown().await;
-        second.shutdown().await;
+        first.shutdown().await.unwrap();
+        second.shutdown().await.unwrap();
     }
 }

@@ -1,5 +1,9 @@
 //! MoQCast macOS application state and runtime ownership.
 
+#[cfg(feature = "network")]
+#[path = "../../shared/task-cleanup.rs"]
+mod cleanup;
+
 #[cfg(feature = "app")]
 mod app;
 #[cfg(any(feature = "app", test))]

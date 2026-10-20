@@ -142,6 +142,7 @@ pub(crate) enum NearbyIssue {
     DiscoveryStopped,
     ListenerStopped,
     ServicesStopped,
+    ShutdownFailed,
     DeviceRejected,
 }
 
@@ -165,6 +166,7 @@ pub(crate) struct AppSnapshot {
     pub(crate) peers: BTreeMap<String, PeerSnapshot>,
     pub(crate) remote_screens: BTreeMap<String, ScreenView>,
     pub(crate) inbound_sessions: usize,
+    pub(crate) nearby_stopping: bool,
     pub(crate) nearby_issue: Option<NearbyIssue>,
     pub(crate) media_peer: Option<String>,
     pub(crate) media_path: Option<String>,
@@ -195,6 +197,7 @@ impl Default for AppSnapshot {
             peers: BTreeMap::new(),
             remote_screens: BTreeMap::new(),
             inbound_sessions: 0,
+            nearby_stopping: false,
             nearby_issue: None,
             media_peer: None,
             media_path: None,
@@ -214,13 +217,20 @@ impl Default for AppSnapshot {
 }
 
 impl AppSnapshot {
+    pub(crate) fn access(&self) -> moqcast_lan_state::Access {
+        moqcast_lan_state::Access {
+            ready: self.session.phase() == SessionPhase::Listening && !self.nearby_stopping,
+            media_idle: self.media.phase() == MediaPhase::Idle,
+        }
+    }
+
     pub(crate) fn can_watch(&self, peer: &str, path: &str) -> bool {
-        self.media.phase() == MediaPhase::Idle
-            && self.peers.contains_key(peer)
+        let available = self.peers.contains_key(peer)
             && path == crate::contract::screen_path(peer)
             && self.remote_screens.get(path).is_some_and(|screen| {
                 screen.peer_id == peer && screen.availability == ScreenAvailability::Available
-            })
+            });
+        self.access().watch(available)
     }
 
     fn begin_watch(&mut self, peer: &str, path: &str) -> Option<Generation> {
@@ -865,6 +875,8 @@ async fn run(
         .run()
         .await;
         if action == RecoveryAction::TurnOff {
+            snapshot.nearby_stopping = true;
+            publish_snapshot(&snapshot_tx, &snapshot, &wake);
             complete_network_turn_off(
                 &mut snapshot,
                 &mut playback,
@@ -892,7 +904,10 @@ async fn run(
         }
 
         teardown_media(&mut snapshot, &mut playback, &mut publication, &frames).await;
-        services.shutdown().await;
+        if let Err(error) = services.shutdown().await {
+            tracing::error!(%error, "LAN cleanup failed");
+            snapshot.nearby_issue = Some(NearbyIssue::ShutdownFailed);
+        }
 
         match action {
             RecoveryAction::Shutdown => {
@@ -995,6 +1010,7 @@ fn mark_network_failed(
 }
 
 fn mark_network_stopped(snapshot: &mut AppSnapshot) {
+    snapshot.nearby_stopping = false;
     snapshot.local_peer_id = None;
     snapshot.peers.clear();
     snapshot.remote_screens.clear();
@@ -1231,7 +1247,10 @@ async fn teardown_media(
 ) {
     snapshot.clear_media(MediaPhase::Idle, None);
     publication.stop();
-    playback.stop().await;
+    if let Err(error) = playback.stop().await {
+        tracing::error!(stage = "lan_shutdown", %error, "playback owner failed during cleanup");
+        snapshot.clear_media(MediaPhase::Failed, Some(error));
+    }
     frames.send_replace(None);
 }
 
@@ -1243,11 +1262,40 @@ async fn complete_network_turn_off<F, Fut>(
     shutdown_services: F,
 ) where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = ()>,
+    Fut: Future<Output = Result<(), String>>,
 {
+    tracing::info!(
+        stage = "lan_shutdown",
+        generation = snapshot.discovery.generation().value(),
+        peers = snapshot.peers.len(),
+        inbound = snapshot.inbound_sessions,
+        "stopping LAN resources"
+    );
+    snapshot.nearby_stopping = true;
     teardown_media(snapshot, playback, publication, frames).await;
-    shutdown_services().await;
+    tracing::debug!(
+        stage = "lan_shutdown",
+        step = "services",
+        "media owners stopped; stopping LAN services"
+    );
+    let mut errors = crate::cleanup::Errors::default();
+    if let Some(error) = snapshot.media_error.take() {
+        errors.result("media", Err(error));
+    }
+    errors.result("services", shutdown_services().await);
     mark_network_stopped(snapshot);
+    snapshot.media_error = errors.finish().err();
+    if snapshot.media_error.is_some() {
+        snapshot.session.begin(SessionPhase::Failed);
+        snapshot.nearby_issue = Some(NearbyIssue::ShutdownFailed);
+        return;
+    }
+    tracing::info!(
+        stage = "lan_shutdown",
+        generation = snapshot.discovery.generation().value(),
+        mdns_completion = "drop_requested",
+        "LAN shutdown sequence completed"
+    );
 }
 
 enum RuntimeInput {
@@ -1298,9 +1346,12 @@ async fn stop_watch(
     let Some(generation) = snapshot.begin_stop_watch() else {
         return;
     };
-    playback.stop().await;
+    let result = playback.stop().await;
     frames.send_replace(None);
     snapshot.finish_stop_media(generation);
+    if let Err(error) = result {
+        snapshot.clear_media(MediaPhase::Failed, Some(error));
+    }
 }
 
 fn start_share(
@@ -1308,6 +1359,9 @@ fn start_share(
     services: &network::Services,
     publication: &mut publication::Owner,
 ) {
+    if !snapshot.access().publish() {
+        return;
+    }
     let Some(start) = snapshot.begin_share() else {
         return;
     };
@@ -1532,9 +1586,32 @@ fn apply_network_event(
             let peer_id = update.view.peer_id.clone();
             let available = update.view.availability == ScreenAvailability::Available;
             snapshot.remote_screens.insert(update.path, update.view);
+            if available && !snapshot.peers.contains_key(&peer_id) {
+                // Route availability is independent of mDNS presence and inbound attribution.
+                let ordinal = snapshot
+                    .peers
+                    .values()
+                    .map(|peer| peer.ordinal)
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                snapshot.peers.insert(
+                    peer_id.clone(),
+                    PeerSnapshot {
+                        ordinal,
+                        discovered: false,
+                        session: PeerSession::Waiting,
+                    },
+                );
+            }
             if !available
                 && snapshot.peers.get(&peer_id).is_some_and(|peer| {
-                    !peer.discovered && !peer.session.is_active() && snapshot.inbound_sessions == 0
+                    !moqcast_lan_state::Peer {
+                        discovered: peer.discovered,
+                        connection: peer.session.connection(),
+                        available: false,
+                    }
+                    .visible()
                 })
             {
                 snapshot.peers.remove(&peer_id);
@@ -1647,6 +1724,62 @@ mod tests {
         Starting,
         Ready,
         Failed,
+    }
+
+    #[test]
+    fn shared_policy_watch_uses_route_and_owner_not_global_connection_count() {
+        let mut snapshot = AppSnapshot::default();
+        snapshot.session.begin(SessionPhase::Listening);
+        let path = crate::contract::screen_path("peer");
+        snapshot.peers.insert(
+            "peer".into(),
+            PeerSnapshot {
+                ordinal: 1,
+                discovered: false,
+                session: PeerSession::Waiting,
+            },
+        );
+        snapshot.remote_screens.insert(
+            path.clone(),
+            ScreenView {
+                peer_id: "peer".into(),
+                availability: ScreenAvailability::Available,
+            },
+        );
+        assert_eq!(snapshot.inbound_sessions, 0);
+        assert!(snapshot.can_watch("peer", &path));
+        assert!(snapshot.access().publish());
+        snapshot.nearby_stopping = true;
+        assert!(!snapshot.can_watch("peer", &path));
+        assert!(!snapshot.access().publish());
+        snapshot.nearby_stopping = false;
+        snapshot.session.begin(SessionPhase::Stopped);
+        snapshot.inbound_sessions = 5;
+        assert!(!snapshot.can_watch("peer", &path));
+    }
+
+    #[test]
+    fn shared_policy_off_rejects_retained_route() {
+        let mut snapshot = AppSnapshot::default();
+        snapshot.discovery.begin(DiscoveryPhase::Stopped);
+        snapshot.session.begin(SessionPhase::Stopped);
+        snapshot.peers.insert(
+            "peer".into(),
+            PeerSnapshot {
+                ordinal: 1,
+                discovered: false,
+                session: PeerSession::Waiting,
+            },
+        );
+        let path = crate::contract::screen_path("peer");
+        snapshot.remote_screens.insert(
+            path.clone(),
+            ScreenView {
+                peer_id: "peer".into(),
+                availability: ScreenAvailability::Available,
+            },
+        );
+        assert!(!snapshot.can_watch("peer", &path));
     }
 
     #[test]
@@ -2217,6 +2350,7 @@ mod tests {
                             assert!(frame_rx.borrow().is_none());
                             tokio::task::yield_now().await;
                             services_stopped.store(true, Ordering::SeqCst);
+                            Ok(())
                         }
                     },
                 )
@@ -2227,6 +2361,63 @@ mod tests {
                 assert_eq!(snapshot.session.phase(), SessionPhase::Stopped);
                 assert_eq!(snapshot.media.phase(), MediaPhase::Idle);
             });
+    }
+
+    #[tokio::test]
+    async fn shutdown_service_failure_is_visible_after_media_cleanup() {
+        let mut snapshot = AppSnapshot::default();
+        let mut playback = playback::Owner::default();
+        let mut publication = publication::Owner::default();
+        let (frames, _) = watch::channel(None);
+        complete_network_turn_off(
+            &mut snapshot,
+            &mut playback,
+            &mut publication,
+            &frames,
+            || async { Err("injected listener cleanup failure".into()) },
+        )
+        .await;
+        assert_eq!(snapshot.nearby_issue, Some(NearbyIssue::ShutdownFailed));
+        assert!(
+            snapshot
+                .media_error
+                .as_deref()
+                .unwrap()
+                .contains("listener cleanup")
+        );
+        assert!(!snapshot.nearby_stopping);
+    }
+
+    #[tokio::test]
+    async fn nearby_contract_off_waits_for_service_shutdown_completion() {
+        let mut snapshot = AppSnapshot::default();
+        snapshot.discovery.begin(DiscoveryPhase::Scanning);
+        snapshot.session.begin(SessionPhase::Listening);
+        let mut playback = playback::Owner::default();
+        let mut publication = publication::Owner::default();
+        let (frames, _) = watch::channel(None);
+        let (finish, finished) = tokio::sync::oneshot::channel();
+        {
+            let mut stop = std::pin::pin!(complete_network_turn_off(
+                &mut snapshot,
+                &mut playback,
+                &mut publication,
+                &frames,
+                || async move {
+                    finished.await.unwrap();
+                    Ok(())
+                },
+            ));
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(stop.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            finish.send(()).unwrap();
+            stop.await;
+        }
+        assert_eq!(snapshot.discovery.phase(), DiscoveryPhase::Stopped);
+        assert_eq!(snapshot.session.phase(), SessionPhase::Stopped);
     }
 
     #[test]
@@ -2350,7 +2541,7 @@ mod tests {
     }
 
     #[test]
-    fn route_withdrawal_keeps_a_passive_peer_with_an_inbound_session() {
+    fn nearby_contract_unrelated_inbound_does_not_retain_a_withdrawn_peer() {
         let mut snapshot = AppSnapshot::default();
         let discovery = snapshot.discovery.begin(DiscoveryPhase::Scanning);
         let session = snapshot.session.begin(SessionPhase::Listening);
@@ -2377,7 +2568,8 @@ mod tests {
             }),
         );
 
-        assert!(snapshot.peers.contains_key("passive-peer"));
+        assert!(!snapshot.peers.contains_key("passive-peer"));
+        assert_eq!(snapshot.inbound_sessions, 1);
 
         apply_network_event(
             &mut snapshot,
@@ -2395,8 +2587,47 @@ mod tests {
     }
 
     #[test]
+    fn nearby_contract_route_arriving_after_lost_restores_watch_without_claiming_identity() {
+        let mut snapshot = AppSnapshot::default();
+        let discovery = snapshot.discovery.begin(DiscoveryPhase::Scanning);
+        let session = snapshot.session.begin(SessionPhase::Listening);
+        snapshot.inbound_sessions = 1;
+        snapshot.peers.insert(
+            "peer".into(),
+            PeerSnapshot {
+                ordinal: 1,
+                discovered: true,
+                session: PeerSession::Waiting,
+            },
+        );
+        apply_network_event(
+            &mut snapshot,
+            discovery,
+            session,
+            NetworkEvent::PeerRemoved("peer".into()),
+        );
+        let path = crate::contract::screen_path("peer");
+        apply_network_event(
+            &mut snapshot,
+            discovery,
+            session,
+            NetworkEvent::Screen(crate::remote::Update {
+                path: path.clone(),
+                view: ScreenView {
+                    peer_id: "peer".into(),
+                    availability: ScreenAvailability::Available,
+                },
+            }),
+        );
+        assert!(snapshot.can_watch("peer", &path));
+        assert!(!snapshot.peers["peer"].discovered);
+        assert_eq!(snapshot.peers["peer"].session, PeerSession::Waiting);
+    }
+
+    #[test]
     fn waiting_peer_with_available_screen_can_watch() {
         let mut snapshot = AppSnapshot::default();
+        snapshot.session.begin(SessionPhase::Listening);
         snapshot.peers.insert(
             "passive-peer".to_owned(),
             PeerSnapshot {

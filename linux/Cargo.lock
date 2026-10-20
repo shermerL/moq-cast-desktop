@@ -3210,6 +3210,7 @@ dependencies = [
  "moq-video",
  "moqcast-build-provenance",
  "moqcast-diagnostics",
+ "moqcast-lan-state",
  "moqcast-ui",
  "pipewire",
  "rfd",
@@ -3558,6 +3559,10 @@ dependencies = [
  "tracing-subscriber",
  "zip",
 ]
+
+[[package]]
+name = "moqcast-lan-state"
+version = "0.1.0"
 
 [[package]]
 name = "moqcast-ui"

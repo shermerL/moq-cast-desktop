@@ -172,13 +172,13 @@ fn show_content(
     );
     ui.add_space(moqcast_ui::Spacing::XL);
 
-    if !snapshot.has_mesh_session() && snapshot.media == MediaState::Idle {
+    if !snapshot.access().ready && snapshot.media == MediaState::Idle {
         state_panel(
             ui,
             StatePanelSpec::new(
                 StatePanelKind::Empty,
-                locale.not_connected(),
-                locale.connect_first(),
+                locale.nearby(),
+                locale.enable_nearby_before_sharing(),
             ),
             |_| (),
         );
@@ -244,7 +244,7 @@ fn show_actions(
     system_audio: bool,
     selected_source: Option<&CaptureSource>,
 ) -> Option<UserCommand> {
-    if !snapshot.has_mesh_session() && snapshot.media == MediaState::Idle {
+    if !snapshot.access().ready && snapshot.media == MediaState::Idle {
         return None;
     }
     match snapshot.media {

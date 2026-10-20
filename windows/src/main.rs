@@ -5,6 +5,9 @@
     windows_subsystem = "windows"
 )]
 
+#[path = "../../shared/task-cleanup.rs"]
+mod cleanup;
+
 mod app;
 mod audio;
 mod build_info;

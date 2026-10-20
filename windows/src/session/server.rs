@@ -87,7 +87,8 @@ pub(super) async fn run_listener(
     origins: SessionOrigins,
     events: mpsc::Sender<RuntimeEvent>,
     mut shutdown: oneshot::Receiver<()>,
-) {
+) -> Result<(), String> {
+    let mut errors = crate::cleanup::Errors::default();
     let mut inbound_id = 0_u64;
     let mut sessions = JoinSet::new();
     let stopped_unexpectedly = loop {
@@ -138,15 +139,20 @@ pub(super) async fn run_listener(
                 }
             }
         });
-        while sessions.try_join_next().is_some() {}
+        while let Some(result) = sessions.try_join_next() {
+            errors.join("inbound observer", result, false);
+        }
     };
     listener.close().await;
     sessions.abort_all();
-    while sessions.join_next().await.is_some() {}
+    while let Some(result) = sessions.join_next().await {
+        errors.join("inbound observer", result, true);
+    }
     if stopped_unexpectedly {
         tokio::select! {
             _ = events.send(RuntimeEvent::ListenerStopped) => {}
             _ = &mut shutdown => {}
         }
     }
+    errors.finish()
 }

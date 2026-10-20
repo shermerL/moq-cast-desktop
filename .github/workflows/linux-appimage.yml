@@ -10,6 +10,8 @@ on:
       - "shared/build-provenance/**"
       - "shared/diagnostics/**"
       - "shared/ui/**"
+      - "shared/lan-state/**"
+      - "shared/task-cleanup.rs"
       - ".github/workflows/linux-appimage.yml"
   pull_request:
     paths:
@@ -17,6 +19,8 @@ on:
       - "shared/build-provenance/**"
       - "shared/diagnostics/**"
       - "shared/ui/**"
+      - "shared/lan-state/**"
+      - "shared/task-cleanup.rs"
       - ".github/workflows/linux-appimage.yml"
   workflow_dispatch:
 
@@ -33,6 +37,13 @@ jobs:
         with:
           toolchain: 1.95.0
           components: clippy,rustfmt
+      - name: Verify shared LAN state policy
+        shell: bash
+        working-directory: shared/lan-state
+        run: |
+          cargo fmt --all --check
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
       - name: Test shared diagnostics
         run: cargo test --locked --manifest-path shared/diagnostics/Cargo.toml
       - name: Lint shared diagnostics

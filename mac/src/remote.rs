@@ -112,9 +112,11 @@ impl Directory {
         self.broadcasts.get(path).cloned()
     }
 
-    pub(crate) async fn stop(self) {
+    pub(crate) async fn stop(self) -> Result<(), String> {
         self.task.abort();
-        let _ = self.task.await;
+        let mut errors = crate::cleanup::Errors::default();
+        errors.join("remote directory", self.task.await, true);
+        errors.finish()
     }
 }
 
@@ -183,6 +185,6 @@ mod tests {
         assert!(!current.is_closed());
         assert!(!current.is_clone(&previous));
         restarted.close();
-        directory.stop().await;
+        directory.stop().await.unwrap();
     }
 }

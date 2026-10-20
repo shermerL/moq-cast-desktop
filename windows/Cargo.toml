@@ -13,6 +13,7 @@ moqcast-build-provenance = { path = "../shared/build-provenance" }
 winresource = "=0.1.31"
 
 [dependencies]
+moqcast-lan-state = { path = "../shared/lan-state" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wgpu"] }

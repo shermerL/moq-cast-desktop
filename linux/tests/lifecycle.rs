@@ -18,17 +18,21 @@ fn peer(id: &str) -> DiscoveredPeer {
 }
 
 fn connected_snapshot() -> AppSnapshot {
-    let mut snapshot = AppSnapshot::default();
+    let mut snapshot = AppSnapshot {
+        local_peer_id: Some("linux-local".into()),
+        ..Default::default()
+    };
+    snapshot.start_discovery();
     snapshot.upsert_peer(peer("android-living-room"));
     snapshot.set_transport("android-living-room", TransportState::Connected);
     snapshot
 }
 
 #[test]
-fn publishing_requires_a_mesh_session() {
+fn publishing_requires_a_ready_local_lan() {
     let mut snapshot = AppSnapshot::default();
 
-    assert_eq!(snapshot.begin_publish(), Err(StateError::MeshNotConnected));
+    assert_eq!(snapshot.begin_publish(), Err(StateError::LanNotReady));
     assert_eq!(snapshot.media, MediaState::Idle);
 }
 
@@ -171,7 +175,7 @@ fn available_screen_survives_lost_until_the_route_is_withdrawn() {
 }
 
 #[test]
-fn passive_peer_survives_lost_while_an_inbound_session_exists() {
+fn unattributed_inbound_does_not_retain_a_lost_passive_peer() {
     let mut snapshot = AppSnapshot::default();
     snapshot.start_discovery();
     let mut passive = peer("android-living-room");
@@ -181,10 +185,8 @@ fn passive_peer_survives_lost_while_an_inbound_session_exists() {
 
     snapshot.mark_peer_lost("android-living-room");
 
-    assert_eq!(
-        snapshot.peers["android-living-room"].discovery,
-        PeerDiscoveryState::Lost
-    );
+    assert!(!snapshot.peers.contains_key("android-living-room"));
+    assert_eq!(snapshot.inbound_session_count, 1);
 
     snapshot.set_inbound_session_count(0);
     assert!(!snapshot.peers.contains_key("android-living-room"));
@@ -333,12 +335,18 @@ fn three_peer_transport_updates_are_independent() {
 }
 
 #[test]
-fn inbound_count_can_keep_media_available_without_claiming_peer_identity() {
+fn inbound_count_cannot_authorize_publishing_without_a_local_lan() {
     let mut snapshot = AppSnapshot::default();
     snapshot.set_inbound_session_count(3);
 
-    assert!(snapshot.has_mesh_session());
+    assert!(!snapshot.access().publish());
     assert!(snapshot.peers.is_empty());
+    assert_eq!(snapshot.begin_publish(), Err(StateError::LanNotReady));
+
+    snapshot.start_discovery();
+    assert_eq!(snapshot.begin_publish(), Err(StateError::LanNotReady));
+    snapshot.local_peer_id = Some("linux-local".into());
+    snapshot.set_inbound_session_count(0);
     snapshot.begin_publish().unwrap();
 }
 
@@ -355,5 +363,5 @@ fn inbound_role_never_fakes_a_connected_device_row() {
         TransportState::Waiting
     );
     assert_eq!(snapshot.inbound_session_count, 1);
-    assert!(snapshot.has_mesh_session());
+    assert!(!snapshot.access().publish());
 }

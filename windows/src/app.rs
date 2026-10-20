@@ -20,10 +20,7 @@ use crate::{
     playback::{PlaybackFrameIdentity, ViewPhase},
     player::{LivePlayer, PlayerAction, TOOLBAR_HEIGHT},
     remote::ScreenAvailability,
-    runtime::{
-        DiscoveryState, PeerView, RuntimeCommand, RuntimeOwner, RuntimeSnapshot,
-        TransportDirectionView, TransportPhaseView,
-    },
+    runtime::{DiscoveryState, PeerView, RuntimeCommand, RuntimeOwner, RuntimeSnapshot},
 };
 
 const NEARBY_SPLIT_MIN_WIDTH: f32 = Size::SPLIT_BREAKPOINT;
@@ -599,9 +596,9 @@ impl MoqCastApp {
         if !peer.present {
             ui.label(typography(
                 match self.locale {
-                    Locale::Chinese => "设备不再可发现，当前连接仍可继续使用。",
+                    Locale::Chinese => "暂未发现此设备；已有连接或可用内容仍会保留。",
                     Locale::English => {
-                        "Device no longer discoverable. The current connection can continue."
+                        "Not currently discovered; existing connections or available content are retained."
                     }
                 },
                 TypographyRole::Help,
@@ -616,17 +613,10 @@ impl MoqCastApp {
                 Locale::English => "Choose Watch to open this screen.",
             });
             ui.add_space(Spacing::LG);
-            let enabled = self.snapshot.discovery.is_active()
-                && !self.nearby_turn_off_pending
-                && self.snapshot.has_mesh_session()
-                && matches!(
-                    self.snapshot.media.phase,
-                    MediaPhase::Idle | MediaPhase::Failed
-                )
-                && matches!(
-                    self.snapshot.view.phase,
-                    ViewPhase::Idle | ViewPhase::Failed
-                );
+            let enabled = !self.nearby_turn_off_pending
+                && self
+                    .snapshot
+                    .can_watch(&crate::screen_path::for_peer(&peer.id));
             if primary_button(ui, self.locale.watch(), enabled).clicked() {
                 self.page = Page::Watch;
                 self.send(RuntimeCommand::WatchScreen {
@@ -773,7 +763,7 @@ impl MoqCastApp {
     fn screen_share_actions(&mut self, ui: &mut egui::Ui, status: &str) {
         match self.snapshot.media.phase {
             MediaPhase::Idle | MediaPhase::Failed => {
-                let enabled = self.snapshot.discovery.is_active()
+                let enabled = self.snapshot.access().publish()
                     && !self.nearby_turn_off_pending
                     && self.snapshot.local_id.is_some()
                     && self.snapshot.media.capture_sources.phase
@@ -1596,11 +1586,7 @@ fn visible_peers(snapshot: &RuntimeSnapshot) -> Vec<PeerView> {
     snapshot
         .peers
         .values()
-        .filter(|peer| {
-            peer.present
-                || peer.transport.direction == Some(TransportDirectionView::Outbound)
-                    && peer.transport.phase == TransportPhaseView::Connected
-        })
+        .filter(|peer| peer.facts().visible())
         .cloned()
         .collect()
 }
@@ -1658,46 +1644,16 @@ fn peer_list_subtitle(locale: Locale, peer: &PeerView) -> String {
 }
 
 fn peer_badge_tone(peer: &PeerView) -> BadgeTone {
-    if !peer.present {
-        return BadgeTone::Warning;
-    }
-    if peer.screen == ScreenAvailability::Available {
-        return BadgeTone::Info;
-    }
-    match peer.transport.phase {
-        TransportPhaseView::Rejected | TransportPhaseView::Failed => BadgeTone::Danger,
-        TransportPhaseView::Connected | TransportPhaseView::Connecting => BadgeTone::Info,
-        TransportPhaseView::Waiting | TransportPhaseView::Disconnected => BadgeTone::Neutral,
+    use moqcast_lan_state::Status;
+    match peer.facts().status() {
+        Status::Available | Status::Connected | Status::Connecting => BadgeTone::Info,
+        Status::Failed | Status::Rejected => BadgeTone::Danger,
+        _ => BadgeTone::Neutral,
     }
 }
 
 fn peer_status(locale: Locale, peer: &PeerView) -> &'static str {
-    if !peer.present {
-        return match locale {
-            Locale::Chinese => "设备不再可发现",
-            Locale::English => "Device no longer discoverable",
-        };
-    }
-    if peer.screen == ScreenAvailability::Available {
-        return match locale {
-            Locale::Chinese => "屏幕可观看",
-            Locale::English => "Screen available",
-        };
-    }
-    match (locale, peer.transport.phase) {
-        (Locale::Chinese, TransportPhaseView::Connected) => "已连接",
-        (Locale::English, TransportPhaseView::Connected) => "Connected",
-        (Locale::Chinese, TransportPhaseView::Connecting) => "正在连接",
-        (Locale::English, TransportPhaseView::Connecting) => "Connecting",
-        (Locale::Chinese, TransportPhaseView::Rejected) => "无法验证设备",
-        (Locale::English, TransportPhaseView::Rejected) => "Could not verify device",
-        (Locale::Chinese, TransportPhaseView::Failed) => "连接不可用",
-        (Locale::English, TransportPhaseView::Failed) => "Connection unavailable",
-        (Locale::Chinese, TransportPhaseView::Disconnected) => "等待设备",
-        (Locale::English, TransportPhaseView::Disconnected) => "Waiting for device",
-        (Locale::Chinese, TransportPhaseView::Waiting) => "等待设备",
-        (Locale::English, TransportPhaseView::Waiting) => "Waiting for device",
-    }
+    peer.facts().status().label(locale == Locale::Chinese)
 }
 
 fn discovery_summary(locale: Locale, snapshot: &RuntimeSnapshot) -> String {
@@ -1803,6 +1759,17 @@ fn video_encoding_label(locale: Locale, policy: VideoEncodingPolicy) -> &'static
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::{TransportDirectionView, TransportPhaseView};
+
+    #[test]
+    fn shared_policy_route_survives_lost_in_ui() {
+        let mut snapshot = RuntimeSnapshot::default();
+        let mut route = peer("route");
+        route.present = false;
+        route.screen = ScreenAvailability::Available;
+        snapshot.peers.insert(route.id.clone(), route);
+        assert_eq!(visible_peers(&snapshot).len(), 1);
+    }
 
     #[test]
     fn configured_fonts_cover_core_simplified_chinese() {
@@ -1860,10 +1827,7 @@ mod tests {
             .iter()
             .find(|peer| peer.id == "connected")
             .expect("healthy outbound session remains visible");
-        assert_eq!(
-            peer_status(Locale::English, connected),
-            "Device no longer discoverable"
-        );
+        assert_eq!(peer_status(Locale::English, connected), "Connected");
     }
 
     #[test]
@@ -1955,6 +1919,7 @@ mod tests {
         let mut visible = peer("0123-abcd");
         visible.candidates.push("192.0.2.1:4443".to_owned());
         visible.transport.phase = TransportPhaseView::Connecting;
+        visible.transport.direction = Some(TransportDirectionView::Outbound);
         assert_eq!(peer_display_name(Locale::Chinese, 1), "附近设备 1");
         assert_eq!(peer_display_name(Locale::English, 2), "Nearby device 2");
         assert!(!peer_display_name(Locale::English, 1).contains("abcd"));
@@ -1973,7 +1938,7 @@ mod tests {
         assert!(!remote.contains("192.0.2.1"));
 
         visible.screen = ScreenAvailability::Available;
-        assert_eq!(peer_status(Locale::Chinese, &visible), "屏幕可观看");
+        assert_eq!(peer_status(Locale::Chinese, &visible), "可观看");
     }
 
     #[test]

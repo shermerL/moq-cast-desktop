@@ -10,8 +10,8 @@ use moqcast_ui::{
 
 use super::super::components::{self, BadgeTone, primary_button, secondary_button, status_badge};
 use super::super::{
-    AppSnapshot, DeviceWorkspaceLayout, DialRole, DiscoveryState, Locale, MediaState,
-    PeerDiscoveryState, PeerSnapshot, ScreenAvailability, TransportState, UserCommand,
+    AppSnapshot, DeviceWorkspaceLayout, DialRole, DiscoveryState, Locale, PeerDiscoveryState,
+    PeerSnapshot, ScreenAvailability, TransportState, UserCommand,
 };
 
 const WORKSPACE_GAP: f32 = Spacing::LG;
@@ -69,13 +69,19 @@ fn workspace_toolbar(
 ) -> Option<UserCommand> {
     let discovery_active = snapshot.discovery.is_active();
     let mut command = None;
-    let (status, _) = match snapshot.discovery {
+    let (mut status, _) = match snapshot.discovery {
         DiscoveryState::Idle => (locale.discovery_idle(), BadgeTone::Neutral),
         DiscoveryState::Scanning => (locale.scanning(), BadgeTone::Info),
         DiscoveryState::Ready => (locale.discovery_ready(), BadgeTone::Success),
         DiscoveryState::Empty => (locale.no_devices(), BadgeTone::Neutral),
         DiscoveryState::Error => (locale.discovery_error(), BadgeTone::Error),
     };
+    if snapshot.lan_stopping {
+        status = match locale {
+            Locale::Chinese => "正在关闭附近设备",
+            Locale::English => "Turning off Nearby",
+        };
+    }
     let description = local_device_description(
         locale,
         local_device_name,
@@ -91,7 +97,7 @@ fn workspace_toolbar(
             } else {
                 locale.start_scan()
             };
-            if secondary_button(ui, label, true).clicked() {
+            if secondary_button(ui, label, !snapshot.lan_stopping).clicked() {
                 command = Some(if discovery_active {
                     UserCommand::StopDiscovery
                 } else {
@@ -245,7 +251,7 @@ fn show_device_detail(
     );
     if peer.screen == ScreenAvailability::Available {
         ui.add_space(Spacing::LG);
-        let watch_enabled = snapshot.has_mesh_session() && snapshot.media == MediaState::Idle;
+        let watch_enabled = snapshot.can_watch(&crate::screen_path::for_peer(peer_id));
         if primary_button(ui, locale.watch(), watch_enabled).clicked() {
             command = Some(UserCommand::StartWatching {
                 path: crate::screen_path::for_peer(peer_id),
@@ -283,19 +289,7 @@ fn transport_tone(peer: &PeerSnapshot) -> BadgeTone {
 }
 
 fn peer_row_summary(locale: Locale, peer: &PeerSnapshot) -> &'static str {
-    if peer.discovery == PeerDiscoveryState::Lost {
-        return locale.discovery_lost();
-    }
-    if peer.screen == ScreenAvailability::Available {
-        return locale.screen_available();
-    }
-    match (&peer.dial_role, &peer.transport) {
-        (DialRole::Inbound, _) => locale.transport_inbound_role(),
-        (DialRole::Outbound, TransportState::Connecting) => locale.transport_connecting(),
-        (DialRole::Outbound, TransportState::Connected) => locale.transport_connected(),
-        (DialRole::Outbound, TransportState::Failed) => locale.transport_failed(),
-        (DialRole::Outbound, TransportState::Waiting) => locale.transport_waiting(),
-    }
+    peer.facts().status().label(locale == Locale::Chinese)
 }
 
 fn device_id_label(locale: Locale) -> &'static str {
@@ -336,24 +330,16 @@ fn peer_list_subtitle(locale: Locale, peer: &PeerSnapshot, peer_id: &str) -> Str
 }
 
 fn peer_badge_tone(peer: &PeerSnapshot) -> moqcast_ui::BadgeTone {
-    if peer.discovery == PeerDiscoveryState::Lost {
-        return moqcast_ui::BadgeTone::Neutral;
-    }
-    if peer.screen == ScreenAvailability::Available {
-        return moqcast_ui::BadgeTone::Info;
-    }
-    match (&peer.dial_role, &peer.transport) {
-        (DialRole::Outbound, TransportState::Failed) => moqcast_ui::BadgeTone::Danger,
-        (DialRole::Inbound, _)
-        | (DialRole::Outbound, TransportState::Connecting | TransportState::Connected) => {
-            moqcast_ui::BadgeTone::Info
-        }
-        (DialRole::Outbound, TransportState::Waiting) => moqcast_ui::BadgeTone::Neutral,
+    use moqcast_lan_state::Status;
+    match peer.facts().status() {
+        Status::Available | Status::Connected | Status::Connecting => moqcast_ui::BadgeTone::Info,
+        Status::Failed | Status::Rejected => moqcast_ui::BadgeTone::Danger,
+        _ => moqcast_ui::BadgeTone::Neutral,
     }
 }
 
 fn peer_can_be_selected(peer: &PeerSnapshot) -> bool {
-    peer.discovery == PeerDiscoveryState::Found && peer.screen != ScreenAvailability::Withdrawn
+    peer.facts().visible()
 }
 
 fn reconcile_peer_selection(
@@ -392,7 +378,15 @@ mod tests {
     }
 
     #[test]
-    fn selection_falls_back_when_the_selected_peer_is_lost() {
+    fn shared_policy_lost_route_is_selectable() {
+        assert!(peer_can_be_selected(&peer(
+            PeerDiscoveryState::Lost,
+            ScreenAvailability::Available
+        )));
+    }
+
+    #[test]
+    fn selection_retains_a_lost_peer_with_usable_content() {
         let peers = BTreeMap::from([
             (
                 "peer-a".to_owned(),
@@ -406,12 +400,12 @@ mod tests {
 
         assert_eq!(
             reconcile_peer_selection(Some("peer-a"), &peers).as_deref(),
-            Some("peer-b")
+            Some("peer-a")
         );
     }
 
     #[test]
-    fn selection_falls_back_when_the_selected_screen_is_withdrawn() {
+    fn selection_retains_a_discovered_peer_after_content_withdrawal() {
         let peers = BTreeMap::from([
             (
                 "peer-a".to_owned(),
@@ -425,23 +419,15 @@ mod tests {
 
         assert_eq!(
             reconcile_peer_selection(Some("peer-a"), &peers).as_deref(),
-            Some("peer-b")
+            Some("peer-a")
         );
     }
 
     #[test]
     fn selection_clears_when_no_selectable_peer_remains() {
-        let peers = BTreeMap::from([
-            (
-                "peer-a".to_owned(),
-                peer(PeerDiscoveryState::Lost, ScreenAvailability::Available),
-            ),
-            (
-                "peer-b".to_owned(),
-                peer(PeerDiscoveryState::Found, ScreenAvailability::Withdrawn),
-            ),
-        ]);
-
+        let mut ended = peer(PeerDiscoveryState::Lost, ScreenAvailability::Withdrawn);
+        ended.transport = TransportState::Failed;
+        let peers = BTreeMap::from([("peer-a".to_owned(), ended)]);
         assert_eq!(reconcile_peer_selection(Some("peer-a"), &peers), None);
     }
 
