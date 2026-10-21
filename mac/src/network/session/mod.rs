@@ -72,9 +72,10 @@ pub(crate) struct SessionFoundation {
     events: mpsc::Sender<RuntimeEvent>,
     recv: mpsc::Receiver<RuntimeEvent>,
     listener_shutdown: Option<oneshot::Sender<()>>,
-    listener_task: Option<JoinHandle<()>>,
+    listener_task: Option<JoinHandle<Result<(), String>>>,
     outbound: BTreeMap<String, Outbound>,
     states: PeerStates,
+    cleanup: crate::cleanup::Errors,
 }
 
 impl SessionFoundation {
@@ -178,7 +179,7 @@ impl SessionFoundation {
         }
     }
 
-    pub(crate) async fn shutdown(mut self) {
+    pub(crate) async fn shutdown(mut self) -> Result<(), String> {
         let peers = self.outbound.keys().cloned().collect::<Vec<_>>();
         for peer in peers {
             self.stop_outbound(&peer).await;
@@ -188,11 +189,17 @@ impl SessionFoundation {
             if let Some(shutdown) = self.listener_shutdown.take() {
                 let _ = shutdown.send(());
             }
-            let _ = task.await;
+            match task.await {
+                Ok(result) => self.cleanup.result("listener", result),
+                Err(error) => self.cleanup.join("listener", Err(error), false),
+            }
         }
         drop(self.origins);
-        let _ = self.origin_drivers.publish.await;
-        let _ = self.origin_drivers.receive.await;
+        self.cleanup
+            .join("publish origin", self.origin_drivers.publish.await, false);
+        self.cleanup
+            .join("receive origin", self.origin_drivers.receive.await, false);
+        self.cleanup.finish()
     }
 
     async fn stop_outbound(&mut self, peer: &str) {
@@ -201,7 +208,10 @@ impl SessionFoundation {
         };
         outbound.connection.abort(moq_tokio::moq_net::Error::Cancel);
         outbound.task.abort();
-        let _ = outbound.task.await;
+        self.cleanup
+            .join("outbound observer", outbound.task.await, true);
+        // Abort requests shutdown; closed observes the connection loop actually exiting.
+        let _ = outbound.connection.closed().await;
     }
 
     #[cfg(test)]
@@ -237,6 +247,7 @@ impl BoundServer {
             listener_task: Some(listener_task),
             outbound: BTreeMap::new(),
             states: PeerStates::default(),
+            cleanup: Default::default(),
         })
     }
 }
@@ -261,6 +272,122 @@ mod tests {
         TransportPhase,
     };
     use crate::network::discovery::PeerRecord;
+
+    #[tokio::test]
+    async fn stopped_outbound_releases_its_local_udp_socket() {
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let mut foundation = SessionFoundation::bind("127.0.0.1:0".parse().unwrap())
+            .unwrap()
+            .start("proof".into())
+            .await
+            .unwrap();
+        let reserved = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = reserved.local_addr().unwrap();
+        drop(reserved);
+        let mut config = moq_tokio::connect::Config::default();
+        config.bind = Some(addr);
+        let client = config.init(Default::default()).unwrap();
+        let connection = client.connect("moqt://127.0.0.1:9".parse::<url::Url>().unwrap());
+        drop(client);
+        foundation.outbound.insert(
+            "test".into(),
+            super::Outbound {
+                connection,
+                task: tokio::spawn(std::future::pending()),
+            },
+        );
+        foundation.stop_outbound("test").await;
+        let rebound = std::net::UdpSocket::bind(addr).expect("outbound socket released");
+        drop(rebound);
+        foundation.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_collects_failures_and_still_joins_every_owner() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let mut foundation = SessionFoundation::bind("127.0.0.1:0".parse().unwrap())
+            .unwrap()
+            .start("proof".into())
+            .await
+            .unwrap();
+        // Replace the workers only after stopping the real listener and its origins.
+        foundation
+            .listener_shutdown
+            .take()
+            .unwrap()
+            .send(())
+            .unwrap();
+        foundation
+            .listener_task
+            .take()
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        foundation.origin_drivers.publish.abort();
+        foundation.origin_drivers.receive.abort();
+        let _ = (&mut foundation.origin_drivers.publish).await;
+        let _ = (&mut foundation.origin_drivers.receive).await;
+        let completed = Arc::new(AtomicBool::new(false));
+        let done = completed.clone();
+        foundation.listener_task = Some(tokio::spawn(async {
+            panic!("listener panic");
+        }));
+        foundation.origin_drivers.publish = tokio::spawn(async {
+            panic!("origin panic");
+        });
+        foundation.origin_drivers.receive = tokio::spawn(async move {
+            done.store(true, Ordering::SeqCst);
+        });
+        let error = foundation.shutdown().await.unwrap_err();
+        assert!(error.contains("listener"));
+        assert!(error.contains("publish origin"));
+        assert!(completed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_connection_loop_exit() {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let mut foundation = SessionFoundation::bind("127.0.0.1:0".parse().unwrap())
+            .unwrap()
+            .start("proof".into())
+            .await
+            .unwrap();
+        let (done, finished) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = done.send(());
+        });
+        finished.await.unwrap();
+        assert!(task.is_finished());
+        let client = moq_tokio::connect::Config::default()
+            .init(Default::default())
+            .unwrap();
+        let connection = client.connect("moqt://127.0.0.1:9".parse::<url::Url>().unwrap());
+        let observed = connection.clone();
+        foundation
+            .outbound
+            .insert("test".into(), super::Outbound { connection, task });
+        foundation.stop_outbound("test").await;
+        let mut closed = std::pin::pin!(observed.closed());
+        assert!(
+            matches!(
+                closed
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Ready(_)
+            ),
+            "stop returned before the connection loop exited"
+        );
+        foundation.shutdown().await.unwrap();
+    }
 
     #[tokio::test]
     async fn disconnect_closes_current_generation() {
@@ -301,7 +428,7 @@ mod tests {
         assert_eq!(disconnected.state.phase(), TransportPhase::Disconnected);
         assert!(disconnected.state.generation() > connecting.state.generation());
         assert_eq!(foundation.state("remote"), None);
-        foundation.shutdown().await;
+        foundation.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -311,7 +438,7 @@ mod tests {
         let addr = bound.advertisement().addr;
         let foundation = bound.start("proof".to_owned()).await.expect("started");
 
-        foundation.shutdown().await;
+        foundation.shutdown().await.unwrap();
 
         let rebound = SessionFoundation::bind(addr).expect("listener socket released");
         rebound
@@ -319,7 +446,8 @@ mod tests {
             .await
             .expect("listener restarted")
             .shutdown()
-            .await;
+            .await
+            .unwrap();
     }
 
     #[tokio::test(start_paused = true)]
@@ -336,6 +464,7 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(1), foundation.shutdown())
             .await
-            .expect("shutdown must not wait for event capacity");
+            .expect("shutdown must not wait for event capacity")
+            .unwrap();
     }
 }

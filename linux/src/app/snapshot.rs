@@ -174,6 +174,28 @@ pub struct PeerSnapshot {
     pub screen: ScreenAvailability,
 }
 
+impl PeerSnapshot {
+    /// Shared device projection; anonymous inbound sessions never imply peer attribution.
+    pub fn facts(&self) -> moqcast_lan_state::Peer {
+        use moqcast_lan_state::Connection;
+        let connection = if self.dial_role != DialRole::Outbound {
+            Connection::Unknown
+        } else {
+            match self.transport {
+                TransportState::Waiting => Connection::Unknown,
+                TransportState::Connecting => Connection::Connecting,
+                TransportState::Connected => Connection::Connected,
+                TransportState::Failed => Connection::Failed,
+            }
+        };
+        moqcast_lan_state::Peer {
+            discovered: self.discovery == PeerDiscoveryState::Found,
+            connection,
+            available: self.screen == ScreenAvailability::Available,
+        }
+    }
+}
+
 /// One remote screen path retained across announcement withdrawal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteScreenSnapshot {
@@ -188,6 +210,8 @@ pub struct RemoteScreenSnapshot {
 pub struct AppSnapshot {
     /// Current discovery lifecycle.
     pub discovery: DiscoveryState,
+    /// Local shutdown blocks new commands independently of discovery results.
+    pub lan_stopping: bool,
     /// Current local mDNS peer id, when services are active.
     pub local_peer_id: Option<String>,
     /// Currently discovered or connected peers keyed by the current mDNS id.
@@ -213,9 +237,9 @@ pub struct AppSnapshot {
 /// A rejected lifecycle transition.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum StateError {
-    /// Screen media requires at least one established mesh session.
-    #[error("screen media requires at least one mesh session")]
-    MeshNotConnected,
+    /// New media operations require an active local LAN owner.
+    #[error("nearby services are not ready for new media")]
+    LanNotReady,
     /// Another publication or playback already owns the screen media slot.
     #[error("screen media is already active")]
     MediaAlreadyActive,
@@ -237,6 +261,24 @@ pub enum StateError {
 }
 
 impl AppSnapshot {
+    /// Admission is tied to the local LAN owner, not to a global peer count.
+    pub fn access(&self) -> moqcast_lan_state::Access {
+        moqcast_lan_state::Access {
+            ready: self.local_peer_id.is_some()
+                && !self.lan_stopping
+                && self.discovery != DiscoveryState::Idle,
+            media_idle: self.media == MediaState::Idle,
+        }
+    }
+    /// Watch an existing directory route even when its advertisement disappeared.
+    pub fn can_watch(&self, path: &str) -> bool {
+        self.access().watch(
+            self.remote_screens
+                .get(path)
+                .is_some_and(|screen| screen.availability == ScreenAvailability::Available),
+        )
+    }
+
     /// Begin discovery without changing established mesh or media state.
     pub fn start_discovery(&mut self) {
         self.discovery = DiscoveryState::Scanning;
@@ -353,6 +395,20 @@ impl AppSnapshot {
                 availability: availability.clone(),
             },
         );
+        if available {
+            // A route can arrive after Lost; it is not proof of discovery or peer identity.
+            self.peers
+                .entry(peer_id.clone())
+                .or_insert_with(|| PeerSnapshot {
+                    name: peer_id.clone(),
+                    endpoints: Vec::new(),
+                    fingerprint_pinned: false,
+                    dial_role: DialRole::Inbound,
+                    discovery: PeerDiscoveryState::Lost,
+                    transport: TransportState::Waiting,
+                    screen: availability.clone(),
+                });
+        }
         let peer_exists = if let Some(peer) = self.peers.get_mut(&peer_id) {
             peer.screen = availability;
             true
@@ -365,20 +421,12 @@ impl AppSnapshot {
         true
     }
 
-    /// Whether any exact outbound or aggregate inbound mesh session exists.
-    pub fn has_mesh_session(&self) -> bool {
-        self.inbound_session_count > 0
-            || self.peers.values().any(|peer| {
-                peer.dial_role == DialRole::Outbound && peer.transport == TransportState::Connected
-            })
-    }
-
     /// Begin preparing a local screen publication.
     pub fn begin_publish(&mut self) -> Result<(), StateError> {
-        if !self.has_mesh_session() {
-            return Err(StateError::MeshNotConnected);
+        if !self.access().ready {
+            return Err(StateError::LanNotReady);
         }
-        if self.media != MediaState::Idle {
+        if !self.access().publish() {
             return Err(StateError::MediaAlreadyActive);
         }
         self.media = MediaState::PreparingPublish;
@@ -440,17 +488,13 @@ impl AppSnapshot {
 
     /// Reserve the media slot for one currently announced remote screen.
     pub fn begin_view(&mut self, path: &str) -> Result<(), StateError> {
-        if !self.has_mesh_session() {
-            return Err(StateError::MeshNotConnected);
+        if !self.access().ready {
+            return Err(StateError::LanNotReady);
         }
         if self.media != MediaState::Idle {
             return Err(StateError::MediaAlreadyActive);
         }
-        let available = self
-            .remote_screens
-            .get(path)
-            .is_some_and(|screen| screen.availability == ScreenAvailability::Available);
-        if !available {
+        if !self.can_watch(path) {
             return Err(StateError::ScreenNotAvailable);
         }
         self.media = MediaState::PreparingView {
@@ -562,10 +606,7 @@ impl AppSnapshot {
     }
 
     fn prune_inactive_peer(&mut self, peer_id: &str) {
-        let keep = self
-            .peers
-            .get(peer_id)
-            .is_some_and(|peer| peer_remains_visible(peer, self.inbound_session_count));
+        let keep = self.peers.get(peer_id).is_some_and(peer_remains_visible);
         if keep {
             return;
         }
@@ -576,28 +617,91 @@ impl AppSnapshot {
     }
 
     fn prune_inactive_peers(&mut self) {
-        let inbound_session_count = self.inbound_session_count;
-        self.peers
-            .retain(|_, peer| peer_remains_visible(peer, inbound_session_count));
+        self.peers.retain(|_, peer| peer_remains_visible(peer));
         self.remote_screens
             .retain(|_, screen| self.peers.contains_key(&screen.peer_id));
     }
 }
 
-fn peer_remains_visible(peer: &PeerSnapshot, inbound_session_count: usize) -> bool {
-    peer.discovery == PeerDiscoveryState::Found
-        || (peer.dial_role == DialRole::Outbound
-            && matches!(
-                peer.transport,
-                TransportState::Connecting | TransportState::Connected
-            ))
-        || peer.screen == ScreenAvailability::Available
-        || (peer.dial_role == DialRole::Inbound && inbound_session_count > 0)
+fn peer_remains_visible(peer: &PeerSnapshot) -> bool {
+    peer.facts().visible()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_policy_watch_uses_route_and_owner_not_global_connection_count() {
+        let mut snapshot = AppSnapshot::default();
+        snapshot.start_discovery();
+        snapshot.local_peer_id = Some("local".into());
+        let path = "moqcast.screen/peer";
+        snapshot.update_remote_screen(path.into(), true);
+        assert_eq!(snapshot.inbound_session_count, 0);
+        assert!(snapshot.can_watch(path));
+        assert!(snapshot.access().publish());
+        snapshot.lan_stopping = true;
+        assert!(!snapshot.can_watch(path));
+        assert_eq!(snapshot.begin_view(path), Err(StateError::LanNotReady));
+        assert_eq!(snapshot.begin_publish(), Err(StateError::LanNotReady));
+        snapshot.lan_stopping = false;
+        snapshot.stop_discovery();
+        snapshot.inbound_session_count = 5;
+        assert!(!snapshot.can_watch(path));
+    }
+
+    #[test]
+    fn nearby_contract_unrelated_inbound_does_not_retain_lost_or_withdrawn_peers() {
+        for available in [false, true] {
+            let mut snapshot = AppSnapshot {
+                local_peer_id: Some("local".into()),
+                ..Default::default()
+            };
+            snapshot.start_discovery();
+            snapshot.upsert_peer(DiscoveredPeer {
+                id: "peer".into(),
+                name: "peer".into(),
+                endpoints: vec![],
+                fingerprint_pinned: true,
+                dial_role: DialRole::Inbound,
+            });
+            snapshot.set_inbound_session_count(1);
+            if available {
+                snapshot.update_remote_screen("moqcast.screen/peer".into(), true);
+            }
+            snapshot.mark_peer_lost("peer");
+            if available {
+                assert!(snapshot.peers.contains_key("peer"));
+                assert!(snapshot.begin_view("moqcast.screen/peer").is_ok());
+                snapshot.update_remote_screen("moqcast.screen/peer".into(), false);
+            }
+            assert!(!snapshot.peers.contains_key("peer"));
+            assert_eq!(snapshot.inbound_session_count, 1);
+        }
+    }
+
+    #[test]
+    fn nearby_contract_route_arriving_after_lost_restores_watch_without_claiming_identity() {
+        let mut snapshot = AppSnapshot {
+            local_peer_id: Some("local".into()),
+            ..Default::default()
+        };
+        snapshot.start_discovery();
+        snapshot.upsert_peer(DiscoveredPeer {
+            id: "peer".into(),
+            name: "peer".into(),
+            endpoints: vec![],
+            fingerprint_pinned: true,
+            dial_role: DialRole::Inbound,
+        });
+        snapshot.set_inbound_session_count(1);
+        snapshot.mark_peer_lost("peer");
+        snapshot.update_remote_screen("moqcast.screen/peer".into(), true);
+        assert!(snapshot.begin_view("moqcast.screen/peer").is_ok());
+        assert_eq!(snapshot.peers["peer"].discovery, PeerDiscoveryState::Lost);
+        assert_eq!(snapshot.peers["peer"].transport, TransportState::Waiting);
+    }
 
     #[test]
     fn remote_audio_updates_only_the_active_view_path() {

@@ -732,19 +732,11 @@ fn owns_playback(s: &RuntimeSnapshot, p: &PeerView) -> bool {
     ) && s.view.path.as_deref() == Some(crate::screen_path::for_peer(&p.id).as_str())
 }
 fn can_watch(s: &RuntimeSnapshot, p: &PeerView, pending: bool) -> bool {
-    !pending
-        && s.discovery.is_active()
-        && s.has_mesh_session()
-        && p.screen == ScreenAvailability::Available
-        && matches!(s.media.phase, MediaPhase::Idle | MediaPhase::Failed)
-        && matches!(s.view.phase, ViewPhase::Idle | ViewPhase::Failed)
+    !pending && s.can_watch(&crate::screen_path::for_peer(&p.id))
 }
 fn can_share(s: &RuntimeSnapshot, kind: CaptureSourceKind, pending: bool) -> bool {
     !pending
-        && s.discovery.is_active()
-        && s.local_id.is_some()
-        && matches!(s.media.phase, MediaPhase::Idle | MediaPhase::Failed)
-        && matches!(s.view.phase, ViewPhase::Idle | ViewPhase::Failed)
+        && s.access().publish()
         && s.media.capture_sources.phase == CaptureSourceCatalogPhase::Ready
         && s.media
             .capture_sources
@@ -779,19 +771,11 @@ fn row_status(locale: Locale, s: &RuntimeSnapshot, p: &PeerView) -> (StatusTone,
     if owns_playback(s, p) {
         return local_media_status(locale, s);
     }
-    if p.screen == ScreenAvailability::Available {
-        return (
-            StatusTone::Active,
-            if locale == Locale::Chinese {
-                "可观看"
-            } else {
-                "Watchable"
-            },
-        );
-    }
-    let tone = match p.transport.phase {
-        TransportPhaseView::Connecting => StatusTone::Busy,
-        TransportPhaseView::Failed | TransportPhaseView::Rejected => StatusTone::Error,
+    use moqcast_lan_state::Status;
+    let tone = match p.facts().status() {
+        Status::Available | Status::Connected => StatusTone::Active,
+        Status::Connecting => StatusTone::Busy,
+        Status::Failed | Status::Rejected => StatusTone::Error,
         _ => StatusTone::Neutral,
     };
     (tone, peer_status(locale, p))
@@ -800,7 +784,9 @@ fn row_status(locale: Locale, s: &RuntimeSnapshot, p: &PeerView) -> (StatusTone,
 mod tests {
     use super::*;
     fn fixture() -> (MoqCastApp, tokio::sync::mpsc::Receiver<RuntimeCommand>) {
-        let (runtime, commands) = RuntimeOwner::isolated_for_ui_test();
+        let (runtime, commands) = RuntimeOwner::isolated_for_ui_test(
+            tokio::sync::watch::channel(RuntimeSnapshot::default()).1,
+        );
         let diagnostics = moqcast_diagnostics::init(moqcast_diagnostics::Config::without_file(
             moqcast_diagnostics::BuildInfo::new("test"),
             "UI fixture",
@@ -950,12 +936,14 @@ mod tests {
         assert!(can_share(&s, CaptureSourceKind::Display, false));
         assert!(!can_share(&s, CaptureSourceKind::Window, false));
         assert!(!can_share(&s, CaptureSourceKind::Display, true));
+        s.stopping = true;
+        assert!(!can_share(&s, CaptureSourceKind::Display, false));
     }
     #[test]
     fn missing_advertisement_does_not_hide_an_available_route() {
         let mut s = RuntimeSnapshot {
             discovery: DiscoveryState::Ready,
-            inbound_sessions: 1,
+            local_id: Some("local".into()),
             ..Default::default()
         };
         let p = PeerView {
@@ -969,9 +957,19 @@ mod tests {
             screen: ScreenAvailability::Available,
         };
         s.peers.insert(p.id.clone(), p.clone());
+        s.remote_screens.insert(
+            crate::screen_path::for_peer(&p.id),
+            crate::remote::RemoteScreenView {
+                peer_id: p.id.clone(),
+                availability: ScreenAvailability::Available,
+            },
+        );
         assert_eq!(visible_peers(&s).len(), 1);
         assert!(can_watch(&s, &p, false));
-        assert_eq!(row_status(Locale::English, &s, &p).1, "Watchable");
+        assert_eq!(row_status(Locale::English, &s, &p).1, "Available");
+        s.stopping = true;
+        assert!(!can_watch(&s, &p, false));
+        s.stopping = false;
         s.view.phase = ViewPhase::Preparing;
         s.view.path = Some(crate::screen_path::for_peer(&p.id));
         assert_eq!(row_status(Locale::English, &s, &p).1, "Preparing playback");
@@ -1106,6 +1104,65 @@ mod tests {
             )),
             "the source list must actually scroll"
         );
+    }
+
+    #[test]
+    fn snapshot_channel_updates_render_rows_without_inbound_attribution() {
+        let (mut app, _) = fixture();
+        let (updates, receiver) = tokio::sync::watch::channel(RuntimeSnapshot::default());
+        let (runtime, _commands) = RuntimeOwner::isolated_for_ui_test(receiver);
+        app.runtime = runtime;
+        let ctx = egui::Context::default();
+        v2::install(&ctx);
+        let size = vec2(1040.0, 640.0);
+        let mut snapshot = RuntimeSnapshot {
+            discovery: DiscoveryState::Ready,
+            local_id: Some("local".into()),
+            inbound_sessions: 1,
+            ..Default::default()
+        };
+        let peer = PeerView {
+            id: "peer".into(),
+            candidates: vec![],
+            should_dial: false,
+            authenticated_discovery: false,
+            tls_pinned: true,
+            present: true,
+            transport: Default::default(),
+            screen: ScreenAvailability::Unavailable,
+        };
+        snapshot.peers.insert(peer.id.clone(), peer);
+        // The same watch receiver feeds the real UI; multiple updates may coalesce.
+        updates.send(snapshot.clone()).unwrap();
+        app.snapshot = app.runtime.snapshot();
+        let out = render(&ctx, &mut app, size, vec![]);
+        assert!(painted(&out, "Found").is_positive());
+        assert!(!can_watch(
+            &app.snapshot,
+            &app.snapshot.peers["peer"],
+            false
+        ));
+        snapshot.peers.get_mut("peer").unwrap().present = false;
+        snapshot.peers.get_mut("peer").unwrap().screen = ScreenAvailability::Available;
+        snapshot.remote_screens.insert(
+            crate::screen_path::for_peer("peer"),
+            crate::remote::RemoteScreenView {
+                peer_id: "peer".into(),
+                availability: ScreenAvailability::Available,
+            },
+        );
+        updates.send(snapshot.clone()).unwrap();
+        app.snapshot = app.runtime.snapshot();
+        let out = render(&ctx, &mut app, size, vec![]);
+        assert!(painted(&out, "Available").is_positive());
+        assert!(can_watch(&app.snapshot, &app.snapshot.peers["peer"], false));
+        snapshot.remote_screens.clear();
+        snapshot.peers.get_mut("peer").unwrap().screen = ScreenAvailability::Withdrawn;
+        updates.send(snapshot).unwrap();
+        app.snapshot = app.runtime.snapshot();
+        assert_eq!(visible_peer_views(&app.snapshot).count(), 0);
+        let out = render(&ctx, &mut app, size, vec![]);
+        assert!(!out.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(t) if t.galley.job.text == "Nearby device 1")));
     }
 
     #[test]

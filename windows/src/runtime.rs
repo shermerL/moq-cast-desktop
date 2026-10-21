@@ -2,8 +2,10 @@
 
 use std::{
     collections::BTreeMap,
+    future::Future,
     net::SocketAddr,
     path::PathBuf,
+    pin::Pin,
     sync::Arc,
     thread::{self, JoinHandle},
 };
@@ -93,6 +95,29 @@ pub(crate) struct PeerView {
     pub(crate) screen: ScreenAvailability,
 }
 
+impl PeerView {
+    pub(crate) fn facts(&self) -> moqcast_lan_state::Peer {
+        use moqcast_lan_state::Connection;
+        let connection = if self.transport.direction != Some(TransportDirectionView::Outbound) {
+            Connection::Unknown
+        } else {
+            match self.transport.phase {
+                TransportPhaseView::Waiting => Connection::Unknown,
+                TransportPhaseView::Connecting => Connection::Connecting,
+                TransportPhaseView::Connected => Connection::Connected,
+                TransportPhaseView::Rejected => Connection::Rejected,
+                TransportPhaseView::Failed => Connection::Failed,
+                TransportPhaseView::Disconnected => Connection::Disconnected,
+            }
+        };
+        moqcast_lan_state::Peer {
+            discovered: self.present,
+            connection,
+            available: self.screen == ScreenAvailability::Available,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RuntimeSnapshot {
     pub(crate) discovery: DiscoveryState,
@@ -131,6 +156,28 @@ impl Default for RuntimeSnapshot {
 }
 
 impl RuntimeSnapshot {
+    pub(crate) fn access(&self) -> moqcast_lan_state::Access {
+        moqcast_lan_state::Access {
+            ready: self.local_id.is_some()
+                && !self.stopping
+                && !matches!(
+                    self.discovery,
+                    DiscoveryState::Stopping | DiscoveryState::Stopped
+                ),
+            media_idle: matches!(
+                self.media.phase,
+                crate::media::MediaPhase::Idle | crate::media::MediaPhase::Failed
+            ) && matches!(self.view.phase, ViewPhase::Idle | ViewPhase::Failed),
+        }
+    }
+    pub(crate) fn can_watch(&self, path: &str) -> bool {
+        self.access().watch(
+            self.remote_screens
+                .get(path)
+                .is_some_and(|screen| screen.availability == ScreenAvailability::Available),
+        )
+    }
+
     fn begin_scan(&mut self) {
         self.discovery = DiscoveryState::Starting;
         self.last_error = None;
@@ -198,16 +245,9 @@ impl RuntimeSnapshot {
     }
 
     fn peer_remains_visible(&self, peer: &str) -> bool {
-        self.peers.get(peer).is_some_and(|peer| {
-            peer.present
-                || peer.transport.direction == Some(TransportDirectionView::Outbound)
-                    && matches!(
-                        peer.transport.phase,
-                        TransportPhaseView::Connecting | TransportPhaseView::Connected
-                    )
-                || peer.screen == ScreenAvailability::Available
-                || !peer.should_dial && self.inbound_sessions > 0
-        })
+        self.peers
+            .get(peer)
+            .is_some_and(|peer| peer.facts().visible())
     }
 
     fn prune_inactive_peer(&mut self, peer: &str) {
@@ -275,6 +315,21 @@ impl RuntimeSnapshot {
             return false;
         }
         self.remote_screens.insert(path, update.view);
+        if availability == ScreenAvailability::Available {
+            // A usable route grants Watch, not an authenticated discovery identity.
+            self.peers
+                .entry(peer_id.clone())
+                .or_insert_with(|| PeerView {
+                    id: peer_id.clone(),
+                    candidates: Vec::new(),
+                    should_dial: false,
+                    authenticated_discovery: false,
+                    tls_pinned: false,
+                    present: false,
+                    transport: TransportView::default(),
+                    screen: availability,
+                });
+        }
         let peer_exists = if let Some(peer) = self.peers.get_mut(&peer_id) {
             peer.screen = availability;
             true
@@ -285,14 +340,6 @@ impl RuntimeSnapshot {
             self.prune_inactive_peer(&peer_id);
         }
         true
-    }
-
-    pub(crate) fn has_mesh_session(&self) -> bool {
-        self.inbound_sessions > 0
-            || self
-                .peers
-                .values()
-                .any(|peer| peer.transport.phase == TransportPhaseView::Connected)
     }
 
     fn should_auto_connect(&self, peer: &str) -> bool {
@@ -335,7 +382,11 @@ impl RuntimeSnapshot {
 
     fn shutdown(&mut self) {
         self.stopping = true;
-        self.stopped_scan();
+        if let Some(error) = self.last_error {
+            self.failed_scan(error);
+        } else {
+            self.stopped_scan();
+        }
     }
 }
 
@@ -413,14 +464,16 @@ impl ViewOwner {
         }
     }
 
-    async fn stop(&mut self) {
+    async fn stop(&mut self) -> Result<(), String> {
         self.volume = None;
         if let Some(cancel) = self.cancel.take() {
             cancel.send_replace(true);
         }
         if let Some(task) = self.task.take() {
-            let _ = task.await;
+            task.await
+                .map_err(|error| format!("playback shutdown task failed: {error}"))?;
         }
+        Ok(())
     }
 }
 
@@ -445,11 +498,13 @@ impl PublicationOwner {
         }
     }
 
-    async fn stop(&mut self) {
+    async fn stop(&mut self) -> Result<(), String> {
+        let mut errors = crate::cleanup::Errors::default();
         if let Some(task) = self.task.take() {
             task.abort();
-            let _ = task.await;
+            errors.join("publisher", task.await, true);
         }
+        errors.finish()
     }
 }
 
@@ -476,9 +531,10 @@ pub(crate) struct RuntimeOwner {
 
 impl RuntimeOwner {
     #[cfg(test)]
-    pub(crate) fn isolated_for_ui_test() -> (Self, mpsc::Receiver<RuntimeCommand>) {
+    pub(crate) fn isolated_for_ui_test(
+        snapshots: watch::Receiver<RuntimeSnapshot>,
+    ) -> (Self, mpsc::Receiver<RuntimeCommand>) {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
-        let (_, snapshots) = watch::channel(RuntimeSnapshot::default());
         let (_, playback) = watch::channel(None);
         (
             Self {
@@ -596,10 +652,24 @@ struct LanServices {
 }
 
 impl LanServices {
-    async fn shutdown(self) {
-        self.remote.stop().await;
-        self.sessions.shutdown().await;
+    async fn shutdown(self) -> Result<(), String> {
+        let mut errors = crate::cleanup::Errors::default();
+        errors.result("directory", self.remote.stop().await);
+        errors.result("sessions", self.sessions.shutdown().await);
         drop(self.discovery);
+        errors.finish()
+    }
+}
+
+struct StartingServices {
+    future: Pin<Box<dyn Future<Output = Result<LanServices, &'static str>>>>,
+    polled: bool,
+}
+
+impl StartingServices {
+    async fn recv(&mut self) -> Result<LanServices, &'static str> {
+        self.polled = true;
+        self.future.as_mut().await
     }
 }
 
@@ -607,10 +677,11 @@ impl LanServices {
 struct ServiceOwner {
     lifecycle: ServiceLifecycle,
     services: Option<LanServices>,
+    starting: Option<StartingServices>,
 }
 
 impl ServiceOwner {
-    async fn start(
+    fn start(
         &mut self,
         config: &RuntimeConfig,
         snapshot: &mut RuntimeSnapshot,
@@ -622,7 +693,29 @@ impl ServiceOwner {
         tracing::info!(generation, "starting Nearby services");
         snapshot.begin_scan();
         let _ = snapshots.send(snapshot.clone());
-        match start_services(config, generation).await {
+        let config = config.clone();
+        self.starting = Some(StartingServices {
+            future: Box::pin(async move { start_services(&config, generation).await }),
+            polled: false,
+        });
+    }
+
+    async fn started(&mut self) -> (u64, Result<LanServices, &'static str>) {
+        let result = match self.starting.as_mut() {
+            Some(starting) => starting.recv().await,
+            None => std::future::pending().await,
+        };
+        self.starting = None;
+        (self.lifecycle.generation, result)
+    }
+
+    async fn finish_start(
+        &mut self,
+        generation: u64,
+        result: Result<LanServices, &'static str>,
+        snapshot: &mut RuntimeSnapshot,
+    ) {
+        match result {
             Ok(services) if self.lifecycle.accepts(generation) => {
                 let listener = services.sessions.advertisement().addr.to_string();
                 let local_id = sanitize_identity(services.discovery.id());
@@ -630,12 +723,18 @@ impl ServiceOwner {
                 tracing::info!(generation, "Nearby listener and discovery ready");
                 self.services = Some(services);
             }
-            Ok(services) => services.shutdown().await,
-            Err(message) => {
+            Ok(services) => {
+                if let Err(error) = services.shutdown().await {
+                    tracing::error!(%error, "stale services cleanup failed");
+                    snapshot.failed_scan("LAN cleanup failed. Check the logs.");
+                }
+            }
+            Err(message) if self.lifecycle.accepts(generation) => {
                 self.lifecycle.fail(generation);
                 snapshot.failed_scan(message);
                 tracing::warn!(generation, reason = message, "Nearby startup failed");
             }
+            Err(_) => {}
         }
     }
 
@@ -644,25 +743,55 @@ impl ServiceOwner {
             generation = self.lifecycle.generation,
             "stopping Nearby services"
         );
+        let prior_error = snapshot.last_error;
         self.lifecycle.stop();
+        let mut errors = crate::cleanup::Errors::default();
+        if let Some(mut starting) = self.starting.take() {
+            // The pinned MoQ version has no construction guard. Once polled,
+            // keep ownership until setup returns so successful discovery can be dropped.
+            if starting.polled {
+                tracing::info!(
+                    stage = "lan_shutdown",
+                    "waiting for LAN setup before cleanup"
+                );
+                match starting.recv().await {
+                    Ok(services) => errors.result("starting services", services.shutdown().await),
+                    Err(message) => errors.result("LAN setup", Err(message.to_owned())),
+                }
+            }
+        }
         if let Some(services) = self.services.take() {
-            services.shutdown().await;
+            errors.result("services", services.shutdown().await);
         }
         snapshot.stopped_scan();
-        tracing::info!("Nearby services stopped");
+        if let Some(error) = prior_error {
+            snapshot.failed_scan(error);
+        }
+        if let Err(error) = errors.finish() {
+            tracing::error!(%error, "LAN cleanup failed");
+            snapshot.failed_scan("LAN cleanup failed. Check the logs.");
+        } else {
+            tracing::info!("Nearby services stopped");
+        }
     }
 
     async fn fail(&mut self, snapshot: &mut RuntimeSnapshot, message: &'static str) {
         let generation = self.lifecycle.generation;
         self.lifecycle.fail(generation);
-        if let Some(services) = self.services.take() {
-            services.shutdown().await;
+        if let Some(services) = self.services.take()
+            && let Err(error) = services.shutdown().await
+        {
+            tracing::error!(%error, "LAN cleanup failed");
         }
         snapshot.failed_scan(message);
     }
 }
 
 enum RuntimeInput {
+    Started {
+        generation: u64,
+        result: Box<Result<LanServices, &'static str>>,
+    },
     Command(Option<RuntimeCommand>),
     Discovery {
         generation: u64,
@@ -694,12 +823,7 @@ async fn run(
     let mut publication = PublicationOwner::default();
     let mut view = ViewOwner::default();
     let mut service_owner = ServiceOwner::default();
-    service_owner
-        .start(&config, &mut snapshot, &snapshots)
-        .await;
-    let _ = snapshots.send(snapshot.clone());
-    refresh_capture_sources(&mut snapshot, &snapshots).await;
-    let _ = snapshots.send(snapshot.clone());
+    service_owner.start(&config, &mut snapshot, &snapshots);
 
     loop {
         let input = if let Some(services) = service_owner.services.as_mut() {
@@ -715,7 +839,9 @@ async fn run(
             }
         } else {
             tokio::select! {
+                biased;
                 command = commands.recv() => RuntimeInput::Command(command),
+                (generation, result) = service_owner.started() => RuntimeInput::Started { generation, result: Box::new(result) },
                 event = media_recv.recv() => RuntimeInput::Media(event),
                 event = view_recv.recv() => RuntimeInput::View(event),
                 changed = audio_recv.changed() => RuntimeInput::Audio(changed),
@@ -723,6 +849,12 @@ async fn run(
         };
 
         match input {
+            RuntimeInput::Started { generation, result } => {
+                service_owner
+                    .finish_start(generation, *result, &mut snapshot)
+                    .await;
+                refresh_capture_sources(&mut snapshot, &snapshots).await;
+            }
             RuntimeInput::Command(command) => {
                 let Some(command) = command else { break };
                 if handle_command(
@@ -851,57 +983,7 @@ async fn run(
                 let Some(event) = event else {
                     continue;
                 };
-                match event {
-                    ViewEvent::DecoderReady {
-                        generation,
-                        path,
-                        decoder,
-                        video_codec,
-                        width,
-                        height,
-                    } => {
-                        tracing::info!(
-                            view_generation = generation,
-                            path = %path,
-                            decoder = %decoder,
-                            video_codec = %video_codec,
-                            width,
-                            height,
-                            "remote video decoder produced its first frame"
-                        );
-                        snapshot.view.decoder_ready(
-                            generation,
-                            &path,
-                            decoder,
-                            video_codec,
-                            width,
-                            height,
-                        );
-                    }
-                    ViewEvent::AudioChanged {
-                        generation,
-                        path,
-                        audio,
-                    } => {
-                        snapshot.view.audio_changed(generation, &path, audio);
-                    }
-                    ViewEvent::Ended { generation, result } => {
-                        match &result {
-                            Ok(()) => tracing::info!(
-                                view_generation = generation,
-                                "remote screen subscription ended"
-                            ),
-                            Err(error) => tracing::warn!(
-                                view_generation = generation,
-                                error = %error,
-                                "remote screen subscription failed"
-                            ),
-                        }
-                        view.finished(generation);
-                        playback.send_replace(None);
-                        snapshot.view.ended(generation, result);
-                    }
-                }
+                apply_view_event(&mut snapshot, &mut view, &playback, event);
             }
             RuntimeInput::Audio(changed) => {
                 if changed.is_err() {
@@ -916,6 +998,8 @@ async fn run(
         let _ = snapshots.send(snapshot.clone());
     }
 
+    snapshot.begin_stop_scan();
+    let _ = snapshots.send(snapshot.clone());
     stop_active_media(&mut snapshot, &mut publication, &mut view, &playback).await;
     service_owner.stop(&mut snapshot).await;
     snapshot.shutdown();
@@ -1051,7 +1135,7 @@ async fn handle_command(command: RuntimeCommand, context: RuntimeContext<'_>) ->
     } = context;
     match command {
         RuntimeCommand::StartScan => {
-            services.start(config, snapshot, snapshots).await;
+            services.start(config, snapshot, snapshots);
             false
         }
         RuntimeCommand::StopScan => {
@@ -1059,8 +1143,29 @@ async fn handle_command(command: RuntimeCommand, context: RuntimeContext<'_>) ->
                 return false;
             }
             let _ = snapshots.send(snapshot.clone());
+            tracing::info!(
+                stage = "lan_shutdown",
+                generation = services.lifecycle.generation,
+                peers = snapshot.peers.len(),
+                inbound = snapshot.inbound_sessions,
+                "stopping LAN resources"
+            );
             stop_active_media(snapshot, publication, view, playback).await;
+            tracing::debug!(
+                stage = "lan_shutdown",
+                step = "services",
+                "media owners stopped; stopping LAN services"
+            );
             services.stop(snapshot).await;
+            if snapshot.last_error.is_some() {
+                return false;
+            }
+            tracing::info!(
+                stage = "lan_shutdown",
+                generation = services.lifecycle.generation,
+                mdns_completion = "drop_requested",
+                "LAN shutdown sequence completed"
+            );
             false
         }
         RuntimeCommand::RefreshCaptureSources => {
@@ -1097,8 +1202,12 @@ async fn handle_command(command: RuntimeCommand, context: RuntimeContext<'_>) ->
             let Some(generation) = snapshot.media.begin_stop() else {
                 return false;
             };
-            publication.stop().await;
+            let result = publication.stop().await;
             snapshot.media.stopped(generation);
+            if let Err(error) = result {
+                tracing::error!(%error, "publication cleanup failed");
+                snapshot.last_error = Some("Publication shutdown failed. Check the logs.");
+            }
             false
         }
         RuntimeCommand::WatchScreen { path } => {
@@ -1132,9 +1241,13 @@ async fn handle_command(command: RuntimeCommand, context: RuntimeContext<'_>) ->
             let Some(generation) = snapshot.view.begin_stop() else {
                 return false;
             };
-            view.stop().await;
+            let result = view.stop().await;
             playback.send_replace(None);
             snapshot.view.stopped(generation);
+            if let Err(error) = result {
+                tracing::error!(stage = "playback", %error, "playback owner failed during cleanup");
+                snapshot.last_error = Some("Playback shutdown failed. Check the logs.");
+            }
             false
         }
         RuntimeCommand::Shutdown => true,
@@ -1147,19 +1260,23 @@ async fn stop_active_media(
     view: &mut ViewOwner,
     playback: &watch::Sender<Option<Arc<PlaybackFrame>>>,
 ) {
-    if let Some(generation) = snapshot.view.begin_stop() {
-        view.stop().await;
-        playback.send_replace(None);
+    let generation = snapshot.view.begin_stop();
+    let view_result = view.stop().await;
+    playback.send_replace(None);
+    if let Some(generation) = generation {
         snapshot.view.stopped(generation);
-    } else {
-        view.stop().await;
-        playback.send_replace(None);
     }
-    if let Some(generation) = snapshot.media.begin_stop() {
-        publication.stop().await;
+    let publication_generation = snapshot.media.begin_stop();
+    let publish_result = publication.stop().await;
+    if let Some(generation) = publication_generation {
         snapshot.media.stopped(generation);
-    } else {
-        publication.stop().await;
+    }
+    let mut errors = crate::cleanup::Errors::default();
+    errors.result("viewer", view_result);
+    errors.result("publisher", publish_result);
+    if let Err(error) = errors.finish() {
+        tracing::error!(stage = "lan_shutdown", %error, "media cleanup failed");
+        snapshot.last_error = Some("Media shutdown failed. Check the logs.");
     }
 }
 
@@ -1191,7 +1308,7 @@ async fn start_publication(
     audio_updates: &watch::Sender<Option<AudioStatusUpdate>>,
     snapshots: &watch::Sender<RuntimeSnapshot>,
 ) {
-    if !matches!(snapshot.view.phase, ViewPhase::Idle | ViewPhase::Failed) {
+    if !snapshot.access().publish() {
         snapshot.last_error = Some("Stop watching before sharing the local screen.");
         return;
     }
@@ -1263,8 +1380,9 @@ fn start_view(
     events: &mpsc::Sender<ViewEvent>,
     playback: &watch::Sender<Option<Arc<PlaybackFrame>>>,
 ) {
-    if !snapshot.has_mesh_session() {
-        snapshot.last_error = Some("A direct peer session is required before watching.");
+    if !snapshot.can_watch(&path) {
+        snapshot.last_error =
+            Some("Nearby must be ready, media idle, and the screen available before watching.");
         return;
     }
     if !matches!(
@@ -1328,6 +1446,61 @@ async fn auto_connect(
                 phase: TransportPhaseView::Failed,
             },
         ),
+    }
+}
+
+fn apply_view_event(
+    snapshot: &mut RuntimeSnapshot,
+    view: &mut ViewOwner,
+    playback: &watch::Sender<Option<Arc<PlaybackFrame>>>,
+    event: ViewEvent,
+) {
+    match event {
+        ViewEvent::DecoderReady {
+            generation,
+            path,
+            decoder,
+            video_codec,
+            width,
+            height,
+        } => {
+            tracing::info!(
+                view_generation = generation,
+                path = %path,
+                decoder = %decoder,
+                video_codec = %video_codec,
+                width,
+                height,
+                "remote video decoder produced its first frame"
+            );
+            snapshot
+                .view
+                .decoder_ready(generation, &path, decoder, video_codec, width, height);
+        }
+        ViewEvent::AudioChanged {
+            generation,
+            path,
+            audio,
+        } => {
+            snapshot.view.audio_changed(generation, &path, audio);
+        }
+        ViewEvent::Ended { generation, result } => {
+            match &result {
+                Ok(()) => tracing::info!(
+                    view_generation = generation,
+                    "remote screen subscription ended"
+                ),
+                Err(error) => tracing::warn!(
+                    view_generation = generation,
+                    error = %error,
+                    "remote screen subscription failed"
+                ),
+            }
+            if snapshot.view.ended(generation, result) {
+                view.finished(generation);
+                playback.send_replace(None);
+            }
+        }
     }
 }
 
@@ -1399,6 +1572,137 @@ mod tests {
             authenticated_discovery: true,
             tls_pinned: true,
         }
+    }
+
+    #[tokio::test]
+    async fn publication_panic_is_not_successful_shutdown() {
+        let mut snapshot = RuntimeSnapshot::default();
+        let mut publication = PublicationOwner::default();
+        let task = tokio::spawn(async {
+            panic!("publication panic");
+        });
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        publication.task = Some(task);
+        let mut view = ViewOwner::default();
+        let (frames, _) = watch::channel(None);
+        stop_active_media(&mut snapshot, &mut publication, &mut view, &frames).await;
+        assert!(
+            snapshot.last_error.is_some(),
+            "publication panic was swallowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn nearby_audit_viewer_panic_is_not_successful_off() {
+        let mut snapshot = RuntimeSnapshot::default();
+        snapshot.started_scan("127.0.0.1:4443".into(), "local".into());
+        let mut view = ViewOwner {
+            task: Some(tokio::spawn(async { panic!("injected viewer failure") })),
+            ..Default::default()
+        };
+        let mut publication = PublicationOwner::default();
+        let (frames, _) = watch::channel(None);
+        stop_active_media(&mut snapshot, &mut publication, &mut view, &frames).await;
+        assert!(
+            snapshot.last_error.is_some(),
+            "teardown must report failed viewer task"
+        );
+    }
+
+    #[tokio::test]
+    async fn nearby_contract_stop_scan_joins_media_owners_before_clearing_state() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Released(Arc<AtomicBool>);
+        impl Drop for Released {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        for publishing in [false, true] {
+            let mut snapshot = RuntimeSnapshot::default();
+            snapshot.started_scan("127.0.0.1:4443".into(), "local".into());
+            snapshot.apply_registry(RegistryChange::Added(peer("remote", "moqt://one:4443")));
+            let (snapshots, _) = watch::channel(snapshot.clone());
+            let (playback, _) = watch::channel(None);
+            let (audio_updates, _) = watch::channel(None);
+            let (media_events, _) = mpsc::channel(1);
+            let (view_events, _) = mpsc::channel(1);
+            let mut publication = PublicationOwner::default();
+            let mut view = ViewOwner::default();
+            let mut services = ServiceOwner::default();
+            let released = Arc::new(AtomicBool::new(false));
+            let guard = Released(released.clone());
+            let (cancel, mut cancelled) = watch::channel(false);
+            let task = tokio::spawn(async move {
+                let _guard = guard;
+                while !*cancelled.borrow_and_update() {
+                    if cancelled.changed().await.is_err() {
+                        break;
+                    }
+                }
+            });
+            if publishing {
+                snapshot.media.begin("local").unwrap();
+                publication.task = Some(task);
+            } else {
+                snapshot.view.begin("moqcast.screen/remote").unwrap();
+                view.cancel = Some(cancel);
+                view.task = Some(task);
+            }
+            let config = RuntimeConfig {
+                bind: "127.0.0.1:0".parse().unwrap(),
+                node: None,
+                secret_file: None,
+            };
+            handle_command(
+                RuntimeCommand::StopScan,
+                RuntimeContext {
+                    config: &config,
+                    snapshots: &snapshots,
+                    snapshot: &mut snapshot,
+                    services: &mut services,
+                    publication: &mut publication,
+                    media_events: &media_events,
+                    view: &mut view,
+                    view_events: &view_events,
+                    playback: &playback,
+                    audio_updates: &audio_updates,
+                },
+            )
+            .await;
+            assert!(released.load(Ordering::Acquire));
+            assert!(publication.task.is_none());
+            assert!(view.task.is_none());
+            assert_eq!(snapshot.discovery, DiscoveryState::Stopped);
+            assert!(snapshot.peers.is_empty());
+            assert!(snapshot.remote_screens.is_empty());
+        }
+    }
+
+    #[test]
+    fn shared_policy_watch_uses_route_and_owner_not_global_connection_count() {
+        let mut snapshot = RuntimeSnapshot::default();
+        snapshot.started_scan("[::]:4443".into(), "local".into());
+        let path = "moqcast.screen/peer";
+        snapshot.update_remote_screen(crate::remote::Update {
+            path: path.into(),
+            view: RemoteScreenView {
+                peer_id: "peer".into(),
+                availability: ScreenAvailability::Available,
+            },
+        });
+        assert_eq!(snapshot.inbound_sessions, 0);
+        assert!(snapshot.can_watch(path));
+        assert!(snapshot.access().publish());
+        assert!(snapshot.begin_stop_scan());
+        assert!(!snapshot.can_watch(path));
+        assert!(!snapshot.access().publish());
+        snapshot.stopped_scan();
+        snapshot.local_id = Some("stale-local".into());
+        snapshot.inbound_sessions = 5;
+        assert!(!snapshot.access().publish());
     }
 
     #[test]
@@ -1479,7 +1783,7 @@ mod tests {
     }
 
     #[test]
-    fn passive_peer_survives_lost_while_an_inbound_session_exists() {
+    fn nearby_contract_unattributed_inbound_does_not_retain_a_lost_peer() {
         let mut snapshot = RuntimeSnapshot::default();
         let mut passive = peer("peer", "moqt://one:4443");
         passive.should_dial = false;
@@ -1490,7 +1794,8 @@ mod tests {
             id: "peer".to_owned(),
         });
 
-        assert!(!snapshot.peers["peer"].present);
+        assert!(!snapshot.peers.contains_key("peer"));
+        assert_eq!(snapshot.inbound_sessions, 1);
         snapshot.set_inbound_session_count(0);
         assert!(!snapshot.peers.contains_key("peer"));
     }
@@ -1520,6 +1825,27 @@ mod tests {
             },
         }));
         assert!(!snapshot.peers.contains_key("peer"));
+    }
+
+    #[test]
+    fn nearby_contract_route_arriving_after_lost_restores_watch_without_claiming_identity() {
+        let mut snapshot = RuntimeSnapshot::default();
+        let mut passive = peer("peer", "moqt://one:4443");
+        passive.should_dial = false;
+        snapshot.apply_registry(RegistryChange::Added(passive));
+        snapshot.set_inbound_session_count(1);
+        snapshot.apply_registry(RegistryChange::Removed { id: "peer".into() });
+        snapshot.update_remote_screen(crate::remote::Update {
+            path: "moqcast.screen/peer".into(),
+            view: RemoteScreenView {
+                peer_id: "peer".into(),
+                availability: ScreenAvailability::Available,
+            },
+        });
+        let peer = &snapshot.peers["peer"];
+        assert!(!peer.present);
+        assert_eq!(peer.screen, ScreenAvailability::Available);
+        assert_eq!(peer.transport.phase, TransportPhaseView::Waiting);
     }
 
     #[test]
@@ -1590,6 +1916,196 @@ mod tests {
     fn lan_session_id_is_short_and_not_a_stable_device_label() {
         assert_eq!(short_lan_session_id("0123456789abcdef"), "01234567");
         assert_eq!(short_lan_session_id("tiny"), "tiny");
+    }
+
+    #[test]
+    fn stale_view_end_keeps_the_restarted_view_frame() {
+        let mut snapshot = RuntimeSnapshot::default();
+        let old = snapshot.view.begin("old").unwrap();
+        let stopping = snapshot.view.begin_stop().unwrap();
+        assert!(snapshot.view.stopped(stopping));
+        let current = snapshot.view.begin("current").unwrap();
+        let frame = Arc::new(PlaybackFrame {
+            identity: crate::playback::PlaybackFrameIdentity {
+                view_generation: current,
+                decoder_generation: 1,
+                sequence: 1,
+            },
+            timestamp_us: 0,
+            width: 1,
+            height: 1,
+            display_width: 1,
+            display_height: 1,
+            rgba: vec![0, 0, 0, 255],
+        });
+        let (frames, shown) = watch::channel(Some(frame.clone()));
+        let mut view = ViewOwner {
+            generation: current,
+            ..Default::default()
+        };
+        apply_view_event(
+            &mut snapshot,
+            &mut view,
+            &frames,
+            ViewEvent::Ended {
+                generation: old,
+                result: Err("old view ended".into()),
+            },
+        );
+        assert!(
+            shown
+                .borrow()
+                .as_ref()
+                .is_some_and(|shown| Arc::ptr_eq(shown, &frame)),
+            "old end event cleared the new view frame"
+        );
+        assert_eq!(snapshot.view.generation, current);
+        assert_eq!(snapshot.view.phase, ViewPhase::Preparing);
+        apply_view_event(
+            &mut snapshot,
+            &mut view,
+            &frames,
+            ViewEvent::Ended {
+                generation: current,
+                result: Ok(()),
+            },
+        );
+        assert!(shown.borrow().is_none());
+        assert_eq!(snapshot.view.phase, ViewPhase::Idle);
+    }
+
+    #[tokio::test]
+    async fn queued_stop_is_processed_before_starting_lan() {
+        use std::{future::Future, task::Poll};
+        let config = RuntimeConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            node: None,
+            secret_file: None,
+        };
+        let (commands, recv) = mpsc::channel(4);
+        let (snapshots, state) = watch::channel(RuntimeSnapshot::default());
+        let (playback, _) = watch::channel(None);
+        commands.try_send(RuntimeCommand::StopScan).unwrap();
+        let mut runtime = Box::pin(run(config, recv, snapshots, playback));
+        let first = std::future::poll_fn(|cx| Poll::Ready(runtime.as_mut().poll(cx))).await;
+        assert!(first.is_pending());
+        assert_eq!(state.borrow().discovery, DiscoveryState::Stopped);
+        commands.try_send(RuntimeCommand::Shutdown).unwrap();
+        runtime.await;
+    }
+
+    #[tokio::test]
+    async fn queued_shutdown_does_not_wait_for_lan_startup() {
+        use std::{future::Future, task::Poll};
+        let config = RuntimeConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            node: None,
+            secret_file: None,
+        };
+        let (commands, recv) = mpsc::channel(4);
+        let (snapshots, state) = watch::channel(RuntimeSnapshot::default());
+        let (playback, _) = watch::channel(None);
+        commands.try_send(RuntimeCommand::Shutdown).unwrap();
+        let mut runtime = Box::pin(run(config, recv, snapshots, playback));
+        let first = std::future::poll_fn(|cx| Poll::Ready(runtime.as_mut().poll(cx))).await;
+        assert!(
+            first.is_ready(),
+            "shutdown must not await an mDNS announcement"
+        );
+        assert_eq!(state.borrow().discovery, DiscoveryState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn stopping_pending_setup_waits_for_its_owner_and_preserves_failure() {
+        use std::task::Poll;
+        let (ready, result) = tokio::sync::oneshot::channel();
+        let completed = Arc::new(AtomicBool::new(false));
+        let done = completed.clone();
+        let mut owner = ServiceOwner::default();
+        owner.lifecycle.begin_start().unwrap();
+        owner.starting = Some(StartingServices {
+            future: Box::pin(async move {
+                result.await.unwrap();
+                done.store(true, Ordering::SeqCst);
+                Err("setup failed")
+            }),
+            polled: false,
+        });
+        let mut snapshot = RuntimeSnapshot::default();
+        {
+            let mut started = Box::pin(owner.started());
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(started.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+        }
+        snapshot.begin_stop_scan();
+        {
+            let mut stopped = Box::pin(owner.stop(&mut snapshot));
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(stopped.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            assert!(!completed.load(Ordering::SeqCst));
+            ready.send(()).unwrap();
+            stopped.await;
+        }
+        assert!(completed.load(Ordering::SeqCst));
+        assert!(owner.starting.is_none());
+        assert!(owner.services.is_none());
+        assert_eq!(snapshot.discovery, DiscoveryState::Failed);
+        assert_eq!(
+            snapshot.last_error,
+            Some("LAN cleanup failed. Check the logs.")
+        );
+        let config = RuntimeConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            node: None,
+            secret_file: None,
+        };
+        let (snapshots, _) = watch::channel(snapshot.clone());
+        owner.start(&config, &mut snapshot, &snapshots);
+        assert_eq!(snapshot.discovery, DiscoveryState::Starting);
+        assert_eq!(snapshot.last_error, None);
+        let generation = owner.lifecycle.generation;
+        owner.start(&config, &mut snapshot, &snapshots);
+        assert_eq!(owner.lifecycle.generation, generation);
+        owner.stop(&mut snapshot).await;
+        assert_eq!(snapshot.discovery, DiscoveryState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn stopping_unpolled_setup_does_not_allocate_lan_resources() {
+        let mut owner = ServiceOwner::default();
+        let generation = owner.lifecycle.begin_start().unwrap();
+        owner.starting = Some(StartingServices {
+            future: Box::pin(async { panic!("unpolled LAN setup must not run during stop") }),
+            polled: false,
+        });
+        let mut snapshot = RuntimeSnapshot::default();
+        owner.stop(&mut snapshot).await;
+        assert!(!owner.lifecycle.accepts(generation));
+        assert_eq!(snapshot.discovery, DiscoveryState::Stopped);
+        assert!(owner.starting.is_none());
+        owner.stop(&mut snapshot).await;
+        assert_eq!(snapshot.discovery, DiscoveryState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn stale_setup_failure_does_not_fail_a_new_generation() {
+        let mut owner = ServiceOwner::default();
+        let old = owner.lifecycle.begin_start().unwrap();
+        owner.lifecycle.stop();
+        let current = owner.lifecycle.begin_start().unwrap();
+        let mut snapshot = RuntimeSnapshot::default();
+        owner
+            .finish_start(old, Err("old setup failed"), &mut snapshot)
+            .await;
+        assert!(owner.lifecycle.accepts(current));
+        assert_eq!(snapshot.discovery, DiscoveryState::Starting);
+        assert_eq!(snapshot.last_error, None);
     }
 
     #[test]
@@ -1717,6 +2233,33 @@ mod tests {
             snapshot.peers["peer"].transport.phase,
             TransportPhaseView::Connecting
         );
+    }
+
+    #[tokio::test]
+    async fn service_shutdown_preserves_media_cleanup_failure() {
+        let mut snapshot = RuntimeSnapshot {
+            last_error: Some("Media shutdown failed. Check the logs."),
+            ..Default::default()
+        };
+        ServiceOwner::default().stop(&mut snapshot).await;
+        assert_eq!(
+            snapshot.last_error,
+            Some("Media shutdown failed. Check the logs.")
+        );
+        assert_eq!(snapshot.discovery, DiscoveryState::Failed);
+    }
+
+    #[test]
+    fn shutdown_projection_preserves_cleanup_failure() {
+        let mut snapshot = RuntimeSnapshot::default();
+        snapshot.failed_scan("LAN cleanup failed. Check the logs.");
+        snapshot.shutdown();
+        assert!(snapshot.stopping);
+        assert_eq!(
+            snapshot.last_error,
+            Some("LAN cleanup failed. Check the logs.")
+        );
+        assert_eq!(snapshot.discovery, DiscoveryState::Failed);
     }
 
     #[test]
@@ -1880,7 +2423,7 @@ mod tests {
             volume: None,
         };
 
-        owner.stop().await;
+        owner.stop().await.unwrap();
 
         assert!(stopped.load(Ordering::SeqCst));
         assert!(owner.task.is_none());

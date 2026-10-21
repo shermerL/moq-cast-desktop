@@ -38,19 +38,15 @@ pub(in crate::app) fn show(
                 MediaState::PreparingPublish => {
                     (locale.preparing_share(), false, ActionTone::Neutral)
                 }
-                MediaState::Idle
-                    if !snapshot.discovery.is_active() && !snapshot.has_mesh_session() =>
-                {
-                    (
-                        locale.text("开启附近设备", "Turn on Nearby"),
-                        true,
-                        ActionTone::Accent,
-                    )
-                }
+                MediaState::Idle if !snapshot.discovery.is_active() && !snapshot.lan_stopping => (
+                    locale.text("开启附近设备", "Turn on Nearby"),
+                    true,
+                    ActionTone::Accent,
+                ),
                 _ => (
                     locale.text("开始共享", "Start sharing"),
                     editable
-                        && snapshot.has_mesh_session()
+                        && snapshot.access().publish()
                         && snapshot.sources.selected(selected.as_ref()).is_some(),
                     ActionTone::Accent,
                 ),
@@ -67,7 +63,7 @@ pub(in crate::app) fn show(
                 command = Some(match snapshot.media {
                     MediaState::Publishing => UserCommand::StopScreenShare,
                     MediaState::Idle
-                        if !snapshot.discovery.is_active() && !snapshot.has_mesh_session() =>
+                        if !snapshot.discovery.is_active() && !snapshot.lan_stopping =>
                     {
                         UserCommand::StartDiscovery
                     }
@@ -126,7 +122,7 @@ pub(in crate::app) fn show(
                     .auto_shrink([false,true]).show(ui, |ui| {
                 v2::settings_row(ui,locale.system_audio(),|ui| {ui.add_enabled(editable,egui::Checkbox::new(audio,"")).on_hover_text(locale.system_audio_hint());});
                 ui.label(egui::RichText::new(locale.text("系统声音包含设备输出，不限于所选窗口。","System sound includes device output, not only the selected window.")).small().color(p.muted));
-                if editable&&!snapshot.has_mesh_session(){v2::notice(ui,StatusTone::Neutral,locale.connect_first());}
+                if editable&&!snapshot.access().ready{v2::notice(ui,StatusTone::Neutral,locale.enable_nearby_before_sharing());}
                 if matches!(snapshot.media,MediaState::PreparingView{..}|MediaState::Viewing{..}|MediaState::StoppingView{..}) {v2::notice(ui,StatusTone::Neutral,locale.text("停止观看后可开始共享。","Stop watching before sharing."));}
                 if snapshot.last_error.is_some(){v2::notice(ui,StatusTone::Error,locale.operation_failed());}
                 });
@@ -208,7 +204,7 @@ mod layout_checks {
                 });
             },
         );
-        let label = if snapshot.has_mesh_session() {
+        let label = if snapshot.access().ready {
             "Start sharing"
         } else {
             "Turn on Nearby"
@@ -275,7 +271,8 @@ mod layout_checks {
             sources: SourceCatalog::Ready(choices),
             ..Default::default()
         };
-        s.inbound_session_count = 1;
+        s.local_peer_id = Some("local".into());
+        s.discovery = crate::app::DiscoveryState::Ready;
         let (_, rect) = render(&ctx, &s, &mut selected, vec![]);
         let rect = rect.unwrap();
         assert!(rect.is_positive() && rect.bottom() <= 420.0);
@@ -298,7 +295,8 @@ mod layout_checks {
         let mut selected = Some(sources[0].clone());
         let s = AppSnapshot {
             sources: SourceCatalog::Ready(sources),
-            inbound_session_count: 1,
+            local_peer_id: Some("local".into()),
+            discovery: crate::app::DiscoveryState::Ready,
             ..Default::default()
         };
         let mut frame = |events| {

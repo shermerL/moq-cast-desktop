@@ -63,13 +63,15 @@ impl MoqCastApp {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             let active = snapshot.discovery.is_active();
                             if (Action {
-                                label: if active {
+                                label: if snapshot.lan_stopping {
+                                    self.text("正在关闭", "Turning off")
+                                } else if active {
                                     self.text("关闭附近设备", "Turn off Nearby")
                                 } else {
                                     self.text("开启附近设备", "Turn on Nearby")
                                 },
                                 size: vec2(148.0, 40.0),
-                                enabled: true,
+                                enabled: !snapshot.lan_stopping,
                                 tone: if active {
                                     ActionTone::Danger
                                 } else {
@@ -94,8 +96,7 @@ impl MoqCastApp {
                                 }
                             }
                             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                let (tone, status) =
-                                    discovery_status(&snapshot.discovery, self.locale);
+                                let (tone, status) = discovery_status(snapshot, self.locale);
                                 tone.indicator(ui);
                                 ui.add(
                                     egui::Label::new(
@@ -253,8 +254,8 @@ impl MoqCastApp {
                     )
                     .clicked();
                     ui.label(self.text(
-                        "当前媒体连接可能受到影响。",
-                        "Current media connections may be affected.",
+                        "关闭会停止当前观看或共享，并断开附近连接。",
+                        "Turning off Nearby stops the current watch or share and closes nearby connections.",
                     ));
                     let confirm = (Action {
                         label: self.text("关闭附近设备", "Turn off Nearby"),
@@ -326,8 +327,14 @@ impl MoqCastApp {
         }
     }
 }
-fn discovery_status(state: &DiscoveryState, locale: Locale) -> (StatusTone, &'static str) {
-    match state {
+fn discovery_status(snapshot: &AppSnapshot, locale: Locale) -> (StatusTone, &'static str) {
+    if snapshot.lan_stopping {
+        return (
+            StatusTone::Busy,
+            locale.text("正在关闭附近设备", "Turning off Nearby"),
+        );
+    }
+    match snapshot.discovery {
         DiscoveryState::Idle => (
             StatusTone::Neutral,
             locale.text("附近设备已关闭", "Nearby is off"),

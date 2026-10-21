@@ -132,3 +132,38 @@ fn back_to_nearby_keeps_media_running() {
     assert_eq!(app.page, Page::Nearby);
     assert!(commands.try_recv().is_err());
 }
+
+#[test]
+fn shutdown_snapshot_disables_nearby_toggle_and_reports_progress() {
+    let (mut app, mut commands) = fixture();
+    let ctx = egui::Context::default();
+    theme::configure(&ctx);
+    let size = egui::vec2(1040.0, 640.0);
+    let s = AppSnapshot {
+        discovery: DiscoveryState::Ready,
+        local_peer_id: Some("local".into()),
+        lan_stopping: true,
+        ..Default::default()
+    };
+    let out = render(&ctx, &mut app, &s, size, vec![]);
+    assert!(painted(&out, "Turning off Nearby").is_positive());
+    let pos = painted(&out, "Turning off").center();
+    for pressed in [true, false] {
+        render(
+            &ctx,
+            &mut app,
+            &s,
+            size,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+    }
+    assert!(commands.try_recv().is_err());
+}

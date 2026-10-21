@@ -7,7 +7,7 @@ use std::time::Duration;
 use moq_tokio::moq_net;
 use moqcast_ui::DEFAULT_PLAYER_VOLUME_PERCENT;
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::app::MediaState;
 use crate::app::{
@@ -213,6 +213,8 @@ struct DiscoveryResources {
     retry_budget: DiscoveryRetryBudget,
     generation: u64,
     peers: Option<PeerRegistry>,
+    retired: Vec<JoinHandle<()>>,
+    retiring_services: JoinSet<Result<(), String>>,
 }
 
 impl DiscoveryResources {
@@ -223,13 +225,13 @@ impl DiscoveryResources {
 
     fn cancel_current(&mut self) -> u64 {
         self.advance();
-        if let Some(task) = self.start.take() {
+        for task in [self.start.take(), self.retry.take()].into_iter().flatten() {
             task.abort();
+            self.retired.push(task);
         }
-        if let Some(task) = self.retry.take() {
-            task.abort();
+        if let Some(services) = self.services.take() {
+            self.retiring_services.spawn(services.shutdown());
         }
-        self.services = None;
         self.peers = None;
         self.generation
     }
@@ -242,7 +244,9 @@ impl DiscoveryResources {
 
 #[derive(Default)]
 struct PeerResources {
+    retired: Vec<JoinHandle<()>>,
     session: Option<PeerSession>,
+    connecting: Option<moq_tokio::Connection>,
     pending: Option<JoinHandle<()>>,
     retry_budget: PeerRetryBudget,
     generation: u64,
@@ -258,9 +262,19 @@ impl PeerResources {
         self.advance();
         if let Some(task) = self.pending.take() {
             task.abort();
+            self.retired.push(task);
+        }
+        if let Some(connection) = self.connecting.take() {
+            connection.abort(moq_net::Error::Cancel);
+            self.retired.push(tokio::spawn(async move {
+                let _ = connection.closed().await;
+            }));
         }
         if let Some(session) = self.session.take() {
             session.close();
+            self.retired.push(tokio::spawn(async move {
+                let _ = session.closed_error().await;
+            }));
         }
     }
 
@@ -272,6 +286,7 @@ impl PeerResources {
 
 #[derive(Default)]
 struct MeshResources {
+    retired: Vec<JoinHandle<()>>,
     outbound: HashMap<String, PeerResources>,
     inbound: HashMap<u64, PeerResources>,
     next_inbound_id: u64,
@@ -285,10 +300,14 @@ impl MeshResources {
         }
     }
 
-    fn remove(&mut self, key: &SessionKey) -> Option<PeerResources> {
-        match key {
+    fn remove(&mut self, key: &SessionKey) {
+        let resources = match key {
             SessionKey::Outbound(peer_id) => self.outbound.remove(peer_id),
             SessionKey::Inbound(id) => self.inbound.remove(id),
+        };
+        if let Some(mut resources) = resources {
+            resources.close();
+            self.retired.append(&mut resources.retired);
         }
     }
 
@@ -308,6 +327,7 @@ impl MeshResources {
         let count = self.connected_inbound_count();
         for resources in self.inbound.values_mut() {
             resources.close();
+            self.retired.append(&mut resources.retired);
         }
         self.inbound.clear();
         count
@@ -316,6 +336,7 @@ impl MeshResources {
     fn close_all(&mut self) {
         for peer in self.outbound.values_mut().chain(self.inbound.values_mut()) {
             peer.close();
+            self.retired.append(&mut peer.retired);
         }
         self.outbound.clear();
         self.inbound.clear();
@@ -378,15 +399,17 @@ impl ViewResources {
         true
     }
 
-    async fn stop(&mut self) {
+    async fn stop(&mut self) -> Result<(), String> {
         self.advance();
         self.volume = None;
         if let Some(cancel) = self.cancel.take() {
             cancel.send_replace(true);
         }
         if let Some(task) = self.task.take() {
-            let _ = task.await;
+            task.await
+                .map_err(|error| format!("playback shutdown task failed: {error}"))?;
         }
+        Ok(())
     }
 }
 
@@ -410,16 +433,59 @@ impl PublishResources {
     }
 }
 
+struct Origins {
+    publish: moq_net::origin::Producer,
+    receive: moq_net::origin::Producer,
+    drivers: JoinSet<()>,
+    announcements: Option<JoinHandle<()>>,
+}
+
+impl Origins {
+    fn new(events: mpsc::Sender<OperationEvent>) -> Self {
+        let mut drivers = JoinSet::new();
+        let (publish, publish_driver) = moq_net::origin::Producer::new(Default::default());
+        let (receive, receive_driver) = moq_net::origin::Producer::new(Default::default());
+        drivers.spawn(async move {
+            let _ = moq_net::time::run(publish_driver).await;
+        });
+        drivers.spawn(async move {
+            let _ = moq_net::time::run(receive_driver).await;
+        });
+        let announcements = watch_announcements(receive.clone(), events);
+        Self {
+            publish,
+            receive,
+            drivers,
+            announcements: Some(announcements),
+        }
+    }
+
+    async fn shutdown(self) -> Result<(), String> {
+        let mut errors = crate::cleanup::Errors::default();
+        if let Some(task) = self.announcements {
+            task.abort();
+            errors.join("announcement watcher", task.await, true);
+        }
+        drop(self.publish);
+        drop(self.receive);
+        let mut drivers = self.drivers;
+        while let Some(result) = drivers.join_next().await {
+            errors.join("origin driver", result, false);
+        }
+        errors.finish()
+    }
+}
+
 struct Supervisor {
+    cleanup: crate::cleanup::Errors,
     state: AppSnapshot,
-    publish_origin: moq_net::origin::Producer,
-    receive_origin: moq_net::origin::Producer,
+    origins: Option<Origins>,
+    session_watchers: JoinSet<()>,
     discovery: DiscoveryResources,
     mesh: MeshResources,
     remote_screens: HashMap<String, moq_net::broadcast::Consumer>,
     publish: PublishResources,
     view: ViewResources,
-    announcements: JoinHandle<()>,
     source_refresh: Option<JoinHandle<()>>,
     playback_tx: watch::Sender<Option<Arc<PlaybackFrame>>>,
     service_tx: mpsc::Sender<service::Event>,
@@ -432,19 +498,16 @@ impl Supervisor {
     fn new(playback_tx: watch::Sender<Option<Arc<PlaybackFrame>>>) -> Self {
         let (service_tx, service_rx) = mpsc::channel(EVENT_CAPACITY);
         let (operation_tx, operation_rx) = mpsc::channel(EVENT_CAPACITY);
-        let publish_origin = moq_tokio::origin::spawn();
-        let receive_origin = moq_tokio::origin::spawn();
-        let announcements = watch_announcements(receive_origin.clone(), operation_tx.clone());
         Self {
+            cleanup: Default::default(),
             state: AppSnapshot::default(),
-            publish_origin,
-            receive_origin,
+            origins: None,
+            session_watchers: JoinSet::new(),
             discovery: DiscoveryResources::default(),
             mesh: MeshResources::default(),
             remote_screens: HashMap::new(),
             publish: PublishResources::default(),
             view: ViewResources::default(),
-            announcements,
             source_refresh: None,
             playback_tx,
             service_tx,
@@ -466,13 +529,38 @@ impl Supervisor {
                 event = self.operation_rx.recv() => Input::Operation(event),
             };
             let action = match input {
-                Input::Command(Some(command)) => self.handle_command(command).await,
+                Input::Command(Some(command)) => {
+                    if matches!(command, UserCommand::StopDiscovery) {
+                        self.state.lan_stopping = true;
+                        snapshots.send_replace(Arc::new(self.state.clone()));
+                    }
+                    self.handle_command(command).await
+                }
                 Input::Service(Some(event)) => self.handle_service_event(event).await,
                 Input::Operation(Some(event)) => self.handle_operation_event(event).await,
                 Input::Command(None) | Input::Service(None) | Input::Operation(None) => {
                     LoopAction::Shutdown
                 }
             };
+            while let Some(result) = self.session_watchers.try_join_next() {
+                self.cleanup.join("session observer", result, false);
+            }
+            reap_retired(&mut self.discovery.retired, &mut self.cleanup).await;
+            while let Some(result) = self.discovery.retiring_services.try_join_next() {
+                match result {
+                    Ok(result) => self.cleanup.result("retired services", result),
+                    Err(error) => self.cleanup.join("retired services", Err(error), false),
+                }
+            }
+            reap_retired(&mut self.mesh.retired, &mut self.cleanup).await;
+            for peer in self
+                .mesh
+                .outbound
+                .values_mut()
+                .chain(self.mesh.inbound.values_mut())
+            {
+                reap_retired(&mut peer.retired, &mut self.cleanup).await;
+            }
             match action {
                 LoopAction::Changed => {
                     snapshots.send_replace(Arc::new(self.state.clone()));
@@ -486,22 +574,7 @@ impl Supervisor {
             task.abort();
             let _ = task.await;
         }
-        self.view.stop().await;
-        if let Err(error) = self.publish.stop().await {
-            tracing::warn!(
-                stage = "publish",
-                error,
-                "screen sharing ended with an error"
-            );
-        }
-        self.mesh.close_all();
-        self.discovery.stop();
-        self.announcements.abort();
-        let _ = self.announcements.await;
-        self.remote_screens.clear();
-        self.playback_tx.send_replace(None);
-        drop(self.publish_origin);
-        drop(self.receive_origin);
+        self.stop_lan().await;
         tracing::info!(stage = "runtime", "desktop runtime stopped");
     }
 
@@ -509,9 +582,7 @@ impl Supervisor {
         match command {
             UserCommand::StartDiscovery => self.start_discovery(),
             UserCommand::StopDiscovery => {
-                self.close_inbound("LAN services stopped by user");
-                self.discovery.stop();
-                self.state.stop_discovery();
+                self.stop_lan().await;
                 LoopAction::Changed
             }
             UserCommand::RetryDiscovery => self.restart_discovery(),
@@ -546,6 +617,161 @@ impl Supervisor {
         }
     }
 
+    async fn stop_lan(&mut self) {
+        // The command loop cannot admit new work until this shutdown completes.
+        // Invalidate discovery before joining tasks so queued results stay stale.
+        let generation = self.discovery.advance();
+        self.state.lan_stopping = true;
+        self.state.local_peer_id = None;
+        tracing::info!(
+            stage = "lan_shutdown",
+            generation,
+            outbound = self.mesh.outbound.len(),
+            inbound = self.mesh.inbound.len(),
+            publishing = self.publish.task.is_some(),
+            viewing = self.view.task.is_some(),
+            "stopping LAN resources"
+        );
+        for task in [self.discovery.start.take(), self.discovery.retry.take()]
+            .into_iter()
+            .flatten()
+        {
+            task.abort();
+            self.cleanup.join("cancelled LAN task", task.await, true);
+        }
+        if let Some(services) = self.discovery.services.take() {
+            self.cleanup
+                .result("discovery services", services.shutdown().await);
+        }
+        for task in self.discovery.retired.drain(..) {
+            self.cleanup.join("cancelled LAN task", task.await, true);
+        }
+        while let Some(result) = self.discovery.retiring_services.join_next().await {
+            match result {
+                Ok(result) => self.cleanup.result("retired services", result),
+                Err(error) => self.cleanup.join("retired services", Err(error), false),
+            }
+        }
+        self.discovery.peers = None;
+        self.discovery.retry_budget.reset();
+        tracing::debug!(
+            stage = "lan_shutdown",
+            generation,
+            step = "view",
+            "discovery tasks stopped; stopping viewer"
+        );
+        let view_result = self.view.stop().await;
+        tracing::debug!(
+            stage = "lan_shutdown",
+            generation,
+            step = "publish",
+            "viewer stopped; stopping publisher"
+        );
+        let publish_result = self.publish.stop().await;
+        tracing::debug!(
+            stage = "lan_shutdown",
+            generation,
+            step = "sessions",
+            "closing connection owners"
+        );
+        let mut pending = Vec::new();
+        for resources in self
+            .mesh
+            .outbound
+            .values_mut()
+            .chain(self.mesh.inbound.values_mut())
+        {
+            if let Some(task) = resources.pending.take() {
+                task.abort();
+                pending.push(task);
+            }
+            resources.close();
+        }
+        for task in pending {
+            self.cleanup.join("cancelled LAN task", task.await, true);
+        }
+        self.mesh.close_all();
+        for task in self.mesh.retired.drain(..) {
+            self.cleanup.join("cancelled LAN task", task.await, true);
+        }
+        self.session_watchers.abort_all();
+        while let Some(result) = self.session_watchers.join_next().await {
+            self.cleanup.join("session observer", result, true);
+        }
+
+        // Stop all event producers before draining results which may own connections.
+        if let Some(task) = self
+            .origins
+            .as_mut()
+            .and_then(|origins| origins.announcements.take())
+        {
+            task.abort();
+            self.cleanup.join("cancelled LAN task", task.await, true);
+        }
+        while let Ok(event) = self.operation_rx.try_recv() {
+            match event {
+                OperationEvent::ServicesStarted {
+                    result: Ok(services),
+                    ..
+                } => self
+                    .cleanup
+                    .result("late services", services.shutdown().await),
+                OperationEvent::SessionReady {
+                    result: Ok(session),
+                    ..
+                } => {
+                    session.close();
+                    let _ = session.closed_error().await;
+                }
+                OperationEvent::CaptureSourcesLoaded(result) => {
+                    self.source_refresh = None;
+                    self.state.sources = result.unwrap_or_else(SourceCatalog::Failed);
+                }
+                _ => {}
+            }
+        }
+        while let Ok(event) = self.service_rx.try_recv() {
+            if let service::EventKind::Inbound(request) = event.kind {
+                let _ = request.reject(moq_tokio::server::Reject::App(503)).await;
+            }
+        }
+        self.remote_screens.clear();
+        tracing::debug!(
+            stage = "lan_shutdown",
+            generation,
+            step = "origins",
+            "event producers joined; stopping route drivers"
+        );
+        if let Some(origins) = self.origins.take() {
+            self.cleanup.result("origins", origins.shutdown().await);
+        }
+        self.playback_tx.send_replace(None);
+        self.state.stop_discovery();
+        self.state.lan_stopping = false;
+        self.state.peers.clear();
+        self.state.remote_screens.clear();
+        self.state.inbound_session_count = 0;
+        self.state.local_peer_id = None;
+        self.state.media = MediaState::Idle;
+        self.state.remote_audio = RemoteAudioSnapshot::default();
+        self.state.remote_video = RemoteVideoSnapshot::default();
+        self.cleanup.result("viewer", view_result);
+        self.cleanup.result("publisher", publish_result);
+        if let Err(error) = std::mem::take(&mut self.cleanup).finish() {
+            self.state.discovery = crate::app::DiscoveryState::Error;
+            tracing::warn!(stage = "lan_shutdown", generation, %error, "LAN cleanup reported a failure");
+            self.state.last_error = Some(format!("LAN shutdown reported an error: {error}"));
+        } else {
+            self.state.last_error = None;
+            tracing::info!(
+                stage = "lan_shutdown",
+                generation,
+                mdns_completion = "drop_requested",
+                "application LAN owners stopped; mDNS daemon completion is not observable"
+            );
+        }
+    }
+
     fn start_discovery(&mut self) -> LoopAction {
         if self.state.discovery.is_active() {
             self.state.last_error = Some("LAN discovery is already active.".into());
@@ -570,6 +796,9 @@ impl Supervisor {
     }
 
     fn launch_services(&mut self) {
+        self.state.local_peer_id = None;
+        self.origins
+            .get_or_insert_with(|| Origins::new(self.operation_tx.clone()));
         let generation = self.discovery.generation;
         let operation_events = self.operation_tx.clone();
         self.discovery.start = Some(tokio::spawn(async move {
@@ -613,11 +842,17 @@ impl Supervisor {
         self.state
             .set_transport(peer_id, TransportState::Connecting);
         let key = SessionKey::Outbound(peer_id.to_owned());
-        let publish_origin = self.publish_origin.clone();
-        let receive_origin = self.receive_origin.clone();
+        let origins = self
+            .origins
+            .as_ref()
+            .expect("LAN origins exist while connecting");
+        let publish_origin = origins.publish.clone();
+        let receive_origin = origins.receive.clone();
         let events = self.operation_tx.clone();
+        let dial = peer::dial(&record, &publish_origin, receive_origin);
+        peer_resources.connecting = dial.as_ref().ok().cloned();
         peer_resources.pending = Some(tokio::spawn(async move {
-            let result = match peer::dial(&record, &publish_origin, receive_origin) {
+            let result = match dial {
                 Ok(connection) => connection
                     .established()
                     .await
@@ -663,7 +898,11 @@ impl Supervisor {
         };
 
         let publication = match Publication::prepare(
-            &self.publish_origin,
+            &self
+                .origins
+                .as_ref()
+                .expect("LAN origins exist while publishing")
+                .publish,
             &local_peer_id,
             PublishOptions {
                 system_audio,
@@ -756,16 +995,25 @@ impl Supervisor {
             self.state.last_error = Some(error.to_string());
             return LoopAction::Changed;
         }
-        self.view.stop().await;
+        let result = self.view.stop().await;
         self.playback_tx.send_replace(None);
         self.state
             .finish_stop_view()
             .expect("remote playback was stopping");
+        if let Err(error) = result {
+            self.state.last_error = Some(error);
+        }
         LoopAction::Changed
     }
 
     async fn handle_service_event(&mut self, event: service::Event) -> LoopAction {
         if event.generation != self.discovery.generation {
+            tracing::debug!(
+                stage = "discovery",
+                generation = event.generation,
+                current_generation = self.discovery.generation,
+                "ignored stale LAN event"
+            );
             return LoopAction::Unchanged;
         }
         match event.kind {
@@ -857,8 +1105,12 @@ impl Supervisor {
         };
         let resources = self.mesh.inbound.entry(id).or_default();
         let generation = resources.advance();
-        let publish_origin = self.publish_origin.clone();
-        let receive_origin = self.receive_origin.clone();
+        let origins = self
+            .origins
+            .as_ref()
+            .expect("LAN origins exist while connecting");
+        let publish_origin = origins.publish.clone();
+        let receive_origin = origins.receive.clone();
         let events = self.operation_tx.clone();
         resources.pending = Some(tokio::spawn(async move {
             let result = server::accept(request, &credential, &publish_origin, receive_origin)
@@ -888,9 +1140,15 @@ impl Supervisor {
             }
             OperationEvent::ServicesStarted { generation, result } => {
                 if generation != self.discovery.generation || !self.state.discovery.is_active() {
+                    if let Ok(services) = result {
+                        self.cleanup
+                            .result("stale services", services.shutdown().await);
+                    }
                     return LoopAction::Unchanged;
                 }
-                self.discovery.start = None;
+                if let Some(task) = self.discovery.start.take() {
+                    self.discovery.retired.push(task);
+                }
                 match result {
                     Ok(mut services) => {
                         let recovered = self.discovery.retry_budget.attempts > 0;
@@ -1053,19 +1311,32 @@ impl Supervisor {
         else {
             if let Ok(session) = result {
                 session.close();
+                self.mesh.retired.push(tokio::spawn(async move {
+                    let _ = session.closed_error().await;
+                }));
             }
             return LoopAction::Unchanged;
         };
-        resources.pending = None;
+        if let Some(task) = resources.pending.take() {
+            resources.retired.push(task);
+        }
+        if let Some(connection) = resources.connecting.take()
+            && result.is_err()
+        {
+            connection.abort(moq_net::Error::Cancel);
+            resources.retired.push(tokio::spawn(async move {
+                let _ = connection.closed().await;
+            }));
+        }
 
         match result {
             Ok(session) => {
-                watch_session(
+                self.session_watchers.spawn(watch_session(
                     key.clone(),
                     generation,
                     session.clone(),
                     self.operation_tx.clone(),
-                );
+                ));
                 resources.session = Some(session);
                 match key {
                     SessionKey::Outbound(peer_id) => {
@@ -1160,7 +1431,10 @@ impl Supervisor {
             .and_then(|peers| peers.get(peer_id))
             .is_none()
         {
-            self.mesh.outbound.remove(peer_id);
+            // Keep the generation tombstone until Off; rediscovery may reuse this ID.
+            if let Some(resources) = self.mesh.outbound.get_mut(peer_id) {
+                resources.close();
+            }
             return;
         }
 
@@ -1201,6 +1475,8 @@ impl Supervisor {
         let error = error.into();
         self.close_inbound("LAN listener is restarting");
         let generation = self.discovery.cancel_current();
+        // Only a current ServicesStarted result may admit new media again.
+        self.state.local_peer_id = None;
         self.state.stop_discovery();
         self.state.start_discovery();
 
@@ -1248,7 +1524,9 @@ impl Supervisor {
     }
 
     fn accept_inbound_role(&mut self, peer_id: &str) {
-        if let Some(mut resources) = self.mesh.outbound.remove(peer_id) {
+        // Keep the attempt generation across role changes so old completions
+        // cannot match a later outbound attempt for the same advertised ID.
+        if let Some(resources) = self.mesh.outbound.get_mut(peer_id) {
             resources.close();
             self.state.set_transport(peer_id, TransportState::Waiting);
             tracing::info!(
@@ -1294,22 +1572,20 @@ pub(super) async fn run(
     Supervisor::new(playback).run(commands, snapshots).await;
 }
 
-fn watch_session(
+async fn watch_session(
     key: SessionKey,
     generation: u64,
     session: PeerSession,
     events: mpsc::Sender<OperationEvent>,
 ) {
-    tokio::spawn(async move {
-        let error = session.closed_error().await;
-        let _ = events
-            .send(OperationEvent::SessionClosed {
-                key,
-                generation,
-                error,
-            })
-            .await;
-    });
+    let error = session.closed_error().await;
+    let _ = events
+        .send(OperationEvent::SessionClosed {
+            key,
+            generation,
+            error,
+        })
+        .await;
 }
 
 fn watch_announcements(
@@ -1486,8 +1762,20 @@ async fn run_view(
         .await;
 }
 
+async fn reap_retired(tasks: &mut Vec<JoinHandle<()>>, errors: &mut crate::cleanup::Errors) {
+    let mut index = 0;
+    while index < tasks.len() {
+        if tasks[index].is_finished() {
+            errors.join("retired LAN task", tasks.swap_remove(index).await, true);
+        } else {
+            index += 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{PeerResources, PeerSession};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1510,7 +1798,9 @@ mod tests {
 
     fn supervisor() -> Supervisor {
         let (frames, _) = watch::channel(None);
-        Supervisor::new(frames)
+        let mut supervisor = Supervisor::new(frames);
+        supervisor.origins = Some(super::Origins::new(supervisor.operation_tx.clone()));
+        supervisor
     }
 
     fn peer(id: &str) -> DiscoveredPeer {
@@ -1529,6 +1819,450 @@ mod tests {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 4443),
             "proof",
         )
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_connection_still_being_established() {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let (mut supervisor, mut advert) = discovered_outbound();
+        advert.fingerprint = Some("00".repeat(32));
+        advert.addrs = vec!["127.0.0.1:9".parse().unwrap()];
+        advert.urls = vec!["moqt://127.0.0.1:9".parse().unwrap()];
+        supervisor
+            .discovery
+            .peers
+            .as_mut()
+            .unwrap()
+            .found(advert.clone());
+        supervisor.ensure_outbound(&advert.id, true);
+        let connection = supervisor.mesh.outbound[&advert.id]
+            .connecting
+            .as_ref()
+            .unwrap()
+            .clone();
+        supervisor.stop_lan().await;
+        let mut closed = std::pin::pin!(connection.closed());
+        assert!(matches!(
+            closed
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn completed_retired_failure_survives_reaping_until_off() {
+        let mut supervisor = supervisor();
+        let task = tokio::spawn(async {
+            panic!("reaped task panic");
+        });
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        supervisor.mesh.retired.push(task);
+        super::reap_retired(&mut supervisor.mesh.retired, &mut supervisor.cleanup).await;
+        assert!(supervisor.mesh.retired.is_empty());
+        supervisor.stop_lan().await;
+        assert!(
+            supervisor
+                .state
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("reaped task panic")
+        );
+        // Consumed failures must not poison the next independent lifecycle.
+        supervisor.stop_lan().await;
+        assert!(supervisor.state.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_reports_origin_failure_after_joining_other_drivers() {
+        let mut supervisor = supervisor();
+        let completed = Arc::new(AtomicBool::new(false));
+        let done = completed.clone();
+        let origins = supervisor.origins.as_mut().unwrap();
+        origins.drivers.spawn(async {
+            panic!("origin cleanup panic");
+        });
+        origins.drivers.spawn(async move {
+            done.store(true, Ordering::SeqCst);
+        });
+        supervisor.stop_lan().await;
+        assert!(completed.load(Ordering::SeqCst));
+        assert!(
+            supervisor
+                .state
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("origin cleanup panic")
+        );
+    }
+
+    #[tokio::test]
+    async fn removed_inbound_preserves_retired_cleanup_errors() {
+        let (frames, _) = watch::channel(None);
+        let mut supervisor = Supervisor::new(frames);
+        let task = tokio::spawn(async {
+            panic!("retired inbound panic");
+        });
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let mut peer = PeerResources::default();
+        peer.retired.push(task);
+        supervisor.mesh.inbound.insert(7, peer);
+        supervisor.mesh.remove(&SessionKey::Inbound(7));
+        supervisor.stop_lan().await;
+        assert_eq!(
+            supervisor.state.discovery,
+            crate::app::DiscoveryState::Error
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_active_and_late_connection_loops() {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        for late in [false, true] {
+            let (frames, _) = watch::channel(None);
+            let mut supervisor = Supervisor::new(frames);
+            let client = moq_tokio::connect::Config::default()
+                .init(Default::default())
+                .unwrap();
+            let connection = client.connect("moqt://127.0.0.1:9".parse::<url::Url>().unwrap());
+            let observed = connection.clone();
+            if late {
+                supervisor
+                    .operation_tx
+                    .try_send(OperationEvent::SessionReady {
+                        key: SessionKey::Outbound("test".into()),
+                        generation: 1,
+                        result: Ok(PeerSession::Outbound(connection)),
+                    })
+                    .unwrap();
+            } else {
+                supervisor.mesh.outbound.insert(
+                    "test".into(),
+                    PeerResources {
+                        session: Some(PeerSession::Outbound(connection)),
+                        ..Default::default()
+                    },
+                );
+            }
+            supervisor.stop_lan().await;
+            let mut closed = std::pin::pin!(observed.closed());
+            assert!(matches!(
+                closed
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Ready(_)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_reports_retired_task_failures() {
+        let (frames, _) = watch::channel(None);
+        let mut supervisor = Supervisor::new(frames);
+        let task = tokio::spawn(async {
+            panic!("retired dial panic");
+        });
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        supervisor.mesh.retired.push(task);
+        supervisor.stop_lan().await;
+        assert_eq!(
+            supervisor.state.discovery,
+            crate::app::DiscoveryState::Error
+        );
+        assert!(
+            supervisor
+                .state
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("panic")
+        );
+    }
+
+    #[tokio::test]
+    async fn nearby_audit_viewer_panic_is_not_successful_off() {
+        let mut supervisor = supervisor();
+        supervisor.state.start_discovery();
+        supervisor.state.local_peer_id = Some("local".into());
+        supervisor.view.task = Some(tokio::spawn(async { panic!("injected viewer failure") }));
+        supervisor.stop_lan().await;
+        assert_eq!(supervisor.state.discovery, DiscoveryState::Error);
+        assert!(
+            supervisor
+                .state
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("playback")
+        );
+        assert!(!supervisor.state.access().publish());
+        assert!(
+            supervisor.origins.is_none(),
+            "a failed viewer must not skip remaining cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn nearby_audit_stop_joins_tasks_cancelled_before_off() {
+        struct Released(Arc<AtomicBool>);
+        impl Drop for Released {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        for discovery in [true, false] {
+            let (frames, _) = watch::channel(None);
+            let mut supervisor = Supervisor::new(frames);
+            let released = Arc::new(AtomicBool::new(false));
+            let guard = Released(released.clone());
+            let (ready, started) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let _guard = guard;
+                ready.send(()).unwrap();
+                std::future::pending::<()>().await;
+            });
+            started.await.unwrap();
+            if discovery {
+                supervisor.discovery.start = Some(task);
+                supervisor.discovery.cancel_current();
+            } else {
+                supervisor.mesh.inbound.entry(1).or_default().pending = Some(task);
+                supervisor.close_inbound("test listener restart");
+            }
+            supervisor.stop_lan().await;
+            assert!(
+                released.load(Ordering::SeqCst),
+                "Off returned before prior task teardown: discovery={discovery}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nearby_audit_old_outbound_close_cannot_match_after_role_change() {
+        let (mut supervisor, advert) = discovered_outbound();
+        let old = supervisor
+            .mesh
+            .outbound
+            .entry(advert.id.clone())
+            .or_default()
+            .advance();
+        supervisor.accept_inbound_role(&advert.id);
+        supervisor.ensure_outbound(&advert.id, false);
+        supervisor.session_closed(SessionKey::Outbound(advert.id.clone()), old, None);
+        assert_eq!(
+            supervisor.state.peers[&advert.id].transport,
+            TransportState::Connecting
+        );
+        supervisor.stop_lan().await;
+    }
+
+    #[tokio::test]
+    async fn nearby_contract_stop_joins_media_and_pending_work() {
+        struct Released(Arc<AtomicBool>);
+        impl Drop for Released {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        for publishing in [false, true] {
+            let mut supervisor = supervisor();
+            supervisor.state.start_discovery();
+            supervisor.state.local_peer_id = Some("local".into());
+            supervisor.state.upsert_peer(peer("remote"));
+            supervisor.state.set_inbound_session_count(1);
+            supervisor.state.media = if publishing {
+                MediaState::Publishing
+            } else {
+                MediaState::Viewing {
+                    path: "moqcast.screen/remote".into(),
+                }
+            };
+            let (cancel, mut cancelled) = watch::channel(false);
+            let released = Arc::new(AtomicBool::new(false));
+            let guard = Released(released.clone());
+            let (ready, started) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let _guard = guard;
+                ready.send(()).unwrap();
+                while !*cancelled.borrow_and_update() {
+                    if cancelled.changed().await.is_err() {
+                        break;
+                    }
+                }
+            });
+            started.await.unwrap();
+            if publishing {
+                supervisor.publish.cancel = Some(cancel);
+                supervisor.publish.task = Some(tokio::spawn(async move {
+                    task.await.unwrap();
+                    Ok(())
+                }));
+            } else {
+                supervisor.view.cancel = Some(cancel);
+                supervisor.view.task = Some(task);
+            }
+            let pending_released = Arc::new(AtomicBool::new(false));
+            let guard = Released(pending_released.clone());
+            supervisor
+                .mesh
+                .outbound
+                .entry("remote".into())
+                .or_default()
+                .pending = Some(tokio::spawn(async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+            }));
+            let mut extra_released = Vec::new();
+            for slot in [
+                &mut supervisor.discovery.start,
+                &mut supervisor.discovery.retry,
+            ] {
+                let released = Arc::new(AtomicBool::new(false));
+                let guard = Released(released.clone());
+                *slot = Some(tokio::spawn(async move {
+                    let _guard = guard;
+                    std::future::pending::<()>().await;
+                }));
+                extra_released.push(released);
+            }
+            let observer_released = Arc::new(AtomicBool::new(false));
+            let guard = Released(observer_released.clone());
+            supervisor.session_watchers.spawn(async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+            });
+            supervisor.handle_command(UserCommand::StopDiscovery).await;
+            assert!(
+                extra_released
+                    .iter()
+                    .all(|flag| flag.load(Ordering::Acquire))
+            );
+            assert!(observer_released.load(Ordering::Acquire));
+            assert!(
+                released.load(Ordering::Acquire),
+                "media owner not released before Off"
+            );
+            assert!(
+                pending_released.load(Ordering::Acquire),
+                "pending owner not joined"
+            );
+            assert!(supervisor.mesh.outbound.is_empty());
+            assert!(supervisor.mesh.inbound.is_empty());
+            assert!(supervisor.state.peers.is_empty());
+            assert!(supervisor.state.local_peer_id.is_none());
+            assert_eq!(supervisor.state.inbound_session_count, 0);
+            assert_eq!(supervisor.state.media, MediaState::Idle);
+            assert_eq!(supervisor.state.discovery, DiscoveryState::Idle);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nearby_contract_stop_does_not_wait_on_a_full_operation_queue() {
+        let mut supervisor = supervisor();
+        supervisor.state.start_discovery();
+        supervisor.state.media = MediaState::Publishing;
+        let generation = supervisor.publish.advance();
+        let (cancel, cancelled) = watch::channel(false);
+        supervisor.publish.cancel = Some(cancel);
+        for _ in 0..super::EVENT_CAPACITY {
+            supervisor
+                .operation_tx
+                .try_send(OperationEvent::RetryOutbound {
+                    peer_id: "old".into(),
+                    generation: 0,
+                })
+                .unwrap();
+        }
+        let completion = PublishCompletion {
+            generation,
+            events: supervisor.operation_tx.clone(),
+            cancelled,
+        };
+        supervisor.publish.task = Some(tokio::spawn(completion.report(Ok(()))));
+        // Virtual-time deadline detects a deadlock without sleeping or relaxing production timeouts.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            supervisor.handle_command(UserCommand::StopDiscovery),
+        )
+        .await
+        .expect("stop must not block on its event queue");
+        assert!(supervisor.publish.task.is_none());
+        assert_eq!(supervisor.state.media, MediaState::Idle);
+    }
+
+    #[tokio::test]
+    async fn nearby_contract_close_error_is_not_reported_as_off() {
+        let mut supervisor = supervisor();
+        supervisor.state.start_discovery();
+        supervisor.state.media = MediaState::Publishing;
+        supervisor.publish.task = Some(tokio::spawn(async { Err("close failed".to_owned()) }));
+        supervisor.handle_command(UserCommand::StopDiscovery).await;
+        assert_eq!(supervisor.state.discovery, DiscoveryState::Error);
+        assert!(
+            supervisor
+                .state
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("close failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn nearby_contract_stop_drains_old_events_before_reopening() {
+        let mut supervisor = supervisor();
+        supervisor.state.start_discovery();
+        let old = supervisor.discovery.generation;
+        let broadcast = super::moq_net::broadcast::Producer::new(Default::default());
+        supervisor
+            .operation_tx
+            .try_send(OperationEvent::ScreenAnnouncement {
+                path: "moqcast.screen/old".into(),
+                broadcast: Some(broadcast.consume()),
+            })
+            .unwrap();
+        supervisor
+            .service_tx
+            .try_send(service::Event {
+                generation: old,
+                kind: service::EventKind::InitialScanFinished,
+            })
+            .unwrap();
+        supervisor.handle_command(UserCommand::StopDiscovery).await;
+        assert!(supervisor.operation_rx.try_recv().is_err());
+        assert!(supervisor.service_rx.try_recv().is_err());
+        assert!(supervisor.origins.is_none());
+        assert!(supervisor.session_watchers.is_empty());
+        // Create the next run without opening real sockets.
+        supervisor.state.start_discovery();
+        supervisor.origins = Some(super::Origins::new(supervisor.operation_tx.clone()));
+        supervisor.state.upsert_peer(peer("new"));
+        let action = supervisor
+            .handle_service_event(service::Event {
+                generation: old,
+                kind: service::EventKind::Lost("new".into()),
+            })
+            .await;
+        assert!(matches!(action, super::LoopAction::Unchanged));
+        assert!(supervisor.state.peers.contains_key("new"));
+        assert!(supervisor.remote_screens.is_empty());
+        supervisor.handle_command(UserCommand::StopDiscovery).await;
     }
 
     #[tokio::test]
@@ -1582,7 +2316,13 @@ mod tests {
         ));
         assert!(supervisor.source_refresh.is_none());
         assert_eq!(supervisor.state.sources, super::SourceCatalog::Unloaded);
-        supervisor.announcements.abort();
+        if let Some(task) = supervisor
+            .origins
+            .as_ref()
+            .and_then(|origins| origins.announcements.as_ref())
+        {
+            task.abort();
+        }
     }
 
     #[tokio::test]
@@ -1599,7 +2339,13 @@ mod tests {
             supervisor.state.sources,
             super::SourceCatalog::Failed("display unavailable".into())
         );
-        supervisor.announcements.abort();
+        if let Some(task) = supervisor
+            .origins
+            .as_ref()
+            .and_then(|origins| origins.announcements.as_ref())
+        {
+            task.abort();
+        }
     }
 
     #[tokio::test]
@@ -1709,7 +2455,7 @@ mod tests {
             generation: 4,
         };
 
-        resources.stop().await;
+        resources.stop().await.unwrap();
 
         assert_eq!(resources.generation, 5);
         assert!(resources.task.is_none());
@@ -2040,6 +2786,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cleanup_regression_recovery_blocks_new_media_with_old_identity() {
+        for exhausted in [false, true] {
+            let mut supervisor = supervisor();
+            supervisor.state.start_discovery();
+            supervisor.state.local_peer_id = Some("previous-service".into());
+            assert!(supervisor.state.access().publish());
+            if exhausted {
+                for _ in 0..DISCOVERY_RETRY_LIMIT {
+                    supervisor.recover_discovery("listener lost");
+                }
+            }
+            supervisor.recover_discovery("listener lost");
+            assert!(supervisor.discovery.services.is_none());
+            assert_eq!(
+                supervisor.state.begin_publish(),
+                Err(crate::app::StateError::LanNotReady)
+            );
+            assert_eq!(supervisor.state.media, MediaState::Idle);
+            assert!(supervisor.publish.task.is_none());
+            supervisor.stop_lan().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_regression_restart_revokes_admission_before_launch() {
+        let mut supervisor = supervisor();
+        supervisor.state.start_discovery();
+        supervisor.state.local_peer_id = Some("previous-service".into());
+        let old = supervisor.discovery.generation;
+        supervisor.restart_discovery();
+        // Cancel before yielding so this lifecycle test never starts real mDNS.
+        let task = supervisor.discovery.start.take().unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(!supervisor.state.access().ready);
+        let current = supervisor.discovery.generation;
+        supervisor
+            .handle_operation_event(OperationEvent::ServicesStarted {
+                generation: old,
+                result: Err("late old startup failure".into()),
+            })
+            .await;
+        assert_eq!(supervisor.discovery.generation, current);
+        assert!(!supervisor.state.access().ready);
+        assert!(supervisor.discovery.retry.is_none());
+        supervisor.stop_lan().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_regression_recovery_does_not_stop_existing_publication() {
+        let mut supervisor = supervisor();
+        supervisor.state.start_discovery();
+        supervisor.state.local_peer_id = Some("previous-service".into());
+        supervisor.state.begin_publish().unwrap();
+        supervisor.state.finish_publish().unwrap();
+        let task = tokio::spawn(std::future::pending());
+        let abort = task.abort_handle();
+        supervisor.publish.task = Some(task);
+        supervisor.recover_discovery("listener lost");
+        assert_eq!(supervisor.state.media, MediaState::Publishing);
+        assert!(!abort.is_finished());
+        assert!(!supervisor.state.access().ready);
+        abort.abort();
+        supervisor.stop_lan().await;
+    }
+
+    #[tokio::test]
     async fn stopping_discovery_cancels_a_scheduled_recovery() {
         let mut supervisor = supervisor();
         supervisor.state.start_discovery();
@@ -2244,7 +3057,10 @@ mod tests {
 
         supervisor.accept_inbound_role("peer-a");
 
-        assert!(!supervisor.mesh.outbound.contains_key("peer-a"));
+        let retired = &supervisor.mesh.outbound["peer-a"];
+        assert!(retired.session.is_none());
+        assert!(retired.pending.is_none());
+        assert_eq!(retired.generation, 5);
         assert!(supervisor.mesh.outbound.contains_key("peer-b"));
         assert_eq!(
             supervisor.state.peers["peer-a"].transport,

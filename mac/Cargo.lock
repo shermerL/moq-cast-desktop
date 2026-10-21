@@ -3209,6 +3209,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "moqcast-lan-state"
+version = "0.1.0"
+
+[[package]]
 name = "moqcast-macos"
 version = "0.6.1"
 dependencies = [
@@ -3222,6 +3226,7 @@ dependencies = [
  "moq-video",
  "moqcast-build-provenance",
  "moqcast-diagnostics",
+ "moqcast-lan-state",
  "moqcast-ui",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",

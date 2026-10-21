@@ -118,6 +118,16 @@ struct PlaybackRun {
 }
 
 impl Owner {
+    #[cfg(test)]
+    pub(crate) fn with_task_for_test(task: JoinHandle<()>) -> Self {
+        Self {
+            task: Some(task),
+            cancel: None,
+            volume: None,
+            generation: 0,
+        }
+    }
+
     pub(crate) fn start(
         &mut self,
         generation: u64,
@@ -156,14 +166,16 @@ impl Owner {
         true
     }
 
-    pub(crate) async fn stop(&mut self) {
+    pub(crate) async fn stop(&mut self) -> Result<(), String> {
         self.volume = None;
         if let Some(cancel) = self.cancel.take() {
             cancel.send_replace(true);
         }
         if let Some(task) = self.task.take() {
-            let _ = task.await;
+            task.await
+                .map_err(|error| format!("playback shutdown task failed: {error}"))?;
         }
+        Ok(())
     }
 }
 
@@ -450,15 +462,27 @@ async fn wait_for_deadline(deadline: Option<Instant>) {
 }
 
 async fn run(playback: PlaybackRun) {
-    let stopped = playback.cancel.clone();
+    let mut stopped = playback.cancel.clone();
     let generation = playback.generation;
     let events = playback.events.clone();
     let result = run_inner(playback).await.map_err(|error| error.to_string());
     let event = Event::Ended { generation, result };
-    if *stopped.borrow() {
-        let _ = events.try_send(event);
-    } else {
-        let _ = events.send(event).await;
+    let _ = send_event(&mut stopped, &events, event).await;
+}
+
+// The coordinator stops polling this queue while it awaits playback teardown.
+async fn send_event(
+    cancel: &mut watch::Receiver<bool>,
+    events: &mpsc::Sender<Event>,
+    event: Event,
+) -> anyhow::Result<bool> {
+    tokio::select! {
+        biased;
+        _ = wait_for_cancel(cancel) => Ok(false),
+        result = events.send(event) => {
+            result.map_err(|_| anyhow::anyhow!("playback event receiver closed"))?;
+            Ok(true)
+        }
     }
 }
 
@@ -584,8 +608,7 @@ async fn run_inner(playback: PlaybackRun) -> anyhow::Result<()> {
                 frames.send_replace(Some(Arc::new(frame)));
                 wake();
                 if reported_decoder_generation != Some(decoder_generation) {
-                    events
-                        .send(Event::VideoChanged {
+                    if !send_event(&mut cancel, &events, Event::VideoChanged {
                             generation,
                             decoder: decoder_name
                                 .clone()
@@ -593,24 +616,22 @@ async fn run_inner(playback: PlaybackRun) -> anyhow::Result<()> {
                             codec: selected.config.codec.to_string(),
                             width,
                             height,
-                        })
-                        .await
-                        .map_err(|_| anyhow::anyhow!("playback event receiver closed"))?;
+                        }).await? {
+                            break Ok(());
+                        }
                     reported_decoder_generation = Some(decoder_generation);
                 }
-                if first_view_frame {
-                    events
-                        .send(Event::Started {
+                if first_view_frame
+                    && !send_event(&mut cancel, &events, Event::Started {
                             generation,
                             decoder: decoder_name
                                 .clone()
                                 .expect("scheduled video frame has a decoder name"),
                             width,
                             height,
-                        })
-                        .await
-                        .map_err(|_| anyhow::anyhow!("playback event receiver closed"))?;
-                }
+                        }).await? {
+                            break Ok(());
+                        }
             }
 
             tokio::select! {
@@ -725,15 +746,13 @@ async fn run_inner(playback: PlaybackRun) -> anyhow::Result<()> {
                     let Some(update) = update else {
                         anyhow::bail!("remote audio event channel closed");
                     };
-                    if let Some(snapshot) = accept_audio_update(audio_generation, update) {
-                        events
-                            .send(Event::Audio {
+                    if let Some(snapshot) = accept_audio_update(audio_generation, update)
+                        && !send_event(&mut cancel, &events, Event::Audio {
                                 generation,
                                 snapshot,
-                            })
-                            .await
-                            .map_err(|_| anyhow::anyhow!("playback event receiver closed"))?;
-                    }
+                            }).await? {
+                            break Ok(());
+                        }
                 }
                 update = video_rx.recv(), if video_task.is_some() => {
                     let Some(update) = update else {
@@ -938,6 +957,134 @@ fn convert_i420(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn nearby_audit_all_playback_notifications_observe_queue_cancellation() {
+        use std::future::Future;
+        use std::task::Poll;
+        for event in [
+            Event::Started {
+                generation: 1,
+                decoder: "test".into(),
+                width: 1,
+                height: 1,
+            },
+            Event::VideoChanged {
+                generation: 1,
+                decoder: "test".into(),
+                codec: "test".into(),
+                width: 1,
+                height: 1,
+            },
+            Event::Audio {
+                generation: 1,
+                snapshot: AudioSnapshot::default(),
+            },
+        ] {
+            let (events, mut receiver) = mpsc::channel(1);
+            events
+                .try_send(Event::Ended {
+                    generation: 0,
+                    result: Ok(()),
+                })
+                .unwrap();
+            let (cancel, mut cancelled) = watch::channel(false);
+            let mut send = std::pin::pin!(send_event(&mut cancelled, &events, event));
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(send.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            cancel.send_replace(true);
+            assert!(!send.await.unwrap());
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(Event::Ended { generation: 0, .. })
+            ));
+            assert!(receiver.try_recv().is_err());
+        }
+        let (events, mut receiver) = mpsc::channel(1);
+        let (_cancel, mut cancelled) = watch::channel(false);
+        assert!(
+            send_event(
+                &mut cancelled,
+                &events,
+                Event::Ended {
+                    generation: 2,
+                    result: Ok(())
+                }
+            )
+            .await
+            .unwrap()
+        );
+        assert!(matches!(
+            receiver.recv().await,
+            Some(Event::Ended { generation: 2, .. })
+        ));
+        drop(receiver);
+        assert!(
+            send_event(
+                &mut cancelled,
+                &events,
+                Event::Ended {
+                    generation: 3,
+                    result: Ok(())
+                }
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn nearby_audit_viewer_panic_is_not_successful_stop() {
+        let mut owner = Owner::default();
+        owner.task = Some(tokio::spawn(async { panic!("injected viewer failure") }));
+        assert!(
+            owner.stop().await.is_err(),
+            "task failure must reach the LAN coordinator"
+        );
+    }
+
+    #[tokio::test]
+    async fn nearby_audit_cancel_unblocks_queued_playback_end() {
+        use std::future::Future;
+        use std::task::Poll;
+        let producer = moq_tokio::moq_net::broadcast::Producer::new(Default::default());
+        let broadcast = producer.consume();
+        producer.close();
+        let (events, _receiver) = mpsc::channel(1);
+        events
+            .try_send(Event::Ended {
+                generation: 0,
+                result: Ok(()),
+            })
+            .unwrap();
+        let (cancel, cancelled) = watch::channel(false);
+        let (frames, _) = watch::channel(None);
+        let (_, volume) = watch::channel(DEFAULT_PLAYER_VOLUME_PERCENT);
+        let mut playback = std::pin::pin!(run(PlaybackRun {
+            generation: 1,
+            path: "moqcast.screen/test".into(),
+            broadcast,
+            cancel: cancelled,
+            events,
+            frames,
+            wake: Arc::new(|| {}),
+            volume,
+        }));
+        let first = std::future::poll_fn(|cx| Poll::Ready(playback.as_mut().poll(cx))).await;
+        assert!(
+            first.is_pending(),
+            "full event queue should hold the end notification"
+        );
+        cancel.send_replace(true);
+        let after = std::future::poll_fn(|cx| Poll::Ready(playback.as_mut().poll(cx))).await;
+        assert!(
+            after.is_ready(),
+            "Nearby Off must interrupt a queued end notification"
+        );
+    }
 
     fn h264() -> hang::catalog::VideoConfig {
         hang::catalog::VideoConfig::new(hang::catalog::H264 {

@@ -10,7 +10,9 @@ mod view;
 use eframe::egui::{self, Align, Color32, Frame, Key, Layout, Modifiers};
 use moqcast_ui::{PlayerFrameSample, install_ui_font};
 
-use self::view::{ConnectionView, PeerPresentation, PresenceView, screen_availability};
+#[cfg(test)]
+use self::view::{ConnectionView, PresenceView};
+use self::view::{PeerPresentation, screen_availability};
 use crate::network::PeerSession;
 use crate::playback::FrameIdentity;
 use crate::remote::ScreenAvailability;
@@ -493,6 +495,9 @@ fn nearby_action_enabled(
 }
 
 fn global_summary(snapshot: &AppSnapshot, locale: Locale) -> String {
+    if snapshot.nearby_stopping {
+        return text(locale, "正在关闭附近设备", "Turning off Nearby").into();
+    }
     if snapshot.runtime.phase() == RuntimePhase::Suspended {
         return text(locale, "已暂停", "Suspended").to_owned();
     }
@@ -579,6 +584,11 @@ fn issue_message(issue: NearbyIssue, locale: Locale) -> &'static str {
             "附近设备服务已结束。可以重试恢复扫描与连接。",
             "Nearby services ended. Try again to restore scanning and connections.",
         ),
+        NearbyIssue::ShutdownFailed => text(
+            locale,
+            "关闭附近设备时发生错误，请查看日志。",
+            "Nearby shutdown reported an error. Check the logs.",
+        ),
         NearbyIssue::DeviceRejected => text(
             locale,
             "一个传入连接未能通过验证。",
@@ -589,14 +599,12 @@ fn issue_message(issue: NearbyIssue, locale: Locale) -> &'static str {
 
 fn share_action_available(permission: CapturePermission, snapshot: &AppSnapshot) -> bool {
     permission == CapturePermission::Allowed
-        && snapshot.session.phase() == SessionPhase::Listening
-        && snapshot.media.phase() == MediaPhase::Idle
+        && snapshot.access().publish()
         && snapshot.share_selection.is_some()
 }
 
 fn system_audio_action_available(snapshot: &AppSnapshot) -> bool {
-    snapshot.session.phase() == SessionPhase::Listening
-        && snapshot.media.phase() == MediaPhase::Idle
+    snapshot.access().publish()
         && snapshot
             .share_selection
             .as_ref()
@@ -642,35 +650,13 @@ fn device_status(
     screen: ScreenAvailability,
     locale: Locale,
 ) -> &'static str {
-    if screen == ScreenAvailability::Available {
-        return text(locale, "可观看", "Watchable");
-    }
-    peer_line(peer, locale)
+    peer.facts(screen == ScreenAvailability::Available)
+        .status()
+        .label(locale == Locale::Chinese)
 }
 
 fn peer_line(peer: PeerPresentation, locale: Locale) -> &'static str {
-    match (peer.presence, peer.connection) {
-        (PresenceView::NotNearby, ConnectionView::Connected) => text(
-            locale,
-            "已离开附近范围 · 连接仍在",
-            "No longer nearby · Session active",
-        ),
-        (PresenceView::NotNearby, _) => text(locale, "已离开附近范围", "No longer nearby"),
-        (PresenceView::Nearby, ConnectionView::Waiting) => text(locale, "已发现", "Found"),
-        (PresenceView::Nearby, ConnectionView::ConnectingSecurely) => {
-            text(locale, "正在安全连接", "Connecting securely")
-        }
-        (PresenceView::Nearby, ConnectionView::Connected) => text(locale, "已连接", "Connected"),
-        (PresenceView::Nearby, ConnectionView::Rejected) => {
-            text(locale, "无法验证连接", "Could not verify connection")
-        }
-        (PresenceView::Nearby, ConnectionView::Failed) => {
-            text(locale, "连接失败", "Connection failed")
-        }
-        (PresenceView::Nearby, ConnectionView::Disconnected) => {
-            text(locale, "连接已结束", "Session ended")
-        }
-    }
+    peer.facts(false).status().label(locale == Locale::Chinese)
 }
 
 fn screen_label(screen: ScreenAvailability, locale: Locale) -> &'static str {

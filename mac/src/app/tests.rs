@@ -1,3 +1,4 @@
+use super::view::PresenceView;
 use super::*;
 
 fn peer(discovered: bool, session: PeerSession) -> PeerSnapshot {

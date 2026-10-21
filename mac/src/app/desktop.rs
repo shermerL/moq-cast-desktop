@@ -54,7 +54,9 @@ impl MoqCastApp {
                                 snapshot.discovery.phase(),
                                 DiscoveryPhase::Stopped | DiscoveryPhase::Failed
                             );
-                            let label = if self.nearby_action_pending.is_some() {
+                            let label = if snapshot.nearby_stopping {
+                                self.text("正在关闭", "Turning off")
+                            } else if self.nearby_action_pending.is_some() {
                                 self.text("处理中", "Pending")
                             } else if active {
                                 self.text("关闭附近设备", "Turn off Nearby")
@@ -64,10 +66,11 @@ impl MoqCastApp {
                             if (Action {
                                 label,
                                 size: vec2(148.0, 40.0),
-                                enabled: nearby_action_enabled(
-                                    self.nearby_action_pending,
-                                    snapshot.runtime.phase(),
-                                ),
+                                enabled: !snapshot.nearby_stopping
+                                    && nearby_action_enabled(
+                                        self.nearby_action_pending,
+                                        snapshot.runtime.phase(),
+                                    ),
                                 tone: if active {
                                     ActionTone::Danger
                                 } else {
@@ -539,7 +542,7 @@ impl MoqCastApp {
         let share_owned = snapshot.media_owner == Some(MediaOwner::Share);
         let stopping = snapshot.media.phase() == MediaPhase::Stopping;
         let idle = snapshot.media.phase() == MediaPhase::Idle;
-        let ready = snapshot.session.phase() == SessionPhase::Listening;
+        let ready = snapshot.access().ready;
         // Keep actions outside scrolling content at the minimum window size.
         let available = ui.available_rect_before_wrap();
         let actions = egui::Rect::from_min_max(
@@ -678,10 +681,11 @@ impl MoqCastApp {
                     && (Action {
                         label: self.text("开启附近设备", "Turn on Nearby"),
                         size: vec2(160.0, 40.0),
-                        enabled: nearby_action_enabled(
-                            self.nearby_action_pending,
-                            snapshot.runtime.phase(),
-                        ),
+                        enabled: !snapshot.nearby_stopping
+                            && nearby_action_enabled(
+                                self.nearby_action_pending,
+                                snapshot.runtime.phase(),
+                            ),
                         tone: ActionTone::Neutral,
                     })
                     .show(ui)
@@ -791,6 +795,12 @@ fn discovery_status(
             text(locale, "应用服务已停止", "Application services stopped"),
         );
     }
+    if snapshot.nearby_stopping {
+        return (
+            StatusTone::Busy,
+            text(locale, "正在关闭附近设备", "Turning off Nearby"),
+        );
+    }
     if let Some(action) = pending {
         return (
             StatusTone::Busy,
@@ -864,14 +874,15 @@ fn peer_status(
         }
     }
     // An mDNS loss must not hide a still-available route or healthy session.
-    let tone = if availability == ScreenAvailability::Available {
-        StatusTone::Active
-    } else {
-        match peer.connection {
-            ConnectionView::ConnectingSecurely => StatusTone::Busy,
-            ConnectionView::Rejected | ConnectionView::Failed => StatusTone::Error,
-            _ => StatusTone::Neutral,
-        }
+    use moqcast_lan_state::Status;
+    let tone = match peer
+        .facts(availability == ScreenAvailability::Available)
+        .status()
+    {
+        Status::Available | Status::Connected => StatusTone::Active,
+        Status::Connecting => StatusTone::Busy,
+        Status::Rejected | Status::Failed => StatusTone::Error,
+        _ => StatusTone::Neutral,
     };
     (tone, device_status(peer, availability, locale))
 }
@@ -890,6 +901,12 @@ mod status_tests {
             discovery_status(&snapshot, Some(NearbyAction::TurnOff), Locale::English),
             (StatusTone::Busy, "Turning off Nearby")
         );
+        snapshot.nearby_stopping = true;
+        assert_eq!(
+            discovery_status(&snapshot, None, Locale::English),
+            (StatusTone::Busy, "Turning off Nearby")
+        );
+        snapshot.nearby_stopping = false;
         snapshot.runtime.begin(RuntimePhase::Suspended);
         assert_eq!(
             discovery_status(&snapshot, None, Locale::English),
@@ -921,11 +938,11 @@ mod status_tests {
         };
         assert_eq!(
             peer_status(peer, ScreenAvailability::Available, None, Locale::English),
-            (StatusTone::Active, "Watchable")
+            (StatusTone::Active, "Available")
         );
         assert_eq!(
             peer_status(peer, ScreenAvailability::Unavailable, None, Locale::English),
-            (StatusTone::Neutral, "No longer nearby · Session active")
+            (StatusTone::Active, "Connected")
         );
     }
 

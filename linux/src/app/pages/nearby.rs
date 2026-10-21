@@ -1,8 +1,5 @@
 //! Device actions derived from the runtime's independent discovery and media state.
-use super::super::{
-    AppSnapshot, DialRole, Locale, MediaState, PeerDiscoveryState, PeerSnapshot,
-    ScreenAvailability, TransportState, UserCommand,
-};
+use super::super::{AppSnapshot, Locale, MediaState, PeerSnapshot, UserCommand};
 use eframe::egui;
 use moqcast_ui::v2::{self, Palette, StatusTone};
 
@@ -19,10 +16,8 @@ fn owns_playback(snapshot: &AppSnapshot, id: &str) -> bool {
         _ => false,
     }
 }
-fn can_watch(snapshot: &AppSnapshot, peer: &PeerSnapshot) -> bool {
-    snapshot.media == MediaState::Idle
-        && snapshot.has_mesh_session()
-        && peer.screen == ScreenAvailability::Available
+fn can_watch(snapshot: &AppSnapshot, id: &str) -> bool {
+    snapshot.can_watch(&crate::screen_path::for_peer(id))
 }
 pub(in crate::app) fn peer_status(
     snapshot: &AppSnapshot,
@@ -37,25 +32,17 @@ pub(in crate::app) fn peer_status(
             _ => (StatusTone::Active, locale.viewing_screen()),
         };
     }
-    if peer.screen == ScreenAvailability::Available {
-        return (StatusTone::Active, locale.screen_available());
-    }
-    match (&peer.dial_role, &peer.transport) {
-        (DialRole::Outbound, TransportState::Connecting) => {
-            (StatusTone::Busy, locale.transport_connecting())
-        }
-        (DialRole::Outbound, TransportState::Connected) => {
-            (StatusTone::Neutral, locale.transport_connected())
-        }
-        (DialRole::Outbound, TransportState::Failed) => {
-            (StatusTone::Error, locale.transport_failed())
-        }
-        _ if peer.discovery == PeerDiscoveryState::Lost => {
-            (StatusTone::Neutral, locale.discovery_lost())
-        }
-        _ => (StatusTone::Neutral, locale.discovery_found()),
-    }
+    use moqcast_lan_state::Status;
+    let status = peer.facts().status();
+    let tone = match status {
+        Status::Available | Status::Connected => StatusTone::Active,
+        Status::Connecting => StatusTone::Busy,
+        Status::Failed | Status::Rejected => StatusTone::Error,
+        _ => StatusTone::Neutral,
+    };
+    (tone, status.label(locale == Locale::Chinese))
 }
+
 pub(in crate::app) fn show(
     ui: &mut egui::Ui,
     locale: Locale,
@@ -75,13 +62,17 @@ pub(in crate::app) fn show(
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            if snapshot.peers.is_empty() {
+            if !snapshot.peers.values().any(|peer| peer.facts().visible()) {
                 ui.add_space(32.0);
                 ui.vertical_centered(|ui| {
                     ui.label(egui::RichText::new(locale.no_devices()).color(p.muted));
                 });
             }
-            for (id, peer) in &snapshot.peers {
+            for (id, peer) in snapshot
+                .peers
+                .iter()
+                .filter(|(_, peer)| peer.facts().visible())
+            {
                 let current = owns_playback(snapshot, id);
                 let (tone, status) = peer_status(snapshot, id, peer, locale);
                 let response = v2::nearby_row(
@@ -98,7 +89,7 @@ pub(in crate::app) fn show(
                         } else {
                             locale.watch()
                         },
-                        watch_enabled: current || can_watch(snapshot, peer),
+                        watch_enabled: current || can_watch(snapshot, id),
                         details_label: locale.device_details(),
                         compact,
                     },
@@ -123,6 +114,10 @@ pub(in crate::app) fn show(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::{
+        DialRole, DiscoveryState, PeerDiscoveryState, ScreenAvailability, TransportState,
+    };
+
     fn peer() -> PeerSnapshot {
         PeerSnapshot {
             name: "Computer".into(),
@@ -134,19 +129,38 @@ mod tests {
             screen: ScreenAvailability::Available,
         }
     }
+
     #[test]
-    fn discovery_loss_keeps_valid_route_watchable() {
+    fn discovery_loss_keeps_valid_route_watchable_until_shutdown() {
         let p = peer();
-        let mut s = AppSnapshot::default();
+        let mut s = AppSnapshot {
+            local_peer_id: Some("local".into()),
+            discovery: DiscoveryState::Ready,
+            ..Default::default()
+        };
         s.peers.insert("peer".into(), p.clone());
-        assert!(can_watch(&s, &p));
-        assert_eq!(
-            peer_status(&s, "peer", &p, Locale::English).1,
-            Locale::English.screen_available()
-        );
+        s.update_remote_screen(crate::screen_path::for_peer("peer"), true);
+        assert!(can_watch(&s, "peer"));
+        assert_eq!(peer_status(&s, "peer", &p, Locale::English).1, "Available");
+        s.lan_stopping = true;
+        assert!(!can_watch(&s, "peer"));
+        s.lan_stopping = false;
         s.media = MediaState::Publishing;
-        assert!(!can_watch(&s, &p));
+        assert!(!can_watch(&s, "peer"));
     }
+
+    #[test]
+    fn unrelated_inbound_does_not_enable_watch_without_a_route() {
+        let mut s = AppSnapshot {
+            local_peer_id: Some("local".into()),
+            discovery: DiscoveryState::Ready,
+            inbound_session_count: 1,
+            ..Default::default()
+        };
+        s.peers.insert("peer".into(), peer());
+        assert!(!can_watch(&s, "peer"));
+    }
+
     #[test]
     fn preparing_is_not_reported_as_playing_and_return_does_not_restart() {
         let p = peer();
@@ -162,6 +176,6 @@ mod tests {
             peer_status(&s, "peer", &p, Locale::English).1,
             Locale::English.preparing_view()
         );
-        assert!(!can_watch(&s, &p));
+        assert!(!can_watch(&s, "peer"));
     }
 }

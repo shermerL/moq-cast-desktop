@@ -84,38 +84,10 @@ impl Locale {
         }
     }
 
-    pub(super) fn transport_connecting(self) -> &'static str {
+    pub(super) fn enable_nearby_before_sharing(self) -> &'static str {
         match self {
-            Self::Chinese => "正在连接…",
-            Self::English => "Connecting...",
-        }
-    }
-
-    pub(super) fn transport_connected(self) -> &'static str {
-        match self {
-            Self::Chinese => "已连接",
-            Self::English => "Connected",
-        }
-    }
-
-    pub(super) fn transport_failed(self) -> &'static str {
-        match self {
-            Self::Chinese => "连接失败",
-            Self::English => "Connection failed",
-        }
-    }
-
-    pub(super) fn screen_available(self) -> &'static str {
-        match self {
-            Self::Chinese => "屏幕可观看",
-            Self::English => "Screen available",
-        }
-    }
-
-    pub(super) fn connect_first(self) -> &'static str {
-        match self {
-            Self::Chinese => "正在等待同一网络内的设备连接。",
-            Self::English => "Waiting for a device on this network to connect.",
+            Self::Chinese => "开启附近设备后即可共享。",
+            Self::English => "Enable nearby devices before sharing.",
         }
     }
 

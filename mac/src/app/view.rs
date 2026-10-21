@@ -30,6 +30,25 @@ pub(super) struct PeerPresentation {
     pub(super) connection: ConnectionView,
 }
 
+impl PeerPresentation {
+    pub(super) fn facts(self, available: bool) -> moqcast_lan_state::Peer {
+        use moqcast_lan_state::Connection;
+        let connection = match self.connection {
+            ConnectionView::Waiting => Connection::Unknown,
+            ConnectionView::ConnectingSecurely => Connection::Connecting,
+            ConnectionView::Connected => Connection::Connected,
+            ConnectionView::Rejected => Connection::Rejected,
+            ConnectionView::Failed => Connection::Failed,
+            ConnectionView::Disconnected => Connection::Disconnected,
+        };
+        moqcast_lan_state::Peer {
+            discovered: self.presence == PresenceView::Nearby,
+            connection,
+            available,
+        }
+    }
+}
+
 impl From<&PeerSnapshot> for PeerPresentation {
     fn from(peer: &PeerSnapshot) -> Self {
         let presence = if peer.discovered {
