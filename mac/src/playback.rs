@@ -118,6 +118,16 @@ struct PlaybackRun {
 }
 
 impl Owner {
+    #[cfg(test)]
+    pub(crate) fn with_task_for_test(task: JoinHandle<()>) -> Self {
+        Self {
+            task: Some(task),
+            cancel: None,
+            volume: None,
+            generation: 0,
+        }
+    }
+
     pub(crate) fn start(
         &mut self,
         generation: u64,

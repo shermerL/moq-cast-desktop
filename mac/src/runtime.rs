@@ -1249,7 +1249,8 @@ async fn teardown_media(
     publication.stop();
     if let Err(error) = playback.stop().await {
         tracing::error!(stage = "lan_shutdown", %error, "playback owner failed during cleanup");
-        snapshot.clear_media(MediaPhase::Failed, Some(error));
+        // The task has been joined; keep its error without retaining a media lock.
+        snapshot.clear_media(MediaPhase::Idle, Some(error));
     }
     frames.send_replace(None);
 }
@@ -1348,9 +1349,20 @@ async fn stop_watch(
     };
     let result = playback.stop().await;
     frames.send_replace(None);
-    snapshot.finish_stop_media(generation);
-    if let Err(error) = result {
-        snapshot.clear_media(MediaPhase::Failed, Some(error));
+    match result {
+        Ok(()) => {
+            snapshot.finish_stop_media(generation);
+        }
+        Err(error) => {
+            // Keep the failed watch visible until its existing stop action is acknowledged.
+            snapshot.media.apply(generation, MediaPhase::Failed);
+            snapshot.media_decoder = None;
+            snapshot.media_video_codec = None;
+            snapshot.media_width = None;
+            snapshot.media_height = None;
+            snapshot.media_error = Some(error);
+            snapshot.watch_audio = playback::AudioSnapshot::default();
+        }
     }
 }
 
@@ -2361,6 +2373,76 @@ mod tests {
                 assert_eq!(snapshot.session.phase(), SessionPhase::Stopped);
                 assert_eq!(snapshot.media.phase(), MediaPhase::Idle);
             });
+    }
+
+    #[tokio::test]
+    async fn cleanup_regression_failed_watch_stop_remains_recoverable() {
+        let mut snapshot = AppSnapshot::default();
+        snapshot.session.begin(SessionPhase::Listening);
+        let old = snapshot.begin_watch("peer", "moqcast.screen/peer").unwrap();
+        let mut playback = playback::Owner::with_task_for_test(tokio::spawn(async {
+            panic!("injected playback cleanup failure");
+        }));
+        let (frames, _) = watch::channel(None);
+        stop_watch(&mut snapshot, &mut playback, &frames).await;
+        assert_eq!(snapshot.media.phase(), MediaPhase::Failed);
+        assert!(
+            snapshot
+                .media_error
+                .as_deref()
+                .unwrap()
+                .contains("injected playback cleanup")
+        );
+        assert_eq!(snapshot.media_owner, Some(MediaOwner::Watch));
+        assert_eq!(snapshot.media_path.as_deref(), Some("moqcast.screen/peer"));
+        assert!(!snapshot.access().publish());
+        assert!(!snapshot.playback_ended(old, Ok(())));
+        stop_watch(&mut snapshot, &mut playback, &frames).await;
+        assert_eq!(snapshot.media.phase(), MediaPhase::Idle);
+        assert!(snapshot.media_error.is_none());
+        assert!(snapshot.access().publish());
+        let next = snapshot.begin_watch("peer", "moqcast.screen/peer").unwrap();
+        assert_ne!(old, next);
+        assert!(!snapshot.playback_ended(old, Err("late old task".into())));
+        assert_eq!(snapshot.media.phase(), MediaPhase::PreparingWatch);
+    }
+
+    #[tokio::test]
+    async fn cleanup_regression_failed_playback_shutdown_allows_lan_restart() {
+        let mut snapshot = AppSnapshot::default();
+        snapshot.session.begin(SessionPhase::Listening);
+        snapshot.begin_watch("peer", "moqcast.screen/peer").unwrap();
+        let mut playback = playback::Owner::with_task_for_test(tokio::spawn(async {
+            panic!("injected playback cleanup failure");
+        }));
+        let mut publication = publication::Owner::default();
+        let (frames, _) = watch::channel(None);
+        complete_network_turn_off(
+            &mut snapshot,
+            &mut playback,
+            &mut publication,
+            &frames,
+            || async { Err("injected listener cleanup failure".into()) },
+        )
+        .await;
+        assert_eq!(snapshot.nearby_issue, Some(NearbyIssue::ShutdownFailed));
+        let error = snapshot.media_error.as_deref().unwrap();
+        assert!(error.contains("playback cleanup"));
+        assert!(error.contains("listener cleanup"));
+        assert!(!snapshot.nearby_stopping);
+        assert_eq!(snapshot.media_owner, None);
+        assert_eq!(snapshot.media.phase(), MediaPhase::Idle);
+        let generations = begin_network_start(&mut snapshot);
+        snapshot
+            .session
+            .apply(generations.session, SessionPhase::Listening);
+        assert!(snapshot.access().publish());
+        assert!(
+            snapshot
+                .begin_watch("peer", "moqcast.screen/peer")
+                .is_some()
+        );
+        assert!(playback.stop().await.is_ok());
     }
 
     #[tokio::test]

@@ -796,6 +796,7 @@ impl Supervisor {
     }
 
     fn launch_services(&mut self) {
+        self.state.local_peer_id = None;
         self.origins
             .get_or_insert_with(|| Origins::new(self.operation_tx.clone()));
         let generation = self.discovery.generation;
@@ -1474,6 +1475,8 @@ impl Supervisor {
         let error = error.into();
         self.close_inbound("LAN listener is restarting");
         let generation = self.discovery.cancel_current();
+        // Only a current ServicesStarted result may admit new media again.
+        self.state.local_peer_id = None;
         self.state.stop_discovery();
         self.state.start_discovery();
 
@@ -2780,6 +2783,73 @@ mod tests {
             tokio::task::yield_now().await;
             assert!(dial.is_finished());
         }
+    }
+
+    #[tokio::test]
+    async fn cleanup_regression_recovery_blocks_new_media_with_old_identity() {
+        for exhausted in [false, true] {
+            let mut supervisor = supervisor();
+            supervisor.state.start_discovery();
+            supervisor.state.local_peer_id = Some("previous-service".into());
+            assert!(supervisor.state.access().publish());
+            if exhausted {
+                for _ in 0..DISCOVERY_RETRY_LIMIT {
+                    supervisor.recover_discovery("listener lost");
+                }
+            }
+            supervisor.recover_discovery("listener lost");
+            assert!(supervisor.discovery.services.is_none());
+            assert_eq!(
+                supervisor.state.begin_publish(),
+                Err(crate::app::StateError::LanNotReady)
+            );
+            assert_eq!(supervisor.state.media, MediaState::Idle);
+            assert!(supervisor.publish.task.is_none());
+            supervisor.stop_lan().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_regression_restart_revokes_admission_before_launch() {
+        let mut supervisor = supervisor();
+        supervisor.state.start_discovery();
+        supervisor.state.local_peer_id = Some("previous-service".into());
+        let old = supervisor.discovery.generation;
+        supervisor.restart_discovery();
+        // Cancel before yielding so this lifecycle test never starts real mDNS.
+        let task = supervisor.discovery.start.take().unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(!supervisor.state.access().ready);
+        let current = supervisor.discovery.generation;
+        supervisor
+            .handle_operation_event(OperationEvent::ServicesStarted {
+                generation: old,
+                result: Err("late old startup failure".into()),
+            })
+            .await;
+        assert_eq!(supervisor.discovery.generation, current);
+        assert!(!supervisor.state.access().ready);
+        assert!(supervisor.discovery.retry.is_none());
+        supervisor.stop_lan().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_regression_recovery_does_not_stop_existing_publication() {
+        let mut supervisor = supervisor();
+        supervisor.state.start_discovery();
+        supervisor.state.local_peer_id = Some("previous-service".into());
+        supervisor.state.begin_publish().unwrap();
+        supervisor.state.finish_publish().unwrap();
+        let task = tokio::spawn(std::future::pending());
+        let abort = task.abort_handle();
+        supervisor.publish.task = Some(task);
+        supervisor.recover_discovery("listener lost");
+        assert_eq!(supervisor.state.media, MediaState::Publishing);
+        assert!(!abort.is_finished());
+        assert!(!supervisor.state.access().ready);
+        abort.abort();
+        supervisor.stop_lan().await;
     }
 
     #[tokio::test]
