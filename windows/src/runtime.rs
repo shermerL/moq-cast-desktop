@@ -349,6 +349,7 @@ impl RuntimeSnapshot {
                 && matches!(
                     peer.transport.phase,
                     TransportPhaseView::Waiting
+                        | TransportPhaseView::Connecting
                         | TransportPhaseView::Failed
                         | TransportPhaseView::Disconnected
                 )
@@ -360,6 +361,9 @@ impl RuntimeSnapshot {
             return None;
         }
         let current = self.peers.get_mut(peer)?;
+        if current.transport.phase == TransportPhaseView::Connecting {
+            return Some(current.transport.generation);
+        }
         let generation = current.transport.generation.saturating_add(1);
         current.transport = TransportView {
             generation,
@@ -1706,6 +1710,21 @@ mod tests {
     }
 
     #[test]
+    fn connecting_peer_accepts_address_refresh_without_advancing_ui_generation() {
+        let mut snapshot = RuntimeSnapshot::default();
+        snapshot.apply_registry(RegistryChange::Added(peer("peer", "moqt://one:4443")));
+        let first = snapshot.begin_auto_connect("peer").unwrap();
+        let mut updated = peer("peer", "moqt://one:4443");
+        updated.candidates.push("moqt://two:4443".into());
+        snapshot.apply_registry(RegistryChange::Updated(updated));
+        assert_eq!(
+            snapshot.begin_auto_connect("peer"),
+            Some(first),
+            "new discovery addresses must reach the dial owner while connecting"
+        );
+    }
+
+    #[test]
     fn found_updated_and_lost_project_without_resetting_transport() {
         let mut snapshot = RuntimeSnapshot::default();
         snapshot.apply_registry(RegistryChange::Added(peer("peer", "moqt://one:4443")));
@@ -2184,7 +2203,7 @@ mod tests {
         snapshot.apply_registry(RegistryChange::Added(peer("peer", "moqt://one:4443")));
         assert!(snapshot.should_auto_connect("peer"));
         snapshot.begin_auto_connect("peer");
-        assert!(!snapshot.should_auto_connect("peer"));
+        assert!(snapshot.should_auto_connect("peer"));
         snapshot.apply_transport(
             "peer",
             TransportView {

@@ -9,12 +9,14 @@ use url::Url;
 use super::{SessionOrigins, security::peer_path};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const RECONNECT_BUDGET: Duration = Duration::from_secs(3);
+pub(super) const RECONNECT_BUDGET: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Error)]
 pub(crate) enum DialError {
     #[error("peer did not advertise a certificate fingerprint")]
     MissingFingerprint,
+    #[error("peer connection budget exhausted during address refresh")]
+    BudgetExhausted,
     #[error("peer did not advertise a reachable address")]
     NoAddresses,
     #[error(transparent)]
@@ -47,6 +49,7 @@ impl From<&mdns::Peer> for PeerRecord {
 pub(super) fn dial(
     peer: &PeerRecord,
     origins: SessionOrigins,
+    deadline: tokio::time::Instant,
 ) -> Result<moq_tokio::Connection, DialError> {
     let fingerprint = peer
         .fingerprint
@@ -54,9 +57,25 @@ pub(super) fn dial(
         .ok_or(DialError::MissingFingerprint)?;
     let addrs = targets(peer)?;
 
+    let client = config(fingerprint, deadline)?
+        .init(moq_tokio::quic::Config::default())?
+        .with_publisher(&origins.publish)
+        .with_subscriber(origins.receive);
+    Ok(client.connect(addrs))
+}
+
+fn config(
+    fingerprint: &str,
+    deadline: tokio::time::Instant,
+) -> Result<moq_tokio::connect::Config, DialError> {
+    if deadline <= tokio::time::Instant::now() {
+        return Err(DialError::BudgetExhausted);
+    }
     let mut config = moq_tokio::connect::Config::default();
     config.bind = Some("[::]:0".parse().expect("valid ephemeral bind"));
     config.once = Some(false);
+    // This config survives establishment. The owner bounds initial setup separately;
+    // later reconnects must retain the full budget rather than setup's remainder.
     config.backoff.timeout = RECONNECT_BUDGET;
     config.timeout = CONNECT_TIMEOUT;
     config.version = config
@@ -66,13 +85,9 @@ pub(super) fn dial(
         .copied()
         .collect();
     config.tls = moq_tokio::tls::Connect::default();
-    config.tls.fingerprint = vec![fingerprint.clone()];
+    config.tls.fingerprint = vec![fingerprint.to_owned()];
 
-    let client = config
-        .init(moq_tokio::quic::Config::default())?
-        .with_publisher(&origins.publish)
-        .with_subscriber(origins.receive);
-    Ok(client.connect(addrs))
+    Ok(config)
 }
 
 fn targets(peer: &PeerRecord) -> Result<Addrs, DialError> {
@@ -100,7 +115,18 @@ mod tests {
 
     use moq_tokio::moq_net;
 
-    use super::{PeerRecord, dial};
+    use super::PeerRecord;
+
+    fn dial(
+        peer: &PeerRecord,
+        origins: SessionOrigins,
+    ) -> Result<moq_tokio::Connection, super::DialError> {
+        super::dial(
+            peer,
+            origins,
+            tokio::time::Instant::now() + super::RECONNECT_BUDGET,
+        )
+    }
     use crate::session::{SessionOrigins, server};
 
     fn peer(addr: SocketAddr, fingerprint: String, credential: &str) -> PeerRecord {
@@ -126,6 +152,24 @@ mod tests {
             publish: moq_tokio::origin::spawn(),
             receive: moq_tokio::origin::spawn(),
         }
+    }
+
+    #[tokio::test]
+    async fn short_setup_deadline_preserves_established_reconnect_budget() {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        let config = super::config("00", deadline).unwrap();
+        assert_eq!(
+            config.backoff.timeout,
+            super::RECONNECT_BUDGET,
+            "setup time remaining must not shorten later reconnections"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_deadline_is_not_an_unlimited_retry_budget() {
+        let record = peer("127.0.0.1:9".parse().unwrap(), "00".repeat(32), "proof");
+        let result = super::dial(&record, origins(), tokio::time::Instant::now());
+        assert!(matches!(result, Err(super::DialError::BudgetExhausted)));
     }
 
     #[tokio::test]
