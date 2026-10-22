@@ -906,6 +906,8 @@ async fn run(
                         tracing::debug!(
                             generation,
                             should_dial,
+                            peer_id = %raw_id,
+                            addresses = ?peer.addrs,
                             address_count = peer.addrs.len(),
                             registry_changed = matches!(
                                 change,
@@ -936,6 +938,7 @@ async fn run(
                             generation,
                             present_peers = snapshot.present_peer_count(),
                             retained_peers = snapshot.peers.len(),
+                            peer_id = %raw_id,
                             "Nearby discovery delivered Lost"
                         );
                     }

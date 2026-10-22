@@ -244,7 +244,7 @@ where
     }
 
     fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
-        let entry = format_event(event, self.redact_private_locations);
+        let entry = format_event(event, self.redact_private_locations, self.filter.detailed());
         self.ring.push(entry.clone());
         self.writer.write_line(entry.line.as_bytes());
     }
@@ -254,12 +254,31 @@ where
     }
 }
 
-fn format_event(event: &Event<'_>, redact_private_locations: bool) -> Entry {
+fn format_event(event: &Event<'_>, redact_private_locations: bool, detailed: bool) -> Entry {
     let metadata = event.metadata();
+    let network_details = detailed
+        && (filter::transport_detail_target(metadata.target())
+            || [
+                "moqcast_macos::network",
+                "moqcast_windows::session",
+                "moqcast_windows::runtime",
+                "moq_cast_desktop::network",
+                "moq_cast_desktop::runtime",
+            ]
+            .iter()
+            .any(|prefix| target_matches(metadata.target(), prefix)));
     let rendered = if opaque_dependency_target(metadata.target()) {
         "dependency warning details omitted".to_owned()
     } else {
-        let mut visitor = EventVisitor::new(metadata.target(), redact_private_locations);
+        // Detailed LAN diagnosis needs the actual endpoint and error, including on
+        // platforms whose normal log policy hides private network locations.
+        let mut visitor = EventVisitor::new(
+            metadata.target(),
+            redact_private_locations && !network_details,
+        );
+        if network_details {
+            visitor.redact_location_fields = false;
+        }
         event.record(&mut visitor);
         let message = visitor
             .message
@@ -638,6 +657,54 @@ mod tests {
             .directory()
             .expect("test file diagnostics are available")
             .to_owned()
+    }
+
+    #[test]
+    fn detailed_network_logs_preserve_errors_and_endpoints_in_ring_and_file() {
+        for strict in [false, true] {
+            let directory = tempdir().unwrap();
+            let mut cfg = Config::new(Paths::for_test(directory.path()), BuildInfo::new("test"))
+                .with_stderr(false)
+                .with_detailed(true);
+            if strict {
+                cfg = cfg.with_private_location_redaction();
+            }
+            let (handle, worker, layer) = build(cfg);
+            let subscriber = Registry::default().with(layer);
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::debug!(target: "moq_tokio::server", err = "TLS handshake: certificate rejected at 192.0.2.1:443",
+                    "failed to accept session");
+                tracing::debug!(target: "moq_tokio::connection", peer = "moqt://[2001:db8::1]:443/", err = "timed out", "address unreachable");
+                for target_index in 0..3 {
+                    match target_index {
+                        0 => {
+                            tracing::debug!(target: "moqcast_macos::network::session", peer_id = "test-peer", error = "dial 192.0.2.1:443 failed", "candidate failed")
+                        }
+                        1 => {
+                            tracing::debug!(target: "moqcast_windows::session", peer_id = "test-peer", error = "dial 192.0.2.1:443 failed", "candidate failed")
+                        }
+                        _ => {
+                            tracing::debug!(target: "moq_cast_desktop::runtime::supervisor", peer_id = "test-peer", error = "dial 192.0.2.1:443 failed", "candidate failed")
+                        }
+                    }
+                }
+                handle.set_detailed(false);
+                tracing::debug!(target: "moq_tokio::connection", "not enabled after toggle");
+            });
+            drop(worker);
+            assert_eq!(handle.snapshot().entries().len(), 5);
+            let file = fs::read_to_string(log_dir(&handle).join("moqcast.log")).unwrap();
+            for expected in [
+                "TLS handshake: certificate rejected at 192.0.2.1:443",
+                "moqt://[2001:db8::1]:443/",
+                "timed out",
+                "test-peer",
+                "dial 192.0.2.1:443 failed",
+            ] {
+                assert!(file.contains(expected), "missing {expected}");
+            }
+            assert!(!file.contains("not enabled after toggle"));
+        }
     }
 
     #[test]

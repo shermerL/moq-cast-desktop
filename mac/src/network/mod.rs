@@ -104,8 +104,14 @@ impl Services {
             .with_fingerprint(advertisement.fingerprint)
             .advertise()
             .await?;
+        tracing::info!(
+            stage = "discovery",
+            listen_port = advertisement.addr.port(),
+            "Nearby advertisement ready"
+        );
         let registry = PeerRegistry::new(discovery.id());
         let sessions = bound.start(discovery.credential().to_owned()).await?;
+        tracing::info!(stage = "discovery", "Nearby listener and discovery ready");
         let remote = remote::Directory::start(sessions.receive_origin(), discovery.id().to_owned());
 
         Ok(Self {
@@ -185,6 +191,14 @@ impl Services {
 
     async fn found(&mut self, peer: mdns::Peer) {
         let should_dial = self.discovery.should_dial(&peer.id);
+        tracing::debug!(
+            stage = "discovery",
+            peer_id = %peer.id,
+            addresses = ?peer.addrs,
+            address_count = peer.addrs.len(),
+            should_dial,
+            "Nearby discovery delivered Found"
+        );
         let found = PeerRecord::from_mdns(peer);
         let id = found.id.clone();
         let update = self.registry.found(found);
@@ -306,6 +320,7 @@ enum Input {
 fn should_connect(update: PeerUpdate, phase: PeerSession) -> bool {
     match update {
         PeerUpdate::IdentityReplaced => true,
+        PeerUpdate::CandidatesMerged if phase == PeerSession::Connecting => true,
         PeerUpdate::Added | PeerUpdate::CandidatesMerged | PeerUpdate::Unchanged => matches!(
             phase,
             PeerSession::Waiting
@@ -376,6 +391,22 @@ mod tests {
             DialRole::Passive,
             PeerSession::Connected
         )));
+    }
+
+    #[test]
+    fn late_candidates_reach_a_pending_dial_without_restarting_healthy_sessions() {
+        assert!(should_connect(
+            PeerUpdate::CandidatesMerged,
+            PeerSession::Connecting
+        ));
+        assert!(!should_connect(
+            PeerUpdate::Unchanged,
+            PeerSession::Connecting
+        ));
+        assert!(!should_connect(
+            PeerUpdate::CandidatesMerged,
+            PeerSession::Connected
+        ));
     }
 
     #[test]

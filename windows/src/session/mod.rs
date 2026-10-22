@@ -138,6 +138,9 @@ impl SessionFoundation {
                 }
                 deadline = outbound.deadline;
                 tracing::debug!(
+                    peer_id,
+                    previous_addresses = ?previous.addrs,
+                    addresses = ?record.addrs,
                     previous_address_count = previous.addrs.len(),
                     address_count = record.addrs.len(),
                     "refreshing pending peer addresses within original connection budget"
@@ -159,9 +162,28 @@ impl SessionFoundation {
         let peer_id = peer_id.to_owned();
         let observed_peer = peer_id.clone();
         let generation = state.generation();
+        tracing::debug!(
+            stage = "transport",
+            generation,
+            peer_id = %peer_id,
+            addresses = ?record.addrs,
+            address_count = record.addrs.len(),
+            ipv4_count = record.addrs.iter().filter(|addr| addr.is_ipv4()).count(),
+            ipv6_count = record.addrs.iter().filter(|addr| addr.is_ipv6()).count(),
+            remaining_ms = deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .as_millis() as u64,
+            "starting outbound candidate set"
+        );
         let task = tokio::spawn(async move {
             match tokio::time::timeout_at(deadline, observed.clone().established()).await {
                 Ok(Ok(connection)) => {
+                    tracing::debug!(
+                        stage = "transport",
+                        generation,
+                        peer_id = %observed_peer,
+                        "outbound connection established"
+                    );
                     let _ = events
                         .send(RuntimeEvent::Outbound {
                             peer: observed_peer.clone(),
@@ -169,7 +191,8 @@ impl SessionFoundation {
                             phase: TransportPhase::Connected,
                         })
                         .await;
-                    let _ = connection.closed().await;
+                    let reason = connection.closed().await;
+                    tracing::debug!(stage = "transport", generation, peer_id = %observed_peer, ?reason, "outbound connection closed");
                     let _ = events
                         .send(RuntimeEvent::Outbound {
                             peer: observed_peer,
@@ -179,6 +202,15 @@ impl SessionFoundation {
                         .await;
                 }
                 result => {
+                    tracing::warn!(
+                        stage = "transport",
+                        generation,
+                        peer_id = %observed_peer,
+                        error = ?result.as_ref().map(|result| result.as_ref().err()),
+                        setup_deadline = result.is_err(),
+                        authentication = matches!(&result, Ok(Err(error)) if error.is_auth()),
+                        "outbound connection setup failed"
+                    );
                     if result.is_err() {
                         observed.abort(moq_tokio::moq_net::Error::Cancel);
                         tracing::warn!("peer connection exhausted its original setup budget");
@@ -226,6 +258,7 @@ impl SessionFoundation {
                     phase,
                 } => {
                     let Some(state) = self.states.transition(&peer, generation, phase) else {
+                        tracing::debug!(peer_id = %peer, generation, ?phase, "ignored stale outbound connection event");
                         continue;
                     };
                     return Some(TransportUpdate {

@@ -102,23 +102,55 @@ pub(super) async fn run_listener(
         };
         inbound_id = inbound_id.saturating_add(1);
         let id = inbound_id;
+        tracing::debug!(
+            stage = "transport",
+            inbound_id = id,
+            "inbound request reached application authorization"
+        );
         let events = events.clone();
         let credential = credential.clone();
         let origins = origins.clone();
         sessions.spawn(async move {
             let phase = match accept(request, &credential, origins).await {
                 Ok(session) => {
+                    tracing::debug!(
+                        stage = "transport",
+                        inbound_id = id,
+                        "inbound session established"
+                    );
                     let _ = events
                         .send(RuntimeEvent::Inbound {
                             id,
                             phase: TransportPhase::Connected,
                         })
                         .await;
-                    let _ = session.closed().await;
+                    let reason = session.closed().await;
+                    tracing::debug!(
+                        stage = "transport",
+                        inbound_id = id,
+                        ?reason,
+                        "inbound session closed"
+                    );
                     TransportPhase::Disconnected
                 }
-                Err(AcceptError::Unauthorized) => TransportPhase::Rejected,
-                Err(AcceptError::Native(_)) => TransportPhase::Failed,
+                Err(AcceptError::Unauthorized) => {
+                    tracing::warn!(
+                        stage = "auth",
+                        inbound_id = id,
+                        "inbound credential rejected"
+                    );
+                    TransportPhase::Rejected
+                }
+                Err(AcceptError::Native(error)) => {
+                    tracing::warn!(
+                        stage = "transport",
+                        inbound_id = id,
+                        error = ?error,
+                        authentication = error.is_auth(),
+                        "inbound session setup failed"
+                    );
+                    TransportPhase::Failed
+                }
             };
             let _ = events.send(RuntimeEvent::Inbound { id, phase }).await;
         });

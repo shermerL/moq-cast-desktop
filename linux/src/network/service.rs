@@ -63,6 +63,11 @@ impl Services {
         let local_id = discovery.id().to_owned();
         let credential = discovery.credential().to_owned();
         let listener = server.listen().await?;
+        tracing::info!(
+            stage = "discovery",
+            listen_port = port,
+            "Nearby listener and discovery ready"
+        );
 
         Ok(Self {
             local_id,
