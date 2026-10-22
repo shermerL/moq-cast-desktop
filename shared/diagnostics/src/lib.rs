@@ -27,6 +27,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Metadata, Subscriber};
+use tracing_log::NormalizeEvent;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -275,8 +276,15 @@ where
     }
 
     fn on_event(&self, event: &Event<'_>, context: Context<'_, S>) {
+        // The log bridge stores the original target in fields; static metadata
+        // only says "log". Apply the same policy to the recovered source target.
+        let normalized = event.normalized_metadata();
+        let metadata = normalized.as_ref().unwrap_or_else(|| event.metadata());
+        if !self.filter.allows(metadata.level(), metadata.target()) {
+            return;
+        }
         let span_context =
-            if self.filter.detailed() && filter::quic_detail_target(event.metadata().target()) {
+            if self.filter.detailed() && filter::quic_detail_target(metadata.target()) {
                 quic_context::render(event, context)
             } else {
                 String::new()
@@ -302,9 +310,11 @@ fn format_event(
     detailed: bool,
     span_context: &str,
 ) -> Entry {
-    let metadata = event.metadata();
+    let normalized = event.normalized_metadata();
+    let metadata = normalized.as_ref().unwrap_or_else(|| event.metadata());
     let network_details = detailed
         && (filter::quic_detail_target(metadata.target())
+            || filter::mdns_detail_target(metadata.target())
             || filter::transport_detail_target(metadata.target())
             || [
                 "moqcast_macos::network",
@@ -315,7 +325,7 @@ fn format_event(
             ]
             .iter()
             .any(|prefix| target_matches(metadata.target(), prefix)));
-    let rendered = if opaque_dependency_target(metadata.target()) {
+    let rendered = if opaque_dependency_target(metadata.target()) && !network_details {
         "dependency warning details omitted".to_owned()
     } else {
         // Detailed LAN diagnosis needs the actual endpoint and error, including on
@@ -708,6 +718,116 @@ mod tests {
             .directory()
             .expect("test file diagnostics are available")
             .to_owned()
+    }
+
+    #[test]
+    fn mdns_log_bridge_preserves_receive_parse_cache_and_resolve_evidence() {
+        use std::io::Read as _;
+
+        for strict in [false, true] {
+            let directory = tempdir().unwrap();
+            let mut cfg = Config::new(Paths::for_test(directory.path()), BuildInfo::new("test"))
+                .with_stderr(false);
+            if strict {
+                cfg = cfg.with_private_location_redaction();
+            }
+            let (handle, worker, layer) = build(cfg);
+            let subscriber = Registry::default().with(layer);
+            tracing::subscriber::with_default(subscriber, || {
+                let emit = || {
+                    for (target, level, message) in [
+                        (
+                            "mdns_sd::service_daemon",
+                            tracing_log::log::Level::Debug,
+                            "handle_read: 200 bytes from 192.0.2.1 on if_index 7: response (0 questions 1 answers 0 authorities 6 additionals)",
+                        ),
+                        (
+                            "mdns_sd::dns_parser",
+                            tracing_log::log::Level::Trace,
+                            "read_rr_records: PTR _moqcast._sub._moq._udp.local.",
+                        ),
+                        (
+                            "mdns_sd::dns_cache",
+                            tracing_log::log::Level::Trace,
+                            "add_or_update: dropping new record not for us: _moqcast._sub._moq._udp.local. (type PTR)",
+                        ),
+                        (
+                            "mdns_sd::service_daemon",
+                            tracing_log::log::Level::Debug,
+                            "sent service resolved: fixture._moq._udp.local.",
+                        ),
+                        (
+                            "mdns_sd::dns_cache_extra",
+                            tracing_log::log::Level::Trace,
+                            "unrelated target",
+                        ),
+                        (
+                            "unrelated_dependency",
+                            tracing_log::log::Level::Debug,
+                            "unrelated debug",
+                        ),
+                    ] {
+                        tracing_log::format_trace(
+                            &tracing_log::log::Record::builder()
+                                .target(target)
+                                .level(level)
+                                .args(format_args!("{message}"))
+                                .build(),
+                        )
+                        .unwrap();
+                    }
+                };
+                emit();
+                assert!(handle.snapshot().entries().is_empty());
+                handle.set_detailed(true);
+                emit();
+                assert_eq!(
+                    handle.snapshot().entries().len(),
+                    4,
+                    "mDNS evidence was filtered before storage"
+                );
+                handle.set_detailed(false);
+                emit();
+                assert_eq!(handle.snapshot().entries().len(), 4);
+            });
+            let entries = handle.snapshot();
+            assert_eq!(entries.entries()[0].target(), "mdns_sd::service_daemon");
+            assert_eq!(entries.entries()[2].target(), "mdns_sd::dns_cache");
+            let destination = directory.path().join("mdns.zip");
+            handle.export(ExportRequest::new(&destination)).unwrap();
+            let mut archive = zip::ZipArchive::new(fs::File::open(destination).unwrap()).unwrap();
+            let mut file = String::new();
+            archive
+                .by_name("moqcast.log")
+                .unwrap()
+                .read_to_string(&mut file)
+                .unwrap();
+            assert_eq!(file.lines().count(), 4);
+            for expected in [
+                "192.0.2.1",
+                "1 answers",
+                "6 additionals",
+                "read_rr_records",
+                "dropping new record not for us",
+                "sent service resolved",
+            ] {
+                assert!(
+                    file.contains(expected),
+                    "missing {expected}, strict={strict}"
+                );
+            }
+            assert!(!file.contains("unrelated"));
+            assert!(!file.contains("details omitted"));
+            let mut environment = String::new();
+            archive
+                .by_name("environment.txt")
+                .unwrap()
+                .read_to_string(&mut environment)
+                .unwrap();
+            assert!(environment.contains("detailed=off"));
+            assert_eq!(handle.dropped_count(), 0);
+            drop(worker);
+        }
     }
 
     #[test]

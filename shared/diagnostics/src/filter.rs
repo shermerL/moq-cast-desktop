@@ -49,6 +49,9 @@ impl FilterPolicy {
         {
             return false;
         }
+        if self.detailed() && mdns_detail_target(target) {
+            return true;
+        }
         if self.detailed()
             && severity(level) <= severity(&Level::DEBUG)
             && transport_detail_target(target)
@@ -68,10 +71,17 @@ impl FilterPolicy {
 
     pub(crate) fn description(&self) -> String {
         format!(
-            "base=info; detailed={}; moq_tokio=warn; transport_details=debug_when_detailed; quic_details=trace_when_detailed; mdns_sd=warn",
+            "base=info; detailed={}; moq_tokio=warn; transport_details=debug_when_detailed; quic_details=trace_when_detailed; mdns_sd=warn; mdns_receive_parse_cache=trace_when_detailed",
             if self.detailed() { "on" } else { "off" }
         )
     }
+}
+
+pub(crate) fn mdns_detail_target(target: &str) -> bool {
+    matches!(
+        target,
+        "mdns_sd::service_daemon" | "mdns_sd::dns_parser" | "mdns_sd::dns_cache"
+    )
 }
 
 pub(crate) fn transport_detail_target(target: &str) -> bool {
