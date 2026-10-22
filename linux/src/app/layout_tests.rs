@@ -189,3 +189,31 @@ fn nearby_identity_is_visible_without_opening_details() {
     let out = render(&ctx, &mut app, &snapshot, egui::vec2(1040.0, 640.0), vec![]);
     assert!(painted(&out, "Device ID: remote-peer").is_positive());
 }
+
+#[test]
+fn rendering_after_nearby_off_does_not_restart_discovery() {
+    let (mut app, mut commands) = fixture();
+    app.send(UserCommand::StopDiscovery);
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(UserCommand::StopDiscovery)
+    ));
+    let ctx = egui::Context::default();
+    theme::configure(&ctx);
+    for page in [Page::Nearby, Page::ScreenShare, Page::Nearby] {
+        app.page = page;
+        render(
+            &ctx,
+            &mut app,
+            &AppSnapshot::default(),
+            egui::vec2(1040.0, 640.0),
+            vec![],
+        );
+    }
+    while let Ok(command) = commands.try_recv() {
+        assert!(!matches!(
+            command,
+            UserCommand::StartDiscovery | UserCommand::RetryDiscovery
+        ));
+    }
+}

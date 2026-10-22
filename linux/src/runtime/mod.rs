@@ -20,6 +20,15 @@ use crate::app::{AppSnapshot, UserCommand};
 
 const COMMAND_CAPACITY: usize = 32;
 
+fn startup_commands() -> (mpsc::Sender<UserCommand>, mpsc::Receiver<UserCommand>) {
+    let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+    // Queue before the owner starts so a subsequent user stop cannot be overtaken.
+    commands
+        .try_send(UserCommand::StartDiscovery)
+        .expect("the new command channel has capacity and a receiver");
+    (commands, receiver)
+}
+
 /// The latest decoded remote screen frame in tightly packed RGBA.
 #[derive(Clone)]
 pub(crate) struct PlaybackFrame {
@@ -110,7 +119,7 @@ impl RuntimeHandle {
             .enable_all()
             .build()
             .map_err(RuntimeStartError::AsyncRuntime)?;
-        let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
+        let (commands, command_rx) = startup_commands();
         let (snapshot_tx, snapshot) = watch::channel(Arc::new(AppSnapshot::default()));
         let (playback_tx, playback) = watch::channel(None);
         let owner = thread::Builder::new()
@@ -165,6 +174,24 @@ impl Drop for RuntimeHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_enqueues_nearby_once_before_user_commands() {
+        let (commands, mut receiver) = startup_commands();
+        commands.try_send(UserCommand::StopDiscovery).unwrap();
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(UserCommand::StartDiscovery)
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(UserCommand::StopDiscovery)
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
