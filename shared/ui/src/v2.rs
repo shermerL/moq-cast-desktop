@@ -1168,13 +1168,31 @@ pub fn volume_control(
             changed = Some(state.toggle_mute());
         }
         let mut percent = state.percent();
-        ui.spacing_mut().slider_width = 100.0;
-        ui.visuals_mut().selection.bg_fill = p.accent;
-        let response = ui.add(
-            egui::Slider::new(&mut percent, 0..=100)
-                .show_value(false)
-                .trailing_fill(true),
-        );
+        let response = ui
+            .scope(|ui| {
+                // Keep the audio hit area independent of the shell's 40px buttons.
+                ui.spacing_mut().slider_width = 100.0;
+                ui.spacing_mut().slider_rail_height = 4.0;
+                ui.spacing_mut().interact_size.y = 24.0;
+                ui.visuals_mut().selection.bg_fill = p.accent;
+                let widgets = &mut ui.visuals_mut().widgets;
+                widgets.inactive.bg_fill = p.border;
+                widgets.inactive.fg_stroke = Stroke::new(1.0, p.muted);
+                widgets.inactive.expansion = 0.0;
+                widgets.hovered.bg_fill = p.accent;
+                widgets.hovered.fg_stroke = Stroke::new(1.0, p.text);
+                widgets.hovered.expansion = 1.0;
+                widgets.active.bg_fill = p.accent;
+                widgets.active.fg_stroke = Stroke::new(2.0, p.text);
+                widgets.active.expansion = 1.0;
+                ui.add(
+                    egui::Slider::new(&mut percent, 0..=100)
+                        .show_value(false)
+                        .trailing_fill(true)
+                        .handle_shape(egui::style::HandleShape::Circle),
+                )
+            })
+            .inner;
         response.widget_info(|| {
             egui::WidgetInfo::slider(labels.enabled, percent as f64, labels.volume)
         });
@@ -1469,6 +1487,153 @@ pub fn source_row(ui: &mut Ui, label: &str, selected: bool, enabled: bool) -> Re
 #[cfg(test)]
 mod controls_contract_tests {
     use super::*;
+    #[test]
+    fn volume_slider_stays_compact_under_global_control_style() {
+        for dark in [false, true] {
+            let ctx = egui::Context::default();
+            install(&ctx);
+            ctx.set_theme(if dark {
+                egui::Theme::Dark
+            } else {
+                egui::Theme::Light
+            });
+            let mut state = crate::PlayerVolumeState::default();
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 160.0),
+                    )),
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        ui.horizontal(|ui| {
+                            volume_control(
+                                ui,
+                                &mut state,
+                                VolumeLabels {
+                                    mute: "Mute",
+                                    unmute: "Unmute",
+                                    volume: "Volume",
+                                    unavailable: "No audio",
+                                    enabled: true,
+                                },
+                            );
+                        });
+                        assert_eq!(ui.spacing().interact_size.y, 40.0);
+                    });
+                },
+            );
+            out.textures_delta.clear();
+            let handles: Vec<_> = out
+                .shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Circle(c) => Some(c),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(handles.len(), 1);
+            assert!(
+                handles[0].radius <= 10.0,
+                "oversized volume handle: {}",
+                handles[0].radius
+            );
+            assert!(out.shapes.iter().any(|s| matches!(&s.shape,
+                egui::Shape::Rect(r) if r.rect.width() > 80.0 && (r.rect.height() - 4.0).abs() < 0.1)));
+        }
+    }
+
+    #[test]
+    fn volume_slider_preserves_endpoint_input_and_disabled_state() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let mut state = crate::PlayerVolumeState::default();
+        let render = |state: &mut crate::PlayerVolumeState, enabled, events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 160.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        ui.horizontal(|ui| {
+                            volume_control(
+                                ui,
+                                state,
+                                VolumeLabels {
+                                    mute: "Mute",
+                                    unmute: "Unmute",
+                                    volume: "Volume",
+                                    unavailable: "No audio",
+                                    enabled,
+                                },
+                            );
+                        });
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        render(&mut state, true, vec![]);
+        let output = render(&mut state, true, vec![]);
+        let rail = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect)
+                    if rect.rect.width() > 80.0 && (rect.rect.height() - 4.0).abs() < 0.1 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .unwrap();
+        for (pos, expected) in [(rail.right_center(), 100), (rail.left_center(), 0)] {
+            for pressed in [true, false] {
+                render(
+                    &mut state,
+                    true,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            assert_eq!(state.percent(), expected);
+        }
+        state.set_percent(60);
+        render(&mut state, false, vec![]);
+        for pressed in [true, false] {
+            let pos = rail.left_center();
+            render(
+                &mut state,
+                false,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert_eq!(state.percent(), 60);
+    }
+
     #[test]
     fn volume_width_matches_the_actual_controls() {
         egui::__run_test_ui(|ui| {

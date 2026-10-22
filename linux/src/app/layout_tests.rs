@@ -167,3 +167,25 @@ fn shutdown_snapshot_disables_nearby_toggle_and_reports_progress() {
     }
     assert!(commands.try_recv().is_err());
 }
+
+#[test]
+fn nearby_identity_is_visible_without_opening_details() {
+    let (mut app, _commands) = fixture();
+    let mut snapshot = AppSnapshot::default();
+    snapshot.peers.insert(
+        "remote-peer".into(),
+        PeerSnapshot {
+            name: "Remote device".into(),
+            endpoints: vec![],
+            fingerprint_pinned: true,
+            dial_role: DialRole::Inbound,
+            discovery: PeerDiscoveryState::Found,
+            transport: TransportState::Waiting,
+            screen: ScreenAvailability::Unavailable,
+        },
+    );
+    let ctx = egui::Context::default();
+    theme::configure(&ctx);
+    let out = render(&ctx, &mut app, &snapshot, egui::vec2(1040.0, 640.0), vec![]);
+    assert!(painted(&out, "Device ID: remote-peer").is_positive());
+}

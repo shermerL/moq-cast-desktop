@@ -237,7 +237,11 @@ impl MoqCastApp {
                         v2::NearbyRow {
                             id: egui::Id::new(("peer", &peer.id)),
                             name: &peer_display_name(self.locale, index + 1),
-                            subtitle: "",
+                            subtitle: &format!(
+                                "{}: {}",
+                                remote_device_id_label(self.locale),
+                                peer.id
+                            ),
                             status,
                             tone,
                             current,
@@ -868,6 +872,27 @@ mod tests {
                 ],
             );
         }
+    }
+    #[test]
+    fn nearby_identity_is_visible_without_opening_details() {
+        let (mut app, _commands) = fixture();
+        app.snapshot.peers.insert(
+            "remote-peer".into(),
+            PeerView {
+                id: "remote-peer".into(),
+                candidates: vec![],
+                should_dial: false,
+                authenticated_discovery: false,
+                tls_pinned: true,
+                present: true,
+                transport: Default::default(),
+                screen: ScreenAvailability::Unavailable,
+            },
+        );
+        let ctx = egui::Context::default();
+        v2::install(&ctx);
+        let out = render(&ctx, &mut app, vec2(1040.0, 640.0), vec![]);
+        assert!(painted(&out, "Device ID: remote-peer").is_positive());
     }
     #[test]
     fn pages_and_settings_keep_real_actions_visible() {

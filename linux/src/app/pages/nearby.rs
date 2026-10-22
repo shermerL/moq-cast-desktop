@@ -80,7 +80,7 @@ pub(in crate::app) fn show(
                     v2::NearbyRow {
                         id: egui::Id::new(("v2-peer", id)),
                         name: &peer.name,
-                        subtitle: "",
+                        subtitle: &format!("{}: {id}", locale.text("设备 ID", "Device ID")),
                         status,
                         tone,
                         current,
