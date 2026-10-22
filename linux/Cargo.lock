@@ -3325,9 +3325,9 @@ dependencies = [
 
 [[package]]
 name = "moq-noq"
-version = "2.0.2"
+version = "2.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9f6a4bff164ee93937c76528b1183eb03a89158d4ffad9978ce02f92db18b42"
+checksum = "20d9d1334f556a15e60f6d406020fc3a40409335ae8a2ad472f6bf074a01acfa"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -3347,9 +3347,9 @@ dependencies = [
 
 [[package]]
 name = "moq-noq-proto"
-version = "2.0.2"
+version = "2.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01fe577f261bf4d7f84c35f81028db0d26d47f17c45c3df6a012504c1773c6a2"
+checksum = "50ac444c6c1ed18d45536cd939be7f0fd664996e79c0519119b13d6ae9d3d5e2"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
@@ -3376,9 +3376,9 @@ dependencies = [
 
 [[package]]
 name = "moq-noq-udp"
-version = "2.0.2"
+version = "2.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70a7c34996db77a509617f12db2d735ad5ca013e2d01293e0339afac331f17a7"
+checksum = "8e978cded333ca8a6d50b96a7a4388ccc8d98db51d89df7dbee598e9b849ee79"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -6755,9 +6755,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-moq"
-version = "2.0.2"
+version = "2.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c84f87ce8e1cfaa50e9f0dfe0f6e8de31c9905388d68ca7cde984375ffc4891"
+checksum = "5dc946e718371f88a79d849c352b6bdd95e0a36139e9b76818c1a101b45ed97a"
 dependencies = [
  "bytes",
  "futures",

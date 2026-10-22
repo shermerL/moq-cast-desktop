@@ -454,7 +454,6 @@ fn local_device_id_label(locale: Locale) -> &'static str {
     }
 }
 
-#[cfg(test)]
 fn remote_device_id_label(locale: Locale) -> &'static str {
     match locale {
         Locale::Chinese => "设备 ID",
