@@ -6,6 +6,7 @@ mod config;
 mod export;
 mod filter;
 mod output;
+mod quic_context;
 mod ring;
 mod worker;
 
@@ -27,6 +28,7 @@ use time::format_description::well_known::Rfc3339;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Metadata, Subscriber};
 use tracing_subscriber::layer::{Context, SubscriberExt};
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, Registry};
 
@@ -237,27 +239,73 @@ struct DiagnosticsLayer {
 
 impl<S> Layer<S> for DiagnosticsLayer
 where
-    S: Subscriber,
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
     fn enabled(&self, metadata: &Metadata<'_>, _context: Context<'_, S>) -> bool {
         self.filter.allows(metadata.level(), metadata.target())
     }
 
-    fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
-        let entry = format_event(event, self.redact_private_locations, self.filter.detailed());
+    fn on_new_span(
+        &self,
+        attributes: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        context: Context<'_, S>,
+    ) {
+        if self.filter.detailed()
+            && filter::quic_detail_target(attributes.metadata().target())
+            && let Some(span) = context.span(id)
+        {
+            let mut fields = quic_context::Fields::default();
+            attributes.record(&mut fields);
+            span.extensions_mut().insert(fields);
+        }
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        context: Context<'_, S>,
+    ) {
+        if let Some(span) = context.span(id)
+            && let Some(fields) = span.extensions_mut().get_mut::<quic_context::Fields>()
+        {
+            values.record(fields);
+        }
+    }
+
+    fn on_event(&self, event: &Event<'_>, context: Context<'_, S>) {
+        let span_context =
+            if self.filter.detailed() && filter::quic_detail_target(event.metadata().target()) {
+                quic_context::render(event, context)
+            } else {
+                String::new()
+            };
+        let entry = format_event(
+            event,
+            self.redact_private_locations,
+            self.filter.detailed(),
+            &span_context,
+        );
         self.ring.push(entry.clone());
         self.writer.write_line(entry.line.as_bytes());
     }
 
     fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
-        Some(tracing::level_filters::LevelFilter::DEBUG)
+        Some(tracing::level_filters::LevelFilter::TRACE)
     }
 }
 
-fn format_event(event: &Event<'_>, redact_private_locations: bool, detailed: bool) -> Entry {
+fn format_event(
+    event: &Event<'_>,
+    redact_private_locations: bool,
+    detailed: bool,
+    span_context: &str,
+) -> Entry {
     let metadata = event.metadata();
     let network_details = detailed
-        && (filter::transport_detail_target(metadata.target())
+        && (filter::quic_detail_target(metadata.target())
+            || filter::transport_detail_target(metadata.target())
             || [
                 "moqcast_macos::network",
                 "moqcast_windows::session",
@@ -288,6 +336,9 @@ fn format_event(event: &Event<'_>, redact_private_locations: bool, detailed: boo
         for (name, value) in visitor.fields {
             let _ = write!(rendered, " {name}={value}");
         }
+        if !span_context.is_empty() {
+            let _ = write!(rendered, " context={span_context}");
+        }
         rendered.finish()
     };
 
@@ -311,7 +362,7 @@ fn format_event(event: &Event<'_>, redact_private_locations: bool, detailed: boo
     let target = bounded_text(metadata.target(), MAX_CONTEXT_BYTES);
     let serialized = serde_json::to_string(&json!({
         "timestamp": timestamp,
-        "level": level.as_str(),
+        "level": metadata.level().as_str(),
         "target": target,
         "thread": thread,
         "event": rendered,
@@ -1082,3 +1133,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod quic_tests;

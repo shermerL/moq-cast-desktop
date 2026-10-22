@@ -40,6 +40,9 @@ impl FilterPolicy {
     }
 
     pub(crate) fn allows(&self, level: &Level, target: &str) -> bool {
+        if self.detailed() && quic_detail_target(target) {
+            return true;
+        }
         if self.private_targets_only
             && !matches_target(target, DETAILED_TARGETS)
             && !matches_target(target, WARN_CAPPED_TARGETS)
@@ -65,7 +68,7 @@ impl FilterPolicy {
 
     pub(crate) fn description(&self) -> String {
         format!(
-            "base=info; detailed={}; moq_tokio=warn; transport_details=debug_when_detailed; mdns_sd=warn",
+            "base=info; detailed={}; moq_tokio=warn; transport_details=debug_when_detailed; quic_details=trace_when_detailed; mdns_sd=warn",
             if self.detailed() { "on" } else { "off" }
         )
     }
@@ -80,6 +83,17 @@ pub(crate) fn transport_detail_target(target: &str) -> bool {
             | "moq_tokio::client"
             | "moq_tokio::mdns"
     )
+}
+
+pub(crate) fn quic_detail_target(target: &str) -> bool {
+    matches!(
+        target,
+        "moq_noq::endpoint"
+            | "moq_noq::connection"
+            | "moq_noq_proto::endpoint"
+            | "moq_noq_udp"
+            | "moq_noq_udp::imp"
+    ) || matches_target(target, &["moq_noq_proto::connection"])
 }
 
 fn matches_target(target: &str, allowed: &[&str]) -> bool {
