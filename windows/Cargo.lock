@@ -3298,6 +3298,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "file-rotate",
+ "same-file",
  "serde_json",
  "thiserror 2.0.20",
  "time",
