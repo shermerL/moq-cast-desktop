@@ -196,6 +196,13 @@ jobs:
           LINUXDEPLOY="$RUNNER_TEMP/appimage-tools/linuxdeploy" \
           ./scripts/build-appimage.sh
 
+      - name: Verify portable AppImage checksum
+        shell: bash
+        run: |
+          for package in linux/target/package/*.AppImage; do
+            bash linux/scripts/check-appimage-checksum.sh "$package"
+          done
+
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
         with:
