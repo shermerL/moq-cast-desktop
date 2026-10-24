@@ -596,6 +596,20 @@ pub(crate) struct RuntimeOwner {
 }
 
 impl RuntimeOwner {
+    #[cfg(test)]
+    pub(crate) fn isolated_for_ui_test() -> (Self, impl FnMut() -> bool) {
+        // Layout fixtures record commands without advertising or opening media sessions.
+        let (commands, mut receiver) = mpsc::channel(COMMAND_CAPACITY);
+        let owner = Self {
+            commands,
+            system_events: mpsc::unbounded_channel().0,
+            snapshot: watch::channel(Arc::new(AppSnapshot::default())).1,
+            frames: watch::channel(None).1,
+            owner: None,
+        };
+        (owner, move || receiver.try_recv().is_ok())
+    }
+
     pub(crate) fn start(
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, RuntimeStartError> {
@@ -760,10 +774,30 @@ async fn run(
 
     'runtime: loop {
         if suspended {
-            match wait_while_suspended(&mut commands, &mut system_events).await {
-                SuspendedAction::Resume => {
+            match wait_while_suspended(&mut commands, &mut system_events, true).await {
+                SuspendedAction::Resume { restart_network } => {
                     suspended = false;
                     snapshot.runtime.begin(RuntimePhase::Ready);
+                    if !restart_network {
+                        mark_network_stopped(&mut snapshot);
+                        publish_snapshot(&snapshot_tx, &snapshot, &wake);
+                        tracing::info!("keeping Nearby network services off after system wake");
+                        match wait_while_network_stopped(
+                            &mut commands,
+                            &mut system_events,
+                            &mut snapshot,
+                            &snapshot_tx,
+                            &wake,
+                        )
+                        .await
+                        {
+                            StoppedAction::Restart => continue,
+                            StoppedAction::Shutdown => {
+                                stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
+                                return;
+                            }
+                        }
+                    }
                     tracing::info!("resuming Nearby network services after system wake");
                 }
                 SuspendedAction::Shutdown => {
@@ -963,7 +997,7 @@ enum RecoveryAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SuspendedAction {
-    Resume,
+    Resume { restart_network: bool },
     Shutdown,
 }
 
@@ -1051,9 +1085,12 @@ async fn wait_while_network_stopped(
             RecoveryAction::Restart => return StoppedAction::Restart,
             RecoveryAction::Suspend => {
                 suspend_snapshot(snapshot, snapshot_tx, wake);
-                match wait_while_suspended(commands, system_events).await {
-                    SuspendedAction::Resume => {
+                match wait_while_suspended(commands, system_events, false).await {
+                    SuspendedAction::Resume { restart_network } => {
                         snapshot.runtime.begin(RuntimePhase::Ready);
+                        if restart_network {
+                            return StoppedAction::Restart;
+                        }
                         mark_network_stopped(snapshot);
                         publish_snapshot(snapshot_tx, snapshot, wake);
                         tracing::info!("keeping Nearby network services off after system wake");
@@ -1070,18 +1107,33 @@ async fn wait_while_network_stopped(
 async fn wait_while_suspended(
     commands: &mut mpsc::Receiver<RuntimeCommand>,
     system_events: &mut mpsc::UnboundedReceiver<SystemEvent>,
+    mut restart_network: bool,
 ) -> SuspendedAction {
+    let mut resumed = false;
     loop {
-        tokio::select! {
-            command = commands.recv() => match command {
-                Some(RuntimeCommand::Shutdown) | None => return SuspendedAction::Shutdown,
-                Some(RuntimeCommand::RestartNetwork) => {}
-                Some(_) => tracing::debug!("ignored media command while the runtime is suspended"),
-            },
-            Some(event) = system_events.recv() => match event {
-                SystemEvent::Resume => return SuspendedAction::Resume,
-                SystemEvent::Suspend => {}
-            },
+        let command = if resumed {
+            // Apply already queued intent before waking the network, independent of select order.
+            match commands.try_recv() {
+                Ok(command) => Some(command),
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    return SuspendedAction::Resume { restart_network };
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => return SuspendedAction::Shutdown,
+            }
+        } else {
+            tokio::select! {
+                command = commands.recv() => command,
+                Some(event) = system_events.recv() => {
+                    resumed = event == SystemEvent::Resume;
+                    continue;
+                },
+            }
+        };
+        match command {
+            Some(RuntimeCommand::Shutdown) | None => return SuspendedAction::Shutdown,
+            Some(RuntimeCommand::RestartNetwork) => restart_network = true,
+            Some(RuntimeCommand::StopNetwork) => restart_network = false,
+            Some(_) => tracing::debug!("ignored media command while the runtime is suspended"),
         }
     }
 }
@@ -3124,5 +3176,276 @@ mod tests {
             snapshot.share_selection.as_ref().map(ShareSelection::label),
             Some("Display 7")
         );
+    }
+}
+
+#[cfg(test)]
+mod suspended_nearby_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Poll;
+
+    struct PendingStart {
+        dropped: Arc<AtomicUsize>,
+        stop_on_drop: Option<mpsc::Sender<RuntimeCommand>>,
+        resume_on_drop: Option<mpsc::UnboundedSender<SystemEvent>>,
+    }
+
+    impl Drop for PendingStart {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+            if let Some(commands) = &self.stop_on_drop {
+                commands.try_send(RuntimeCommand::StopNetwork).unwrap();
+            }
+            if let Some(events) = &self.resume_on_drop {
+                events.send(SystemEvent::Resume).unwrap();
+            }
+        }
+    }
+
+    struct Harness {
+        commands: mpsc::Sender<RuntimeCommand>,
+        events: mpsc::UnboundedSender<SystemEvent>,
+        snapshot: watch::Receiver<Arc<AppSnapshot>>,
+        attempts: Arc<AtomicUsize>,
+        dropped: Arc<AtomicUsize>,
+        owner: Pin<Box<dyn Future<Output = ()>>>,
+    }
+
+    impl Harness {
+        fn new(stop_during_teardown: bool) -> Self {
+            let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
+            let (events, event_rx) = mpsc::unbounded_channel();
+            let (snapshots, snapshot) = watch::channel(Arc::new(AppSnapshot::default()));
+            let (frames, _) = watch::channel(None);
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let start: NetworkStart = Arc::new({
+                let attempts = attempts.clone();
+                let dropped = dropped.clone();
+                let commands = commands.clone();
+                let events = events.clone();
+                move || {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    let guard = PendingStart {
+                        dropped: dropped.clone(),
+                        stop_on_drop: (stop_during_teardown && attempt == 0)
+                            .then(|| commands.clone()),
+                        resume_on_drop: (stop_during_teardown && attempt == 0)
+                            .then(|| events.clone()),
+                    };
+                    Box::pin(async move {
+                        let _guard = guard;
+                        std::future::pending().await
+                    })
+                }
+            });
+            Self {
+                commands,
+                events,
+                snapshot,
+                attempts,
+                dropped,
+                owner: Box::pin(run(
+                    command_rx,
+                    event_rx,
+                    snapshots,
+                    frames,
+                    start,
+                    Arc::new(|| {}),
+                )),
+            }
+        }
+
+        async fn settle(&mut self) {
+            // Poll the real owner until its channels/start future are pending; no clock or sleeps.
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(self.owner.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+        }
+
+        fn command(&self, command: RuntimeCommand) {
+            self.commands.try_send(command).unwrap();
+        }
+
+        fn event(&self, event: SystemEvent) {
+            self.events.send(event).unwrap();
+        }
+
+        fn assert_off(&self, attempts: usize) {
+            let snapshot = self.snapshot.borrow();
+            assert_eq!(
+                self.attempts.load(Ordering::SeqCst),
+                attempts,
+                "Nearby was started despite Off intent"
+            );
+            assert_eq!(snapshot.runtime.phase(), RuntimePhase::Ready);
+            assert_eq!(snapshot.discovery.phase(), DiscoveryPhase::Stopped);
+            assert_eq!(snapshot.session.phase(), SessionPhase::Stopped);
+            assert_eq!(snapshot.media.phase(), MediaPhase::Idle);
+            assert!(snapshot.local_peer_id.is_none());
+            assert!(snapshot.peers.is_empty() && snapshot.remote_screens.is_empty());
+        }
+
+        async fn shutdown(mut self) {
+            let attempts = self.attempts.load(Ordering::SeqCst);
+            self.command(RuntimeCommand::Shutdown);
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(self.owner.as_mut().poll(cx)))
+                    .await
+                    .is_ready()
+            );
+            assert_eq!(
+                self.snapshot.borrow().runtime.phase(),
+                RuntimePhase::Stopped
+            );
+            assert_eq!(
+                self.attempts.load(Ordering::SeqCst),
+                attempts,
+                "shutdown must not restart the network"
+            );
+            assert_eq!(self.dropped.load(Ordering::SeqCst), attempts);
+        }
+    }
+
+    #[tokio::test]
+    async fn off_while_suspended_survives_resume_and_explicit_reenable() {
+        let mut h = Harness::new(false);
+        h.settle().await;
+        h.event(SystemEvent::Suspend);
+        h.settle().await;
+        assert_eq!(h.snapshot.borrow().runtime.phase(), RuntimePhase::Suspended);
+        assert_eq!(h.dropped.load(Ordering::SeqCst), 1);
+        h.command(RuntimeCommand::StopNetwork);
+        h.settle().await;
+        h.event(SystemEvent::Resume);
+        h.settle().await;
+        h.assert_off(1);
+        h.event(SystemEvent::Resume);
+        h.settle().await;
+        h.assert_off(1);
+        h.command(RuntimeCommand::RestartNetwork);
+        h.settle().await;
+        assert_eq!(h.attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            h.snapshot.borrow().discovery.phase(),
+            DiscoveryPhase::Starting
+        );
+        h.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn off_arriving_during_start_teardown_survives_queued_resume() {
+        let mut h = Harness::new(true);
+        h.settle().await;
+        // Dropping the pending start queues Off and Resume before the suspend wait starts.
+        h.event(SystemEvent::Suspend);
+        h.settle().await;
+        h.assert_off(1);
+        h.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn resume_applies_already_queued_off_without_starting_network() {
+        let mut h = Harness::new(false);
+        h.settle().await;
+        h.event(SystemEvent::Suspend);
+        h.settle().await;
+        h.event(SystemEvent::Resume);
+        h.command(RuntimeCommand::StopNetwork);
+        h.settle().await;
+        h.assert_off(1);
+        h.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn suspended_commands_keep_the_last_nearby_intent() {
+        for enabled in [false, true] {
+            let mut h = Harness::new(false);
+            h.settle().await;
+            h.event(SystemEvent::Suspend);
+            h.settle().await;
+            let commands = if enabled {
+                [RuntimeCommand::StopNetwork, RuntimeCommand::RestartNetwork]
+            } else {
+                [RuntimeCommand::RestartNetwork, RuntimeCommand::StopNetwork]
+            };
+            for command in commands {
+                h.command(command);
+            }
+            h.settle().await;
+            h.event(SystemEvent::Resume);
+            h.settle().await;
+            if enabled {
+                assert_eq!(h.attempts.load(Ordering::SeqCst), 2);
+            } else {
+                h.assert_off(1);
+            }
+            h.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn stopped_nearby_can_be_enabled_during_suspension() {
+        let mut h = Harness::new(false);
+        h.settle().await;
+        h.command(RuntimeCommand::StopNetwork);
+        h.settle().await;
+        h.assert_off(1);
+        h.event(SystemEvent::Suspend);
+        h.settle().await;
+        h.command(RuntimeCommand::RestartNetwork);
+        h.settle().await;
+        assert_eq!(
+            h.attempts.load(Ordering::SeqCst),
+            1,
+            "must not start while suspended"
+        );
+        h.event(SystemEvent::Resume);
+        h.settle().await;
+        assert_eq!(h.attempts.load(Ordering::SeqCst), 2);
+        h.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn normal_resume_restarts_once_and_off_before_suspend_stays_off() {
+        for enabled in [false, true] {
+            let mut h = Harness::new(false);
+            h.settle().await;
+            if !enabled {
+                h.command(RuntimeCommand::StopNetwork);
+                h.settle().await;
+            }
+            h.event(SystemEvent::Suspend);
+            h.settle().await;
+            h.event(SystemEvent::Suspend);
+            h.event(SystemEvent::Resume);
+            h.settle().await;
+            if enabled {
+                assert_eq!(h.attempts.load(Ordering::SeqCst), 2);
+            } else {
+                h.assert_off(1);
+            }
+            h.event(SystemEvent::Resume);
+            h.settle().await;
+            assert_eq!(
+                h.attempts.load(Ordering::SeqCst),
+                if enabled { 2 } else { 1 }
+            );
+            h.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_while_suspended_does_not_restart_on_wake() {
+        let mut h = Harness::new(false);
+        h.settle().await;
+        h.event(SystemEvent::Suspend);
+        h.settle().await;
+        h.command(RuntimeCommand::StopNetwork);
+        h.event(SystemEvent::Resume);
+        h.shutdown().await;
     }
 }

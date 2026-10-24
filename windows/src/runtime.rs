@@ -349,6 +349,7 @@ impl RuntimeSnapshot {
                 && matches!(
                     peer.transport.phase,
                     TransportPhaseView::Waiting
+                        | TransportPhaseView::Connecting
                         | TransportPhaseView::Failed
                         | TransportPhaseView::Disconnected
                 )
@@ -360,6 +361,9 @@ impl RuntimeSnapshot {
             return None;
         }
         let current = self.peers.get_mut(peer)?;
+        if current.transport.phase == TransportPhaseView::Connecting {
+            return Some(current.transport.generation);
+        }
         let generation = current.transport.generation.saturating_add(1);
         current.transport = TransportView {
             generation,
@@ -530,6 +534,23 @@ pub(crate) struct RuntimeOwner {
 }
 
 impl RuntimeOwner {
+    #[cfg(test)]
+    pub(crate) fn isolated_for_ui_test(
+        snapshots: watch::Receiver<RuntimeSnapshot>,
+    ) -> (Self, mpsc::Receiver<RuntimeCommand>) {
+        let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        let (_, playback) = watch::channel(None);
+        (
+            Self {
+                commands,
+                snapshots,
+                playback,
+                thread: None,
+            },
+            receiver,
+        )
+    }
+
     pub(crate) fn start(config: RuntimeConfig) -> Result<Self, RuntimeStartError> {
         let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (snapshot_tx, snapshots) = watch::channel(RuntimeSnapshot::default());
@@ -673,6 +694,7 @@ impl ServiceOwner {
         let Some(generation) = self.lifecycle.begin_start() else {
             return;
         };
+        tracing::info!(generation, "starting Nearby services");
         snapshot.begin_scan();
         let _ = snapshots.send(snapshot.clone());
         let config = config.clone();
@@ -702,6 +724,7 @@ impl ServiceOwner {
                 let listener = services.sessions.advertisement().addr.to_string();
                 let local_id = sanitize_identity(services.discovery.id());
                 snapshot.started_scan(listener, local_id);
+                tracing::info!(generation, "Nearby listener and discovery ready");
                 self.services = Some(services);
             }
             Ok(services) => {
@@ -713,12 +736,17 @@ impl ServiceOwner {
             Err(message) if self.lifecycle.accepts(generation) => {
                 self.lifecycle.fail(generation);
                 snapshot.failed_scan(message);
+                tracing::warn!(generation, reason = message, "Nearby startup failed");
             }
             Err(_) => {}
         }
     }
 
     async fn stop(&mut self, snapshot: &mut RuntimeSnapshot) {
+        tracing::info!(
+            generation = self.lifecycle.generation,
+            "stopping Nearby services"
+        );
         let prior_error = snapshot.last_error;
         self.lifecycle.stop();
         let mut errors = crate::cleanup::Errors::default();
@@ -746,6 +774,8 @@ impl ServiceOwner {
         if let Err(error) = errors.finish() {
             tracing::error!(%error, "LAN cleanup failed");
             snapshot.failed_scan("LAN cleanup failed. Check the logs.");
+        } else {
+            tracing::info!("Nearby services stopped");
         }
     }
 
@@ -873,6 +903,19 @@ async fn run(
                         let raw_id = peer.id.clone();
                         let key = sanitize_identity(&raw_id);
                         let change = services.registry.found(&peer, should_dial);
+                        tracing::debug!(
+                            generation,
+                            should_dial,
+                            peer_id = %raw_id,
+                            addresses = ?peer.addrs,
+                            address_count = peer.addrs.len(),
+                            registry_changed = matches!(
+                                change,
+                                RegistryChange::Added(_) | RegistryChange::Updated(_)
+                            ),
+                            ignored_self = matches!(change, RegistryChange::IgnoredSelf),
+                            "Nearby discovery delivered Found"
+                        );
                         services.raw_peers.insert(key.clone(), peer);
                         snapshot.apply_registry(change);
                         if should_dial {
@@ -891,6 +934,13 @@ async fn run(
                         let key = sanitize_identity(&raw_id);
                         services.raw_peers.remove(&key);
                         snapshot.apply_registry(services.registry.lost(&raw_id));
+                        tracing::debug!(
+                            generation,
+                            present_peers = snapshot.present_peer_count(),
+                            retained_peers = snapshot.peers.len(),
+                            peer_id = %raw_id,
+                            "Nearby discovery delivered Lost"
+                        );
                     }
                     _ => {}
                 }
@@ -1503,6 +1553,11 @@ fn apply_session_update(snapshot: &mut RuntimeSnapshot, update: TransportUpdate)
                 }
             };
             snapshot.set_inbound_session_count(count);
+            tracing::info!(
+                inbound_sessions = count,
+                phase = ?update.state.phase(),
+                "Nearby inbound session state changed"
+            );
         }
     }
 }
@@ -1655,6 +1710,21 @@ mod tests {
         snapshot.local_id = Some("stale-local".into());
         snapshot.inbound_sessions = 5;
         assert!(!snapshot.access().publish());
+    }
+
+    #[test]
+    fn connecting_peer_accepts_address_refresh_without_advancing_ui_generation() {
+        let mut snapshot = RuntimeSnapshot::default();
+        snapshot.apply_registry(RegistryChange::Added(peer("peer", "moqt://one:4443")));
+        let first = snapshot.begin_auto_connect("peer").unwrap();
+        let mut updated = peer("peer", "moqt://one:4443");
+        updated.candidates.push("moqt://two:4443".into());
+        snapshot.apply_registry(RegistryChange::Updated(updated));
+        assert_eq!(
+            snapshot.begin_auto_connect("peer"),
+            Some(first),
+            "new discovery addresses must reach the dial owner while connecting"
+        );
     }
 
     #[test]
@@ -2136,7 +2206,7 @@ mod tests {
         snapshot.apply_registry(RegistryChange::Added(peer("peer", "moqt://one:4443")));
         assert!(snapshot.should_auto_connect("peer"));
         snapshot.begin_auto_connect("peer");
-        assert!(!snapshot.should_auto_connect("peer"));
+        assert!(snapshot.should_auto_connect("peer"));
         snapshot.apply_transport(
             "peer",
             TransportView {

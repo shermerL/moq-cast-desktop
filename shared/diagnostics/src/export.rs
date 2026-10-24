@@ -2,6 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use same_file::Handle;
 use thiserror::Error;
 use time::OffsetDateTime;
 use zip::write::SimpleFileOptions;
@@ -92,18 +93,23 @@ pub(crate) fn export(
     if destination_overlaps_logs(log_dir, &destination, &logs) {
         return Err(ExportError::DestinationOverlapsLog);
     }
-    let file = create_archive(&destination, owner_only_file_permissions)?;
+    // Keep the checked inputs open so path replacement cannot change what we copy.
+    let sources = logs
+        .iter()
+        .map(Handle::from_path)
+        .collect::<io::Result<Vec<_>>>()?;
+    let file = create_archive(&destination, owner_only_file_permissions, &sources)?;
     let mut archive = ZipWriter::new(file);
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Stored)
         .unix_permissions(0o600);
 
-    for path in &logs {
+    for (path, source) in logs.iter().zip(&sources) {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
         archive.start_file(name, options)?;
-        let mut source = File::open(path)?;
+        let mut source = source.as_file();
         io::copy(&mut source, &mut archive)?;
     }
     archive.start_file("environment.txt", options)?;
@@ -118,17 +124,23 @@ pub(crate) fn export(
     })
 }
 
-fn create_archive(path: &Path, owner_only: bool) -> io::Result<File> {
+fn create_archive(path: &Path, owner_only: bool, sources: &[Handle]) -> Result<File, ExportError> {
     #[cfg(not(unix))]
     let _ = owner_only;
     let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
+    // Inspect the opened file, not its path, before any destructive operation.
+    options.create(true).truncate(false).write(true);
     #[cfg(unix)]
     if owner_only {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
     let file = options.open(path)?;
+    let destination = Handle::from_file(file.try_clone()?)?;
+    if sources.contains(&destination) {
+        return Err(ExportError::DestinationOverlapsLog);
+    }
+    file.set_len(0)?;
     #[cfg(unix)]
     if owner_only {
         use std::os::unix::fs::PermissionsExt as _;
@@ -365,6 +377,146 @@ mod tests {
 
         assert_eq!(fs::read_to_string(active).unwrap(), "current\n");
         assert_eq!(fs::read_to_string(rotated).unwrap(), "older\n");
+    }
+
+    #[test]
+    fn archive_open_rejects_hard_links_without_changing_source_bytes() {
+        for name in [ACTIVE_LOG_NAME, "moqcast.log.1"] {
+            let directory = tempdir().unwrap();
+            let source = directory.path().join(name);
+            let destination = directory.path().join("export.zip");
+            fs::write(&source, "preserve this log\n").unwrap();
+            fs::hard_link(&source, &destination).unwrap();
+
+            let sources = [Handle::from_path(&source).unwrap()];
+            let result = create_archive(&destination, true, &sources);
+            assert_eq!(fs::read(&source).unwrap(), b"preserve this log\n");
+            assert!(matches!(result, Err(ExportError::DestinationOverlapsLog)));
+        }
+    }
+
+    #[test]
+    fn export_rejects_hard_link_destinations_and_preserves_all_logs() {
+        for alias_name in [ACTIVE_LOG_NAME, "moqcast.log.1"] {
+            for owner_only in [false, true] {
+                let directory = tempdir().unwrap();
+                let active = directory.path().join(ACTIVE_LOG_NAME);
+                let rotated = directory.path().join("moqcast.log.1");
+                fs::write(&active, "current\n").unwrap();
+                fs::write(&rotated, "older\n").unwrap();
+                let destination = directory.path().join("export.zip");
+                fs::hard_link(directory.path().join(alias_name), &destination).unwrap();
+
+                let result = export(
+                    directory.path(),
+                    &BuildInfo::new("test"),
+                    false,
+                    owner_only,
+                    "info",
+                    0,
+                    ExportRequest::new(&destination),
+                );
+                assert!(matches!(result, Err(ExportError::DestinationOverlapsLog)));
+                assert_eq!(fs::read(&active).unwrap(), b"current\n");
+                assert_eq!(fs::read(&rotated).unwrap(), b"older\n");
+            }
+        }
+    }
+
+    #[test]
+    fn archive_open_rechecks_identity_after_destination_replacement() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join(ACTIVE_LOG_NAME);
+        let destination = directory.path().join("export.zip");
+        fs::write(&source, "original log\n").unwrap();
+        fs::write(&destination, "old archive").unwrap();
+        let logs = collect_logs(directory.path()).unwrap();
+        assert!(!destination_overlaps_logs(
+            directory.path(),
+            &destination,
+            &logs
+        ));
+        let sources = [Handle::from_path(&source).unwrap()];
+
+        // Replace the target after the path check; the source handle remains authoritative.
+        fs::rename(&destination, directory.path().join("previous.zip")).unwrap();
+        fs::hard_link(&source, &destination).unwrap();
+        fs::rename(&source, directory.path().join("moved.log")).unwrap();
+        fs::write(&source, "replacement log\n").unwrap();
+
+        let result = create_archive(&destination, true, &sources);
+        assert!(matches!(result, Err(ExportError::DestinationOverlapsLog)));
+        assert_eq!(fs::read(&destination).unwrap(), b"original log\n");
+        assert_eq!(fs::read(&source).unwrap(), b"replacement log\n");
+    }
+
+    #[test]
+    fn export_replaces_independent_archive_without_touching_logs() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join(ACTIVE_LOG_NAME);
+        let destination = directory.path().join("export.zip");
+        fs::write(&source, "keep log\n").unwrap();
+        fs::write(&destination, vec![b'x'; 4096]).unwrap();
+        export(
+            directory.path(),
+            &BuildInfo::new("test"),
+            false,
+            false,
+            "info",
+            0,
+            ExportRequest::new(&destination),
+        )
+        .unwrap();
+        let file = File::open(&destination).unwrap();
+        assert!(file.metadata().unwrap().len() < 4096);
+        let mut archive = ZipArchive::new(file).unwrap();
+        let mut content = String::new();
+        archive
+            .by_name(ACTIVE_LOG_NAME)
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
+        assert_eq!(content, "keep log\n");
+        assert_eq!(fs::read(&source).unwrap(), b"keep log\n");
+    }
+
+    #[test]
+    fn failed_destination_open_preserves_logs() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join(ACTIVE_LOG_NAME);
+        fs::write(&source, "keep log\n").unwrap();
+        let result = export(
+            directory.path(),
+            &BuildInfo::new("test"),
+            false,
+            false,
+            "info",
+            0,
+            ExportRequest::new(directory.path().join("missing/export.zip")),
+        );
+        assert!(matches!(result, Err(ExportError::Io(_))));
+        assert_eq!(fs::read(&source).unwrap(), b"keep log\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_rejects_symlink_alias_without_touching_log() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join(ACTIVE_LOG_NAME);
+        fs::write(&source, "keep log\n").unwrap();
+        let destination = directory.path().join("export.zip");
+        std::os::unix::fs::symlink(&source, &destination).unwrap();
+        let result = export(
+            directory.path(),
+            &BuildInfo::new("test"),
+            false,
+            true,
+            "info",
+            0,
+            ExportRequest::new(&destination),
+        );
+        assert!(matches!(result, Err(ExportError::DestinationOverlapsLog)));
+        assert_eq!(fs::read(&source).unwrap(), b"keep log\n");
     }
 
     #[cfg(unix)]

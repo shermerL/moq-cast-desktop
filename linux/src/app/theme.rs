@@ -7,7 +7,7 @@ pub(super) fn configure(context: &egui::Context) {
         context,
         std::borrow::Cow::Borrowed(moqcast_ui::NOTO_SANS_SC),
     );
-    moqcast_ui::Theme.apply(context);
+    moqcast_ui::v2::install(context);
 }
 
 #[cfg(test)]

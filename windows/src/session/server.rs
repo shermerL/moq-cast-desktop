@@ -101,19 +101,35 @@ pub(super) async fn run_listener(
         };
         inbound_id = inbound_id.saturating_add(1);
         let id = inbound_id;
+        tracing::debug!(
+            stage = "transport",
+            inbound_id = id,
+            "inbound request reached application authorization"
+        );
         let events = events.clone();
         let credential = credential.clone();
         let origins = origins.clone();
         sessions.spawn(async move {
             match accept(request, &credential, origins).await {
                 Ok(session) => {
+                    tracing::debug!(
+                        stage = "transport",
+                        inbound_id = id,
+                        "inbound session established"
+                    );
                     let _ = events
                         .send(RuntimeEvent::Inbound {
                             id,
                             phase: TransportPhase::Connected,
                         })
                         .await;
-                    let _ = session.closed().await;
+                    let reason = session.closed().await;
+                    tracing::debug!(
+                        stage = "transport",
+                        inbound_id = id,
+                        ?reason,
+                        "inbound session closed"
+                    );
                     let _ = events
                         .send(RuntimeEvent::Inbound {
                             id,
@@ -122,6 +138,11 @@ pub(super) async fn run_listener(
                         .await;
                 }
                 Err(AcceptError::Unauthorized) => {
+                    tracing::warn!(
+                        stage = "auth",
+                        inbound_id = id,
+                        "inbound credential rejected"
+                    );
                     let _ = events
                         .send(RuntimeEvent::Inbound {
                             id,
@@ -129,7 +150,14 @@ pub(super) async fn run_listener(
                         })
                         .await;
                 }
-                Err(AcceptError::Native(_)) => {
+                Err(AcceptError::Native(error)) => {
+                    tracing::warn!(
+                        stage = "transport",
+                        inbound_id = id,
+                        error = ?error,
+                        authentication = error.is_auth(),
+                        "inbound session setup failed"
+                    );
                     let _ = events
                         .send(RuntimeEvent::Inbound {
                             id,

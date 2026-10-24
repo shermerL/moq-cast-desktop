@@ -4,7 +4,7 @@
 
 当前 Windows 桌面端已经包含 W1/W2 发现与安全会话基础、deterministic mesh、共享 Origin、单路屏幕发布，以及远端 screen catalog 订阅和 Live Player。Nearby 根据上游 `should_dial` 自动直连，不提供手动 Connect/Disconnect；短暂 mDNS Lost 不会拆除健康 QUIC session。屏幕发布固定使用 `moqcast.screen/<local-peer-id>`，观看与发布互斥，停止媒体不会拆除 mesh。
 
-界面内置 `assets/fonts/NotoSansSC-Regular.otf` 作为 proportional 与 monospace 的最低优先级简体中文 fallback，不替换默认拉丁字体。字体采用 SIL Open Font License，许可证见 `assets/fonts/LICENSE-NOTO`。
+界面由 shared-ui 内嵌 Noto Sans SC，统一中文与英文正文，默认字重400；等宽日志保留等宽字体并使用中文后备。字体与 SIL Open Font License 见 `../shared/ui/assets/fonts/`。
 
 屏幕发布使用上游 moq-video 的 Windows Graphics Capture（WGC）与 H.264。WGC 要求 Windows 10 2004（build 19041）或更新系统及受支持的图形设备；旧系统会明确拒绝采集，不回退到 Desktop Duplication/GDI。默认兼容模式保持显示器原生尺寸，最长边不超过 1920，并由 `Auto` 优先选择 Media Foundation、在硬件 encoder 打开失败时尝试 OpenH264；该兼容规则不新增宽高比限制。可选的原生 QHD 模式当前只接受横屏 2560x1440，并强制使用硬件 H.264；应用在开始共享时验证显示器尺寸和 encoder，失败会明确结束本次发布，绝不降级到 OpenH264。当前应用策略仍不提供竖屏 QHD、4K 或缩放模式；更换采集后端不自动扩大已验证的编码策略。
 
@@ -34,7 +34,7 @@ cargo run -- --bind "[::]:0" --secret-file C:\path\to\lan-secret.txt
 
 文件内容必须是 32 字节 secret 的 64 位十六进制编码。应用日志和 UI snapshot 不会输出 secret、peer credential 或完整 TLS fingerprint。
 
-即使 `RUST_LOG` 请求 debug/trace，应用也会把 `moq_tokio` 与 `mdns_sd` 限制到 warn，防止底层 DNS-SD 调试日志打印 TXT fingerprint、nonce 或 credential 派生材料。
+普通日志将 `moq_tokio` 与 `mdns_sd` 限制到 warn。设置中开启详细诊断后，允许 `moq_tokio` 的连接、客户端、服务端、QUIC 与 mDNS 适配层输出 INFO/DEBUG，保留原始错误及端点信息；`mdns_sd` 仍不启用底层 TXT 调试输出。
 
 ## 验证
 
@@ -53,6 +53,12 @@ macOS 上的纯逻辑测试不会编译或运行 WASAPI、WGC、Media Foundation
 
 三端消费者锁文件使用 `mdns-sd 0.21.4`，包括冲突改名后的 goodbye 修复。这不能代替跨重启身份管理，也不保证所有网络环境都能连接。
 
+## UI v2 开发候选
+
+UI v2 候选复用 shared-ui 的主题、品牌、页头、设备行、弹层与播放器。观看从附近设备进入，返回列表不停止播放；WGC 来源页保持屏幕/窗口切换、刷新和启动前校验，开始/停止区固定。设置保留日志导出、语言及跟随系统/浅色/深色。系统音频沿用既有采集行为，不显示无效的可编辑开关。
+
+Mac 主机上的 UI/状态测试不覆盖 Windows WGC、WASAPI、GPU 或原生窗口；目标编译、125%/150%/200% DPI、全屏和媒体回归仍须分别验收。
+
 ## Nearby 状态与操作权限
 
 设备发现、精确关联连接和可观看内容由[共享状态策略](../shared/lan-state/README.md)组合显示。单独 mDNS Lost 不会隐藏有效连接或广播；观看根据有效路由准入，不用无关设备的全局入站数量判断。本机 LAN 就绪后可开始共享并等待观看者，发布与观看仍互斥。关闭过程中禁止新的共享和观看。
@@ -62,3 +68,9 @@ macOS 上的纯逻辑测试不会编译或运行 WASAPI、WGC、Media Foundation
 关闭 LAN 时会等待出站连接循环和本应用拥有的清理任务退出；主动取消与任务异常分别处理。一个任务清理失败不会跳过其余资源，详细错误记录到日志，界面保留关闭异常。mDNS 的底层 daemon 退出仍不可等待，不能把应用任务结束等同于远端立即离线。
 
 启动期间也会处理关闭命令：尚未开始的构造不再执行；已经开始的构造保持所有权，返回后清理结果，期间保持“关闭中”。这避免主动丢弃旧版 mDNS 构造，但不修复其内部错误路径的清理缺口，也不新增 daemon 完全退出的保证。
+
+## LAN 地址刷新与诊断
+
+同一设备的拨号尚未完成时，发现新增地址会更新候选连接，沿用本轮原有截止时间；重复地址不重新计时，已建立的连接不因补充地址而被替换。凭据变化继续按身份替换处理，旧代次的结果不能覆盖新连接。
+
+联调前在设置中开启详细诊断，再开启附近设备。日志保留设备 ID、发现地址、刷新前后地址、连接代次、剩余预算、逐地址失败原文、握手阶段和连接关闭原因；正常模式不放开底层 DEBUG。入站编号只表示本机接纳的会话，不推断它属于某个 mDNS 设备。导出三端日志并提供操作时间，可对齐事件顺序；日志不能替代抓包或保证复现当时的网络环境。

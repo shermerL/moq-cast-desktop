@@ -90,7 +90,6 @@ impl PeerStates {
         ))
     }
 
-    #[cfg(test)]
     pub(super) fn get(&self, peer: &str) -> Option<TransportState> {
         self.states.get(peer).copied()
     }

@@ -1,168 +1,121 @@
-//! Local settings page.
-
+//! Shared settings presentation with Linux-owned diagnostics actions.
+use super::super::{Locale, diagnostics::DiagnosticsUi};
 use eframe::egui;
 use moqcast_diagnostics::FileStatus;
-use moqcast_ui::{
-    COLORS, SelectSpec, SettingRowSpec, Spacing, SwitchSpec, TypographyRole, major_section_break,
-    section_header, select, setting_row, switch, typography,
-};
-
-use super::super::Locale;
-use super::super::components;
-use super::super::diagnostics::DiagnosticsUi;
-
+use moqcast_ui::v2::{self, Action, ActionTone, StatusTone};
 pub(in crate::app) fn show(
     ui: &mut egui::Ui,
     locale: Locale,
-    developer_mode: &mut bool,
+    theme: &mut egui::ThemePreference,
+    developer: &mut bool,
     diagnostics: &mut DiagnosticsUi,
 ) -> Option<Locale> {
-    section_header(ui, locale.general(), None);
-    const LANGUAGES: [&str; 2] = ["简体中文", "English"];
-    let mut language_index = usize::from(locale == Locale::English);
-    setting_row(
-        ui,
-        SettingRowSpec::new(locale.language()).description(locale.language_hint()),
-        |ui| {
-            select(
-                ui,
-                &mut language_index,
-                SelectSpec::new(
-                    egui::Id::new("linux-settings-language"),
-                    locale.language(),
-                    &LANGUAGES,
-                )
-                .expect("the language list is not empty"),
-            )
-            .expect("the language selection is valid");
-        },
-    );
-    let selected = if language_index == 0 {
-        Locale::Chinese
-    } else {
-        Locale::English
-    };
-
-    major_section_break(ui);
-    section_header(ui, locale.advanced(), None);
-    let mut auto_watch = false;
-    setting_row(
-        ui,
-        SettingRowSpec::new(locale.auto_watch()).description(locale.auto_watch_hint()),
-        |ui| {
-            ui.horizontal(|ui| {
-                ui.label(typography(
-                    locale.temporarily_unavailable(),
-                    TypographyRole::Meta,
-                    COLORS.muted.into(),
-                ));
-                switch(
-                    ui,
-                    &mut auto_watch,
-                    SwitchSpec::new(locale.auto_watch()).enabled(false),
-                );
-            });
-        },
-    );
-    ui.separator();
-    let was_developer_mode = *developer_mode;
-    setting_row(
-        ui,
-        SettingRowSpec::new(locale.developer_mode()).description(locale.developer_mode_hint()),
-        |ui| {
-            switch(ui, developer_mode, SwitchSpec::new(locale.developer_mode()));
-        },
-    );
-    if was_developer_mode && !*developer_mode {
-        diagnostics.hide_window();
-    }
-
-    if *developer_mode {
-        major_section_break(ui);
-        section_header(
-            ui,
-            locale.diagnostics(),
-            Some(locale.diagnostics_local_hint()),
-        );
-
-        let mut detailed = diagnostics.detailed();
-        setting_row(
-            ui,
-            SettingRowSpec::new(locale.detailed_diagnostics())
-                .description(locale.detailed_diagnostics_hint()),
-            |ui| {
-                if switch(
-                    ui,
-                    &mut detailed,
-                    SwitchSpec::new(locale.detailed_diagnostics()),
-                )
-                .changed()
-                {
-                    diagnostics.set_detailed(detailed);
-                }
-            },
-        );
-
-        let mut visible = diagnostics.visible();
-        ui.separator();
-        setting_row(
-            ui,
-            SettingRowSpec::new(locale.show_logs()).description(locale.show_logs_hint()),
-            |ui| {
-                if switch(ui, &mut visible, SwitchSpec::new(locale.show_logs())).changed() {
-                    diagnostics.set_visible(visible);
-                }
-            },
-        );
-        ui.separator();
-        let file_available = match diagnostics.file_status() {
-            FileStatus::Available(_) => true,
-            FileStatus::Unavailable(reason) => {
-                ui.label(typography(
-                    locale.file_diagnostics_unavailable(&reason),
-                    TypographyRole::Help,
-                    COLORS.danger.into(),
-                ));
-                false
-            }
-        };
-        let file_summary = format!(
-            "{} · {}: {}",
-            if file_available {
-                locale.file_diagnostics_available()
-            } else {
-                locale.file_diagnostics_unavailable_short()
-            },
-            locale.dropped_diagnostics(),
-            diagnostics.dropped_count()
-        );
-        setting_row(
-            ui,
-            SettingRowSpec::new(locale.local_log_files()).description(&file_summary),
-            |ui| {
-                ui.horizontal(|ui| {
-                    if components::secondary_button(ui, locale.open_log_directory(), file_available)
-                        .clicked()
-                    {
-                        diagnostics.open_directory();
+    let mut selected = locale;
+    let height = (ui.ctx().content_rect().height() - 160.0)
+        .clamp(120.0, if *developer { 368.0 } else { 256.0 });
+    egui::ScrollArea::vertical()
+        .id_salt("v2-settings-content")
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+        .max_height(height)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            v2::settings_row(ui, locale.text("外观", "Appearance"), |ui| {
+                for (value, label) in [
+                    (egui::ThemePreference::Dark, locale.text("深色", "Dark")),
+                    (egui::ThemePreference::Light, locale.text("浅色", "Light")),
+                    (egui::ThemePreference::System, locale.text("系统", "System")),
+                ] {
+                    if ui.selectable_value(theme, value, label).changed() {
+                        ui.ctx().set_theme(*theme);
                     }
-                    if components::secondary_button(ui, locale.export_logs(), file_available)
-                        .clicked()
-                    {
-                        diagnostics.choose_export();
+                }
+            });
+            v2::settings_row(ui, locale.language(), |ui| {
+                egui::ComboBox::from_id_salt("v2-language")
+                    .selected_text(if selected == Locale::Chinese {
+                        "简体中文"
+                    } else {
+                        "English"
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut selected, Locale::Chinese, "简体中文");
+                        ui.selectable_value(&mut selected, Locale::English, "English");
+                    });
+            });
+            let available = matches!(diagnostics.file_status(), FileStatus::Available(_));
+            v2::settings_row(ui, locale.text("日志", "Logs"), |ui| {
+                if (Action {
+                    label: locale.export_logs(),
+                    size: egui::vec2(100.0, 40.0),
+                    enabled: available,
+                    tone: ActionTone::Neutral,
+                })
+                .show(ui)
+                .clicked()
+                {
+                    diagnostics.choose_export();
+                }
+                if (Action {
+                    label: locale.text("打开目录", "Open folder"),
+                    size: egui::vec2(100.0, 40.0),
+                    enabled: available,
+                    tone: ActionTone::Neutral,
+                })
+                .show(ui)
+                .clicked()
+                {
+                    diagnostics.open_directory();
+                }
+            });
+            if !available {
+                v2::notice(
+                    ui,
+                    StatusTone::Warning,
+                    locale.file_diagnostics_unavailable_short(),
+                );
+            }
+            if let Some(status) = diagnostics.localized_status(locale) {
+                ui.label(status);
+            }
+            let previous = *developer;
+            v2::settings_row(ui, locale.developer_mode(), |ui| {
+                ui.checkbox(developer, "")
+                    .on_hover_text(locale.developer_mode());
+            });
+            if previous && !*developer {
+                diagnostics.hide_window();
+            }
+            if *developer {
+                if diagnostics.dropped_count() > 0 {
+                    v2::notice(
+                        ui,
+                        StatusTone::Warning,
+                        &format!(
+                            "{}: {}",
+                            locale.text("已丢弃日志", "Dropped log entries"),
+                            diagnostics.dropped_count()
+                        ),
+                    );
+                }
+                let mut detailed = diagnostics.detailed();
+                v2::settings_row(ui, locale.detailed_diagnostics(), |ui| {
+                    if ui.checkbox(&mut detailed, "").changed() {
+                        diagnostics.set_detailed(detailed);
                     }
                 });
-            },
-        );
-        if let Some(status) = diagnostics.localized_status(locale) {
-            ui.add_space(Spacing::SM);
-            ui.label(typography(
-                status,
-                TypographyRole::Help,
-                COLORS.muted.into(),
-            ));
-        }
-    }
-
+                v2::settings_row(ui, locale.show_logs(), |ui| {
+                    if v2::action(
+                        ui,
+                        locale.text("打开日志", "Open logs"),
+                        egui::vec2(108.0, 40.0),
+                        true,
+                    )
+                    .clicked()
+                    {
+                        diagnostics.set_visible(true);
+                    }
+                });
+            }
+        });
     (selected != locale).then_some(selected)
 }

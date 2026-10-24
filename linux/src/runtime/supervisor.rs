@@ -247,6 +247,7 @@ struct PeerResources {
     retired: Vec<JoinHandle<()>>,
     session: Option<PeerSession>,
     connecting: Option<moq_tokio::Connection>,
+    attempt: Option<(crate::network::discovery::PeerRecord, tokio::time::Instant)>,
     pending: Option<JoinHandle<()>>,
     retry_budget: PeerRetryBudget,
     generation: u64,
@@ -260,6 +261,7 @@ impl PeerResources {
 
     fn close(&mut self) {
         self.advance();
+        self.attempt = None;
         if let Some(task) = self.pending.take() {
             task.abort();
             self.retired.push(task);
@@ -813,6 +815,67 @@ impl Supervisor {
     }
 
     fn ensure_outbound(&mut self, peer_id: &str, reset: bool) {
+        self.start_outbound(
+            peer_id,
+            reset,
+            tokio::time::Instant::now() + peer::RECONNECT_BUDGET,
+        );
+    }
+
+    async fn refresh_outbound(&mut self, peer_id: &str) {
+        let Some(record) = self
+            .discovery
+            .peers
+            .as_ref()
+            .and_then(|peers| peers.get(peer_id))
+        else {
+            return;
+        };
+        let Some(resources) = self.mesh.outbound.get_mut(peer_id) else {
+            return;
+        };
+        let Some((previous, deadline)) = resources.attempt.as_ref() else {
+            return;
+        };
+        if resources.session.is_some()
+            || resources
+                .connecting
+                .as_ref()
+                .is_none_or(|connection| connection.connected())
+            || previous.has_node
+            || record.has_node
+            || previous.credential != record.credential
+            || previous.fingerprint != record.fingerprint
+            || !record
+                .addrs
+                .iter()
+                .any(|addr| !previous.addrs.contains(addr))
+            || tokio::time::Instant::now() >= *deadline
+        {
+            return;
+        }
+        let deadline = *deadline;
+        tracing::debug!(
+            stage = "transport",
+            generation = resources.generation,
+            peer_id,
+            previous_addresses = ?previous.addrs,
+            addresses = ?record.addrs,
+            previous_address_count = previous.addrs.len(),
+            address_count = record.addrs.len(),
+            "refreshing pending peer addresses within original connection budget"
+        );
+        // Retire and join the old owner before opening its replacement. Its queued
+        // completion is ignored by the generation advanced here.
+        resources.close();
+        for task in resources.retired.drain(..) {
+            self.cleanup
+                .join("refreshed outbound owner", task.await, true);
+        }
+        self.start_outbound(peer_id, false, deadline);
+    }
+
+    fn start_outbound(&mut self, peer_id: &str, reset: bool, deadline: tokio::time::Instant) {
         let Some(record) = self
             .discovery
             .peers
@@ -849,15 +912,41 @@ impl Supervisor {
         let publish_origin = origins.publish.clone();
         let receive_origin = origins.receive.clone();
         let events = self.operation_tx.clone();
-        let dial = peer::dial(&record, &publish_origin, receive_origin);
+        // An expired refresh never creates a fresh retry budget or a new socket.
+        tracing::debug!(
+            stage = "transport",
+            generation,
+            peer_id,
+            addresses = ?record.addrs,
+            address_count = record.addrs.len(),
+            ipv4_count = record.addrs.iter().filter(|addr| addr.is_ipv4()).count(),
+            ipv6_count = record.addrs.iter().filter(|addr| addr.is_ipv6()).count(),
+            remaining_ms = deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .as_millis() as u64,
+            "starting outbound candidate set"
+        );
+        let dial = if tokio::time::Instant::now() >= deadline {
+            Err("peer connection setup budget exhausted".to_owned())
+        } else {
+            peer::dial(&record, &publish_origin, receive_origin).map_err(|error| error.to_string())
+        };
         peer_resources.connecting = dial.as_ref().ok().cloned();
+        peer_resources.attempt = Some((record, deadline));
         peer_resources.pending = Some(tokio::spawn(async move {
             let result = match dial {
-                Ok(connection) => connection
-                    .established()
-                    .await
-                    .map(PeerSession::Outbound)
-                    .map_err(|error| error.to_string()),
+                Ok(connection) => {
+                    match tokio::time::timeout_at(deadline, connection.clone().established()).await
+                    {
+                        Ok(result) => result
+                            .map(PeerSession::Outbound)
+                            .map_err(|error| error.to_string()),
+                        Err(_) => {
+                            connection.abort(moq_net::Error::Cancel);
+                            Err("peer connection setup budget exhausted".to_owned())
+                        }
+                    }
+                }
                 Err(error) => Err(error.to_string()),
             };
             let _ = events
@@ -1018,6 +1107,15 @@ impl Supervisor {
         }
         match event.kind {
             service::EventKind::Found { peer, should_dial } => {
+                tracing::debug!(
+                    stage = "discovery",
+                    generation = event.generation,
+                    peer_id = %peer.id,
+                    addresses = ?peer.addrs,
+                    address_count = peer.addrs.len(),
+                    should_dial,
+                    "Nearby discovery delivered Found"
+                );
                 let record = peer;
                 let peer_id = record.id.clone();
                 let Some(peers) = self.discovery.peers.as_mut() else {
@@ -1030,7 +1128,9 @@ impl Supervisor {
                         resources.session.is_some() || resources.pending.is_some()
                     });
                     let reset = reset_outbound_for(update, active);
-                    if reset || update == PeerUpdate::Added {
+                    if !reset && active && update == PeerUpdate::CandidatesMerged {
+                        self.refresh_outbound(&peer_id).await;
+                    } else if reset || update == PeerUpdate::Added {
                         self.ensure_outbound(&peer_id, reset);
                     }
                 } else {
@@ -1039,6 +1139,12 @@ impl Supervisor {
                 LoopAction::Changed
             }
             service::EventKind::Lost(id) => {
+                tracing::debug!(
+                    stage = "discovery",
+                    generation = event.generation,
+                    peer_id = %id,
+                    "Nearby discovery delivered Lost"
+                );
                 let Some(peers) = self.discovery.peers.as_mut() else {
                     return LoopAction::Unchanged;
                 };
@@ -1074,6 +1180,11 @@ impl Supervisor {
     }
 
     async fn accept_inbound(&mut self, request: moq_tokio::server::Request) -> LoopAction {
+        tracing::debug!(
+            stage = "transport",
+            generation = self.discovery.generation,
+            "inbound request reached application authorization"
+        );
         let Some(credential) = self
             .discovery
             .services
@@ -1103,6 +1214,11 @@ impl Supervisor {
         let SessionKey::Inbound(id) = key else {
             unreachable!()
         };
+        tracing::debug!(
+            stage = "transport",
+            inbound_id = id,
+            "inbound credential accepted"
+        );
         let resources = self.mesh.inbound.entry(id).or_default();
         let generation = resources.advance();
         let origins = self
@@ -1317,6 +1433,7 @@ impl Supervisor {
             }
             return LoopAction::Unchanged;
         };
+        resources.attempt = None;
         if let Some(task) = resources.pending.take() {
             resources.retired.push(task);
         }
@@ -2626,6 +2743,192 @@ mod tests {
                 },
             })
             .await;
+    }
+
+    #[tokio::test]
+    async fn late_reachable_candidate_connects_and_a_completed_handshake_is_not_replaced() {
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let server = crate::network::server::build().unwrap();
+        let addr: std::net::SocketAddr =
+            format!("127.0.0.1:{}", server.local_addr().unwrap().port())
+                .parse()
+                .unwrap();
+        let fingerprint = server
+            .certificates()
+            .fingerprints()
+            .into_iter()
+            .next()
+            .unwrap();
+        let accept = tokio::spawn(async move {
+            let publish = moq_tokio::origin::spawn();
+            let receive = moq_tokio::origin::spawn();
+            let mut listener = server.listen().await.unwrap();
+            let request = listener.accept().await.unwrap();
+            let session = crate::network::server::accept(request, "proof", &publish, receive)
+                .await
+                .unwrap();
+            (session, listener)
+        });
+        let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (mut supervisor, mut advert) = discovered_outbound();
+        advert.fingerprint = Some(fingerprint);
+        advert.addrs = vec![silent.local_addr().unwrap()];
+        advert.urls = vec![format!("moqt://{}", advert.addrs[0]).parse().unwrap()];
+        supervisor
+            .discovery
+            .peers
+            .as_mut()
+            .unwrap()
+            .found(advert.clone());
+        supervisor.ensure_outbound(&advert.id, true);
+        let deadline = supervisor.mesh.outbound[&advert.id]
+            .attempt
+            .as_ref()
+            .unwrap()
+            .1;
+        tokio::time::timeout_at(deadline, silent.recv(&mut [0; 2048]))
+            .await
+            .unwrap()
+            .unwrap();
+        advert.addrs.push(addr);
+        rediscover(&mut supervisor, advert.clone()).await;
+        let generation = supervisor.mesh.outbound[&advert.id].generation;
+        let connection = supervisor.mesh.outbound[&advert.id]
+            .connecting
+            .as_ref()
+            .unwrap()
+            .clone();
+        let _established = tokio::time::timeout_at(deadline, connection.clone().established())
+            .await
+            .unwrap()
+            .unwrap();
+        let (session, listener) = accept.await.unwrap();
+        // The observer's SessionReady is still queued, but the transport already won.
+        advert.addrs.push("127.0.0.1:9".parse().unwrap());
+        rediscover(&mut supervisor, advert.clone()).await;
+        assert_eq!(supervisor.mesh.outbound[&advert.id].generation, generation);
+        assert_eq!(
+            supervisor.mesh.outbound[&advert.id]
+                .attempt
+                .as_ref()
+                .unwrap()
+                .1,
+            deadline
+        );
+        assert!(connection.connected());
+        supervisor.stop_lan().await;
+        session.abort(moq_tokio::moq_net::Error::Cancel);
+        listener.close().await;
+    }
+
+    #[tokio::test]
+    async fn late_candidates_refresh_the_actual_pending_dial() {
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let (mut supervisor, mut advert) = discovered_outbound();
+        let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let second = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        advert.fingerprint = Some("00".repeat(32));
+        advert.addrs = vec![silent.local_addr().unwrap()];
+        advert.urls = vec![format!("moqt://{}", advert.addrs[0]).parse().unwrap()];
+        supervisor
+            .discovery
+            .peers
+            .as_mut()
+            .unwrap()
+            .found(advert.clone());
+        supervisor.ensure_outbound(&advert.id, true);
+        let before = supervisor.mesh.outbound[&advert.id].generation;
+        let deadline = supervisor.mesh.outbound[&advert.id]
+            .attempt
+            .as_ref()
+            .unwrap()
+            .1;
+        let old = supervisor.mesh.outbound[&advert.id]
+            .connecting
+            .as_ref()
+            .unwrap()
+            .clone();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            silent.recv(&mut [0; 2048]),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        advert.addrs.push(second.local_addr().unwrap());
+        rediscover(&mut supervisor, advert.clone()).await;
+        assert!(
+            supervisor.mesh.outbound[&advert.id].generation > before,
+            "new candidates stayed in registry instead of reaching the pending dial"
+        );
+        let refreshed = supervisor.mesh.outbound[&advert.id].generation;
+        assert_eq!(
+            supervisor.mesh.outbound[&advert.id]
+                .attempt
+                .as_ref()
+                .unwrap()
+                .1,
+            deadline
+        );
+        tokio::time::timeout_at(deadline, second.recv(&mut [0; 2048]))
+            .await
+            .unwrap()
+            .unwrap();
+        supervisor.session_ready(
+            SessionKey::Outbound(advert.id.clone()),
+            before,
+            Err("stale failure".into()),
+        );
+        assert_eq!(supervisor.mesh.outbound[&advert.id].generation, refreshed);
+        assert_eq!(
+            supervisor.state.peers[&advert.id].transport,
+            TransportState::Connecting
+        );
+        // Repeated/reordered candidates neither restart nor renew the attempt.
+        advert.addrs.reverse();
+        rediscover(&mut supervisor, advert.clone()).await;
+        assert_eq!(supervisor.mesh.outbound[&advert.id].generation, refreshed);
+        assert_eq!(
+            supervisor.mesh.outbound[&advert.id]
+                .attempt
+                .as_ref()
+                .unwrap()
+                .1,
+            deadline
+        );
+        let expired = tokio::time::Instant::now() - std::time::Duration::from_secs(1);
+        supervisor
+            .mesh
+            .outbound
+            .get_mut(&advert.id)
+            .unwrap()
+            .attempt
+            .as_mut()
+            .unwrap()
+            .1 = expired;
+        advert.addrs.push("127.0.0.1:9".parse().unwrap());
+        rediscover(&mut supervisor, advert.clone()).await;
+        assert_eq!(supervisor.mesh.outbound[&advert.id].generation, refreshed);
+        let current = supervisor.mesh.outbound[&advert.id]
+            .connecting
+            .as_ref()
+            .unwrap()
+            .clone();
+        supervisor.stop_lan().await;
+        for connection in [&old, &current] {
+            use std::{
+                future::Future,
+                task::{Context, Poll, Waker},
+            };
+            let mut closed = std::pin::pin!(connection.closed());
+            assert!(matches!(
+                closed
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Ready(_)
+            ));
+        }
+        let _ = old.closed().await;
     }
 
     #[tokio::test]

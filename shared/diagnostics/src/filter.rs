@@ -40,11 +40,23 @@ impl FilterPolicy {
     }
 
     pub(crate) fn allows(&self, level: &Level, target: &str) -> bool {
+        if self.detailed() && quic_detail_target(target) {
+            return true;
+        }
         if self.private_targets_only
             && !matches_target(target, DETAILED_TARGETS)
             && !matches_target(target, WARN_CAPPED_TARGETS)
         {
             return false;
+        }
+        if self.detailed() && mdns_detail_target(target) {
+            return true;
+        }
+        if self.detailed()
+            && severity(level) <= severity(&Level::DEBUG)
+            && transport_detail_target(target)
+        {
+            return true;
         }
         if matches_target(target, WARN_CAPPED_TARGETS) {
             return severity(level) <= severity(&Level::WARN);
@@ -59,10 +71,39 @@ impl FilterPolicy {
 
     pub(crate) fn description(&self) -> String {
         format!(
-            "base=info; detailed={}; moq_tokio=warn; mdns_sd=warn",
+            "base=info; detailed={}; moq_tokio=warn; transport_details=debug_when_detailed; quic_details=trace_when_detailed; mdns_sd=warn; mdns_receive_parse_cache=trace_when_detailed",
             if self.detailed() { "on" } else { "off" }
         )
     }
+}
+
+pub(crate) fn mdns_detail_target(target: &str) -> bool {
+    matches!(
+        target,
+        "mdns_sd::service_daemon" | "mdns_sd::dns_parser" | "mdns_sd::dns_cache"
+    )
+}
+
+pub(crate) fn transport_detail_target(target: &str) -> bool {
+    matches!(
+        target,
+        "moq_tokio::server"
+            | "moq_tokio::noq"
+            | "moq_tokio::connection"
+            | "moq_tokio::client"
+            | "moq_tokio::mdns"
+    )
+}
+
+pub(crate) fn quic_detail_target(target: &str) -> bool {
+    matches!(
+        target,
+        "moq_noq::endpoint"
+            | "moq_noq::connection"
+            | "moq_noq_proto::endpoint"
+            | "moq_noq_udp"
+            | "moq_noq_udp::imp"
+    ) || matches_target(target, &["moq_noq_proto::connection"])
 }
 
 fn matches_target(target: &str, allowed: &[&str]) -> bool {
@@ -116,6 +157,23 @@ mod tests {
 
         policy.set_detailed(true);
         assert!(policy.allows(&Level::DEBUG, "moqcast_macos::playback"));
+    }
+
+    #[test]
+    fn transport_detail_targets_require_detailed_mode() {
+        let policy = FilterPolicy::new(false, true);
+        for target in ["moq_tokio::server", "moq_tokio::noq"] {
+            assert!(!policy.allows(&Level::DEBUG, target));
+        }
+        policy.set_detailed(true);
+        for target in ["moq_tokio::server", "moq_tokio::noq"] {
+            assert!(policy.allows(&Level::DEBUG, target));
+            assert!(!policy.allows(&Level::TRACE, target));
+        }
+        assert!(policy.allows(&Level::DEBUG, "moq_tokio::connection"));
+        assert!(!policy.allows(&Level::DEBUG, "mdns_sd"));
+        policy.set_detailed(false);
+        assert!(!policy.allows(&Level::DEBUG, "moq_tokio::server"));
     }
 
     #[test]

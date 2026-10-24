@@ -858,35 +858,11 @@ impl PlaybackFrame {
             width > 0 && height > 0 && width.is_multiple_of(2) && height.is_multiple_of(2),
             "remote I420 frame dimensions must be non-zero and even"
         );
-        let i420 = frame.surface.into_i420()?.into_data();
-        let pixels = width
-            .checked_mul(height)
-            .ok_or_else(|| anyhow::anyhow!("remote frame dimensions overflow"))?;
-        anyhow::ensure!(
-            i420.len() == pixels * 3 / 2,
-            "remote I420 frame has an invalid length"
-        );
-        let mut rgba = Vec::with_capacity(pixels * 4);
-        let u_offset = pixels;
-        let v_offset = pixels + pixels / 4;
-        for y in 0..height {
-            for x in 0..width {
-                let luma = i32::from(i420[y * width + x]) - 16;
-                let chroma = (y / 2) * (width / 2) + x / 2;
-                let u = i32::from(i420[u_offset + chroma]) - 128;
-                let v = i32::from(i420[v_offset + chroma]) - 128;
-                let red = (298 * luma + 409 * v + 128) >> 8;
-                let green = (298 * luma - 100 * u - 208 * v + 128) >> 8;
-                let blue = (298 * luma + 516 * u + 128) >> 8;
-                rgba.extend_from_slice(&[
-                    red.clamp(0, 255) as u8,
-                    green.clamp(0, 255) as u8,
-                    blue.clamp(0, 255) as u8,
-                    255,
-                ]);
-            }
-        }
-        let (rgba, width, height) = orient_rgba(rgba, width, height, quarter_turns, flip);
+        let image = frame
+            .surface
+            .to_rgba(&moq_video::convert::Config::default())?;
+        let (rgba, width, height) =
+            orient_rgba(image.into_data(), width, height, quarter_turns, flip);
         let (display_width, display_height) = display.unwrap_or((width as u32, height as u32));
         Ok(Self {
             identity,
@@ -1287,5 +1263,146 @@ mod tests {
         assert_eq!(flipped[4], 1);
         assert_eq!(flipped[8], 4);
         assert_eq!(flipped[12], 3);
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod color_tests {
+    use super::*;
+    use moq_video::{Color, I420, Size, Surface};
+
+    fn converted(
+        size: Size,
+        data: Vec<u8>,
+        color: Option<Color>,
+        turns: u8,
+        flip: bool,
+    ) -> PlaybackFrame {
+        let mut surface = I420::new(size, data).unwrap();
+        if let Some(color) = color {
+            surface = surface.with_color(color);
+        }
+        let identity = PlaybackFrameIdentity {
+            view_generation: 7,
+            decoder_generation: 3,
+            sequence: 19,
+        };
+        let timestamp = moq_tokio::moq_net::Timestamp::from_micros(123_456).unwrap();
+        let result = PlaybackFrame::from_video(
+            moq_video::Frame::new(Surface::I420(surface), timestamp),
+            identity,
+            Some((640, 360)),
+            turns,
+            flip,
+        )
+        .unwrap();
+        assert_eq!(result.identity, identity);
+        assert_eq!((result.display_width, result.display_height), (640, 360));
+        assert_eq!(result.timestamp_us, 123_456);
+        result
+    }
+
+    fn uniform(size: Size, y: u8, u: u8, v: u8) -> Vec<u8> {
+        let pixels = size.width as usize * size.height as usize;
+        let mut data = vec![y; pixels];
+        data.extend(vec![u; pixels / 4]);
+        data.extend(vec![v; pixels / 4]);
+        data
+    }
+
+    fn assert_pixel(frame: &PlaybackFrame, expected: [u8; 4]) {
+        for pixel in frame.rgba.chunks_exact(4) {
+            for (actual, expected) in pixel.iter().zip(expected) {
+                assert!(
+                    actual.abs_diff(expected) <= 2,
+                    "pixel {pixel:?}, expected {expected:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_range_preserves_dark_and_light_gray() {
+        let size = Size::new(2, 2);
+        for color in [Color::Bt601Full, Color::Bt709Full] {
+            for y in [16, 235] {
+                let result = converted(size, uniform(size, y, 128, 128), Some(color), 0, false);
+                assert_pixel(&result, [y, y, y, 255]);
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_matrix_controls_saturated_red() {
+        let size = Size::new(2, 2);
+        for (color, y, u, v) in [
+            (Color::Bt601Limited, 81, 90, 240),
+            (Color::Bt709Limited, 63, 102, 240),
+            (Color::Bt601Full, 76, 85, 255),
+            (Color::Bt709Full, 54, 99, 255),
+        ] {
+            let result = converted(size, uniform(size, y, u, v), Some(color), 0, false);
+            assert_pixel(&result, [255, 0, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn limited_range_preserves_black_and_white() {
+        let size = Size::new(2, 2);
+        for color in [Color::Bt601Limited, Color::Bt709Limited] {
+            for (y, expected) in [(16, 0), (235, 255)] {
+                let result = converted(size, uniform(size, y, 128, 128), Some(color), 0, false);
+                assert_pixel(&result, [expected, expected, expected, 255]);
+            }
+        }
+    }
+
+    #[test]
+    fn missing_color_uses_library_sd_hd_fallback() {
+        for (size, y, u, v) in [
+            (Size::new(2, 2), 81, 90, 240),
+            (Size::new(2, 578), 63, 102, 240),
+        ] {
+            let result = converted(size, uniform(size, y, u, v), None, 0, false);
+            assert_pixel(&result, [255, 0, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn conversion_preserves_orientation_and_frame_metadata() {
+        let size = Size::new(2, 4);
+        let mut data = vec![32, 64, 96, 128, 160, 192, 208, 224];
+        data.extend([128; 4]);
+        let plain = converted(size, data.clone(), Some(Color::Bt601Full), 0, false);
+        // Fixed asymmetric landmarks check all rotations and the existing platform flip order.
+        let expected = [
+            [[0, 1, 2, 3, 4, 5, 6, 7], [1, 0, 3, 2, 5, 4, 7, 6]],
+            [[6, 4, 2, 0, 7, 5, 3, 1], [0, 2, 4, 6, 1, 3, 5, 7]],
+            [[7, 6, 5, 4, 3, 2, 1, 0], [6, 7, 4, 5, 2, 3, 0, 1]],
+            [[1, 3, 5, 7, 0, 2, 4, 6], [7, 5, 3, 1, 6, 4, 2, 0]],
+        ];
+        for (turns, orientations) in expected.iter().enumerate() {
+            for (flip, expected) in orientations.iter().enumerate() {
+                let result = converted(
+                    size,
+                    data.clone(),
+                    Some(Color::Bt601Full),
+                    turns as u8,
+                    flip != 0,
+                );
+                let dims = if turns % 2 == 0 { (2, 4) } else { (4, 2) };
+                assert_eq!((result.width, result.height), dims);
+                for (pixel, source_index) in result.rgba.chunks_exact(4).zip(expected) {
+                    let offset = source_index * 4;
+                    assert_eq!(pixel, &plain.rgba[offset..offset + 4]);
+                }
+                assert!(
+                    result
+                        .rgba
+                        .chunks_exact(4)
+                        .all(|p| p[0] == p[1] && p[1] == p[2] && p[3] == 255)
+                );
+            }
+        }
     }
 }

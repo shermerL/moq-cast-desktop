@@ -5,18 +5,18 @@ use std::time::Duration;
 use eframe::egui::{
     self, Align, Color32, Event, Layout, Rect, Sense, TextureHandle, ViewportCommand,
 };
+use moqcast_ui::v2;
+use moqcast_ui::v2::PLAYER_VOLUME_CONTROL_WIDTH;
 use moqcast_ui::{
-    ButtonSpec, COLORS, ControlRole, IconButtonSpec, PLAYER_VOLUME_CONTROL_WIDTH, PlayerAudioState,
-    PlayerFrameSample, PlayerInfoLocale, PlayerInfoSnapshot, PlayerInfoState, PlayerVolumeState,
-    Size, TypographyRole, control_button, player_icon_button, player_info_control, player_rects,
-    player_stage_at, player_toolbar_at, player_volume_control, typography,
+    COLORS, PlayerAudioState, PlayerFrameSample, PlayerInfoLocale, PlayerInfoSnapshot,
+    PlayerInfoState, PlayerVolumeState, Size, TypographyRole, typography,
 };
 
 use super::{Locale, RemoteAudioPhase, RemoteAudioSnapshot, RemoteVideoSnapshot};
 
 const FALLBACK_SOURCE: egui::Vec2 = egui::vec2(16.0, 9.0);
 const CONTROLS_HIDE_AFTER: f64 = 2.8;
-const CONTROL_BUTTON_WIDTH: f32 = 108.0;
+const CONTROL_BUTTON_WIDTH: f32 = 156.0;
 const COMPACT_CONTROL_BUTTON_WIDTH: f32 = 92.0;
 const CONTROL_GAP: f32 = Size::PLAYER_TOOLBAR_ITEM_SPACING;
 
@@ -35,9 +35,10 @@ fn player_layout(
     let source = source
         .filter(|size| valid_size(*size))
         .unwrap_or(FALLBACK_SOURCE);
-    let surface = player_rects(Rect::from_min_size(egui::Pos2::ZERO, available), fullscreen)
-        .stage
-        .size();
+    let surface =
+        moqcast_ui::v2::player_rects(Rect::from_min_size(egui::Pos2::ZERO, available), fullscreen)
+            .stage
+            .size();
     let scale = (surface.x / source.x).min(surface.y / source.y);
     let image = source * scale;
 
@@ -198,7 +199,7 @@ impl LivePlayer {
         self.volume.sync_generation(playback.generation);
         let fullscreen = self.fullscreen.active();
         let available = ui.available_rect_before_wrap();
-        let rects = player_rects(available, fullscreen);
+        let rects = moqcast_ui::v2::player_rects(available, fullscreen);
         let layout = player_layout(
             texture.map(TextureHandle::size_vec2),
             available.size(),
@@ -237,7 +238,7 @@ impl LivePlayer {
             rects.stage.union(rects.toolbar)
         };
         ui.allocate_rect(occupied, Sense::hover());
-        player_stage_at(ui, rects.stage, |_| ());
+        ui.painter().rect_filled(rects.stage, 0, Color32::BLACK);
         if let Some(texture) = texture {
             let image = Rect::from_center_size(rects.stage.center(), layout.image);
             ui.painter().image(
@@ -247,12 +248,23 @@ impl LivePlayer {
                 Color32::WHITE,
             );
         } else {
-            ui.scope_builder(egui::UiBuilder::new().max_rect(rects.stage), |ui| {
-                ui.centered_and_justified(|ui| ui.spinner());
+            let rect = Rect::from_center_size(rects.stage.center(), egui::vec2(28.0, 28.0));
+            ui.put(
+                rect,
+                egui::Spinner::new()
+                    .size(28.0)
+                    .color(Color32::from_gray(165)),
+            )
+            .widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::ProgressIndicator,
+                    true,
+                    locale.waiting_for_first_frame(),
+                )
             });
         }
         let controls_active = if controls_visible {
-            player_toolbar_at(ui, rects.toolbar, |ui| {
+            v2::player_toolbar(ui, rects.toolbar, |ui| {
                 show_controls(
                     ui,
                     ControlContext {
@@ -327,67 +339,45 @@ fn show_controls(ui: &mut egui::Ui, context: ControlContext<'_>, state: ControlS
         ui.horizontal(|ui| {
             if mode.viewing() {
                 live_badge(ui);
-            } else {
-                ui.spinner();
-                ui.label(typography(
-                    locale.preparing_view(),
-                    TypographyRole::Meta,
-                    COLORS.player_text.into(),
-                ));
             }
-            ui.label(typography(
-                mode.device(),
-                TypographyRole::Meta,
-                COLORS.player_text.into(),
-            ));
-            let resolution = texture
-                .map(|texture| {
-                    let [width, height] = texture.size();
-                    format!("{width} × {height}")
-                })
-                .unwrap_or_else(|| locale.waiting_for_first_frame().to_owned());
-            let audio = mode.audio();
-            let details = format!("{resolution} · {}", locale.remote_audio_status(audio.phase));
-            let color = if audio.phase == RemoteAudioPhase::Failed {
-                COLORS.danger
-            } else {
-                COLORS.player_muted
-            };
-            ui.add_sized(
-                ui.available_size(),
-                egui::Label::new(typography(details, TypographyRole::Meta, color.into()))
-                    .truncate(),
-            );
-        });
+        })
+        .response
+        .on_hover_text(mode.device());
     });
     let mut volume_active = false;
     ui.scope_builder(egui::UiBuilder::new().max_rect(actions), |ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let enabled = !mode.stopping();
             if mode.viewing()
-                && player_icon_button(
-                    ui,
-                    IconButtonSpec::player(
-                        "⛶",
-                        if fullscreen {
-                            locale.exit_fullscreen()
-                        } else {
-                            locale.enter_fullscreen()
-                        },
-                    )
-                    .enabled(enabled),
-                )
-                .clicked()
+                && ui
+                    .add_enabled_ui(enabled, |ui| {
+                        v2::icon_button(
+                            ui,
+                            v2::Icon::Fullscreen,
+                            if fullscreen {
+                                locale.exit_fullscreen()
+                            } else {
+                                locale.enter_fullscreen()
+                            },
+                        )
+                    })
+                    .inner
+                    .clicked()
             {
                 ui.ctx()
                     .send_viewport_cmd(ViewportCommand::Fullscreen(!fullscreen));
             }
-            if control_button(
-                ui,
-                ButtonSpec::new(locale.stop_watching(), ControlRole::PlayerIcon)
-                    .enabled(enabled)
-                    .min_width(row_layout.button_width),
-            )
+            if (v2::Action {
+                label: if row.width() < 520.0 {
+                    locale.text("停止", "Stop")
+                } else {
+                    locale.stop_watching()
+                },
+                size: egui::vec2(row_layout.button_width, 40.0),
+                enabled,
+                tone: v2::ActionTone::Danger,
+            })
+            .show(ui)
             .clicked()
             {
                 if fullscreen {
@@ -396,7 +386,7 @@ fn show_controls(ui: &mut egui::Ui, context: ControlContext<'_>, state: ControlS
                 }
                 *action = Some(PlayerAction::StopWatching);
             }
-            let info_response = player_info_control(
+            let info_response = v2::player_info_control(
                 ui,
                 info,
                 player_info_locale(locale),
@@ -404,17 +394,19 @@ fn show_controls(ui: &mut egui::Ui, context: ControlContext<'_>, state: ControlS
                 player_info_snapshot(playback, mode, texture, volume.muted()),
                 enabled,
             );
-            let volume_response = player_volume_control(
+            let changed = v2::volume_control(
                 ui,
                 volume,
-                audio_playable(mode.audio().phase) && enabled,
-                locale.mute(),
-                locale.unmute(),
-                locale.playback_volume(),
-                locale.playback_audio_unavailable(),
+                v2::VolumeLabels {
+                    mute: locale.mute(),
+                    unmute: locale.unmute(),
+                    volume: locale.playback_volume(),
+                    unavailable: locale.playback_audio_unavailable(),
+                    enabled: audio_playable(mode.audio().phase) && enabled,
+                },
             );
-            volume_active = info_response.active() || volume_response.active();
-            if let Some(percent) = volume_response.changed_percent() {
+            volume_active = info_response.active() || changed.is_some();
+            if let Some(percent) = changed {
                 *action = Some(PlayerAction::SetVolume {
                     generation: playback.generation,
                     percent,
@@ -520,8 +512,8 @@ mod tests {
             false,
         );
 
-        assert_size(layout.surface, egui::vec2(880.0, 495.0));
-        assert_size(layout.image, layout.surface);
+        assert_size(layout.surface, egui::vec2(1000.0, 636.0));
+        assert_size(layout.image, egui::vec2(1000.0, 562.5));
     }
 
     #[test]
@@ -532,8 +524,8 @@ mod tests {
             false,
         );
 
-        assert_size(layout.surface, egui::vec2(880.0, 495.0));
-        assert_size(layout.image, egui::vec2(278.437_5, 495.0));
+        assert_size(layout.surface, egui::vec2(1000.0, 636.0));
+        assert_size(layout.image, egui::vec2(357.75, 636.0));
     }
 
     #[test]
@@ -544,9 +536,9 @@ mod tests {
             false,
         );
 
-        assert!((layout.surface.x - 263.111_1).abs() < 0.001);
-        assert_eq!(layout.surface.y, 148.0);
-        assert_size(layout.image, layout.surface);
+        assert_eq!(layout.surface.x, 500.0);
+        assert_eq!(layout.surface.y, 136.0);
+        assert_size(layout.image, egui::vec2(241.777_79, 136.0));
     }
 
     #[test]
@@ -559,7 +551,7 @@ mod tests {
         );
 
         assert_eq!(missing, invalid);
-        assert_size(missing.surface, egui::vec2(800.0, 450.0));
+        assert_size(missing.surface, egui::vec2(800.0, 536.0));
     }
 
     #[test]
@@ -575,9 +567,9 @@ mod tests {
             false,
         );
 
-        assert_size(landscape.surface, egui::vec2(420.0, 236.25));
+        assert_size(landscape.surface, egui::vec2(420.0, 336.0));
         assert_size(portrait.surface, landscape.surface);
-        assert_size(portrait.image, egui::vec2(132.890_63, 236.25));
+        assert_size(portrait.image, egui::vec2(189.0, 336.0));
     }
 
     #[test]
@@ -585,8 +577,8 @@ mod tests {
         let layout = control_layout(360.0, true);
 
         assert_eq!(layout.button_width, COMPACT_CONTROL_BUTTON_WIDTH);
-        assert_eq!(layout.actions_width, 328.0);
-        assert_eq!(layout.info_width, 24.0);
+        assert_eq!(layout.actions_width, 344.0);
+        assert_eq!(layout.info_width, 8.0);
         assert_eq!(
             layout.info_width + CONTROL_GAP + layout.actions_width,
             360.0
@@ -641,9 +633,9 @@ mod tests {
     #[test]
     fn preparing_first_frame_and_watching_share_one_player_geometry() {
         let available = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(880.0, 600.0));
-        let preparing = player_rects(available, false);
-        let first_frame = player_rects(available, false);
-        let watching = player_rects(available, false);
+        let preparing = moqcast_ui::v2::player_rects(available, false);
+        let first_frame = moqcast_ui::v2::player_rects(available, false);
+        let watching = moqcast_ui::v2::player_rects(available, false);
 
         assert_eq!(preparing, first_frame);
         assert_eq!(first_frame, watching);

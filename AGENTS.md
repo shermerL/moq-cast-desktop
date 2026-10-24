@@ -30,6 +30,7 @@ Native screen sharing and playback for Windows, macOS, and Linux, built on MoQ.
 - Full compilation, tests, Clippy, and packaging default to GitHub CI. Perform necessary focused local checks and report checks not run.
 - Keep source inspection, local checks, CI results, packaged artifacts, and real-device validation distinct. CI success does not establish device acceptance.
 - Measure performance-sensitive changes under representative load instead of relying on intuition.
+- Local builds handed to the user for real-device testing must be optimized; default to the same release profile as CI. Unoptimized builds are for debugging or visual inspection only. Record the source state, build profile, and delivered binary hash; disclose any custom-profile differences from release.
 
 | Change | Also check |
 | --- | --- |

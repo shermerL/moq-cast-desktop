@@ -1,11 +1,10 @@
 //! Shared-system remote screen player surface and controls.
 
 use eframe::egui::{self, Align, Color32, Layout, Rect, Sense, TextureHandle, ViewportCommand};
+use moqcast_ui::v2::PLAYER_VOLUME_CONTROL_WIDTH;
 use moqcast_ui::{
-    ButtonSpec, COLORS, ControlRole, IconButtonSpec, PLAYER_VOLUME_CONTROL_WIDTH, PlayerAudioState,
-    PlayerFrameSample, PlayerInfoLocale, PlayerInfoSnapshot, PlayerInfoState, PlayerVolumeState,
-    Size, TypographyRole, control_button, player_icon_button, player_info_control, player_rects,
-    player_stage_at, player_toolbar_at, player_volume_control, typography,
+    COLORS, PlayerAudioState, PlayerFrameSample, PlayerInfoLocale, PlayerInfoSnapshot,
+    PlayerInfoState, PlayerVolumeState, Size, TypographyRole, typography,
 };
 
 use super::Locale;
@@ -13,7 +12,7 @@ use crate::playback::{AudioPhase, AudioSnapshot};
 use crate::runtime::MediaPhase;
 
 const FALLBACK_ASPECT: egui::Vec2 = egui::vec2(16.0, 9.0);
-const CONTROL_BUTTON_WIDTH: f32 = 108.0;
+const CONTROL_BUTTON_WIDTH: f32 = 156.0;
 const COMPACT_CONTROL_BUTTON_WIDTH: f32 = 92.0;
 const CONTROL_GAP: f32 = Size::PLAYER_TOOLBAR_ITEM_SPACING;
 
@@ -60,9 +59,10 @@ fn player_layout(
     let source = source
         .filter(|size| valid_size(*size))
         .unwrap_or(FALLBACK_ASPECT);
-    let surface = player_rects(Rect::from_min_size(egui::Pos2::ZERO, available), fullscreen)
-        .stage
-        .size();
+    let surface =
+        moqcast_ui::v2::player_rects(Rect::from_min_size(egui::Pos2::ZERO, available), fullscreen)
+            .stage
+            .size();
     let scale = (surface.x / source.x).min(surface.y / source.y);
     PlayerLayout {
         surface,
@@ -136,7 +136,7 @@ impl Player {
                 valid_extent(available.height()),
             ),
         );
-        let rects = player_rects(available, self.fullscreen);
+        let rects = moqcast_ui::v2::player_rects(available, self.fullscreen);
         let layout = player_layout(source, available.size(), self.fullscreen);
         let occupied = if self.fullscreen {
             rects.stage
@@ -144,7 +144,7 @@ impl Player {
             rects.stage.union(rects.toolbar)
         };
         ui.allocate_rect(occupied, Sense::hover());
-        player_stage_at(ui, rects.stage, |_| ());
+        ui.painter().rect_filled(rects.stage, 0, Color32::BLACK);
         paint_surface(ui, rects.stage, layout.image, view.texture);
         paint_status(ui, rects.stage, view.locale, view.phase);
         show_toolbar(
@@ -183,32 +183,36 @@ fn paint_status(ui: &mut egui::Ui, surface: Rect, locale: Locale, phase: MediaPh
     if phase == MediaPhase::Watching {
         return;
     }
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(surface));
-    child.centered_and_justified(|ui| {
-        ui.vertical_centered(|ui| {
-            if phase == MediaPhase::PreparingWatch {
-                ui.spinner();
-            }
-            ui.label(typography(
-                match (locale, phase) {
-                    (Locale::Chinese, MediaPhase::Stopping) => "正在停止观看",
-                    (Locale::English, MediaPhase::Stopping) => "Stopping playback",
-                    (Locale::Chinese, _) => "正在准备画面",
-                    (Locale::English, _) => "Preparing video",
-                },
-                TypographyRole::Section,
-                COLORS.player_text.into(),
-            ));
-            ui.label(typography(
+    if phase == MediaPhase::PreparingWatch {
+        let rect = Rect::from_center_size(surface.center(), egui::vec2(28.0, 28.0));
+        ui.put(
+            rect,
+            egui::Spinner::new()
+                .size(28.0)
+                .color(Color32::from_gray(165)),
+        )
+        .widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::ProgressIndicator,
+                true,
                 match locale {
-                    Locale::Chinese => "附近连接保持可用。",
-                    Locale::English => "The Nearby connection remains available.",
+                    Locale::Chinese => "等待画面",
+                    Locale::English => "Waiting for video",
                 },
-                TypographyRole::Meta,
-                COLORS.player_muted.into(),
-            ));
+            )
         });
-    });
+    } else {
+        ui.painter().text(
+            surface.center(),
+            egui::Align2::CENTER_CENTER,
+            match locale {
+                Locale::Chinese => "正在停止观看",
+                Locale::English => "Stopping playback",
+            },
+            egui::FontId::proportional(16.0),
+            Color32::from_gray(190),
+        );
+    }
 }
 
 fn show_toolbar(
@@ -221,111 +225,96 @@ fn show_toolbar(
 ) -> Option<PlayerAction> {
     let ToolbarState { info, volume } = state;
     let mut action = None;
-    player_toolbar_at(ui, toolbar, |ui| {
+    moqcast_ui::v2::player_toolbar(ui, toolbar, |ui| {
         let row_layout = control_layout(ui.available_width());
-        let (row, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), Size::CONTROL),
-            Sense::hover(),
-        );
-        let info_rect =
-            Rect::from_min_size(row.min, egui::vec2(row_layout.info_width, row.height()));
-        let actions = Rect::from_min_size(
-            egui::pos2(row.right() - row_layout.actions_width, row.top()),
-            egui::vec2(row_layout.actions_width, row.height()),
-        );
-        let mut info_ui = ui.new_child(egui::UiBuilder::new().max_rect(info_rect));
-        info_ui.horizontal(|ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
             if view.phase == MediaPhase::Watching {
                 live_badge(ui);
-            } else {
-                ui.label(typography(
-                    match (view.locale, view.phase) {
-                        (Locale::Chinese, MediaPhase::Stopping) => "正在停止",
-                        (Locale::English, MediaPhase::Stopping) => "Stopping",
-                        (Locale::Chinese, _) => "正在准备",
-                        (Locale::English, _) => "Preparing",
-                    },
-                    TypographyRole::Meta,
-                    COLORS.player_muted.into(),
-                ));
             }
-        });
-        let mut actions_ui = ui.new_child(egui::UiBuilder::new().max_rect(actions));
-        actions_ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let enabled = view.phase != MediaPhase::Stopping;
-            if player_icon_button(
-                ui,
-                IconButtonSpec::player(
-                    "⛶",
-                    match (view.locale, fullscreen) {
-                        (Locale::Chinese, true) => "退出全屏",
-                        (Locale::Chinese, false) => "全屏",
-                        (Locale::English, true) => "Exit fullscreen",
-                        (Locale::English, false) => "Fullscreen",
-                    },
-                )
-                .enabled(enabled),
-            )
-            .clicked()
-            {
-                ui.ctx()
-                    .send_viewport_cmd(ViewportCommand::Fullscreen(!fullscreen));
-            }
-            if control_button(
-                ui,
-                ButtonSpec::new(
-                    match view.locale {
-                        Locale::Chinese => "停止观看",
-                        Locale::English => "Stop watching",
-                    },
-                    ControlRole::PlayerIcon,
-                )
-                .enabled(enabled)
-                .min_width(row_layout.button_width),
-            )
-            .clicked()
-            {
-                if fullscreen {
-                    ui.ctx()
-                        .send_viewport_cmd(ViewportCommand::Fullscreen(false));
-                }
-                action = Some(PlayerAction::Stop);
-            }
-            let _ = player_info_control(
-                ui,
-                info,
-                player_info_locale(view.locale),
-                now,
-                player_info_snapshot(view, volume.muted()),
-                enabled,
-            );
-            let volume_response = player_volume_control(
+            let percent = moqcast_ui::v2::volume_control(
                 ui,
                 volume,
-                audio_playable(view.audio.phase) && enabled,
-                match view.locale {
-                    Locale::Chinese => "静音",
-                    Locale::English => "Mute",
-                },
-                match view.locale {
-                    Locale::Chinese => "取消静音",
-                    Locale::English => "Unmute",
-                },
-                match view.locale {
-                    Locale::Chinese => "播放音量",
-                    Locale::English => "Playback volume",
-                },
-                match view.locale {
-                    Locale::Chinese => "当前没有可播放音频",
-                    Locale::English => "No playable audio",
+                moqcast_ui::v2::VolumeLabels {
+                    mute: match view.locale {
+                        Locale::Chinese => "静音",
+                        Locale::English => "Mute",
+                    },
+                    unmute: match view.locale {
+                        Locale::Chinese => "取消静音",
+                        Locale::English => "Unmute",
+                    },
+                    volume: match view.locale {
+                        Locale::Chinese => "播放音量",
+                        Locale::English => "Playback volume",
+                    },
+                    unavailable: match view.locale {
+                        Locale::Chinese => "当前没有可播放音频",
+                        Locale::English => "No playable audio",
+                    },
+                    enabled: audio_playable(view.audio.phase) && enabled,
                 },
             );
-            if let Some(percent) = volume_response.changed_percent() {
+            if let Some(percent) = percent {
                 action = Some(PlayerAction::SetVolume {
                     generation: view.generation,
                     percent,
                 });
             }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if (moqcast_ui::v2::Action {
+                    label: match view.locale {
+                        Locale::Chinese => "停止观看",
+                        Locale::English
+                            if row_layout.button_width == COMPACT_CONTROL_BUTTON_WIDTH =>
+                        {
+                            "Stop"
+                        }
+                        Locale::English => "Stop watching",
+                    },
+                    size: egui::vec2(108.0, 40.0),
+                    enabled,
+                    tone: moqcast_ui::v2::ActionTone::Danger,
+                })
+                .show(ui)
+                .clicked()
+                {
+                    if fullscreen {
+                        ui.ctx()
+                            .send_viewport_cmd(ViewportCommand::Fullscreen(false));
+                    }
+                    action = Some(PlayerAction::Stop);
+                }
+                let fullscreen_label = match (view.locale, fullscreen) {
+                    (Locale::Chinese, true) => "退出全屏",
+                    (Locale::Chinese, false) => "全屏",
+                    (Locale::English, true) => "Exit fullscreen",
+                    (Locale::English, false) => "Fullscreen",
+                };
+                if ui
+                    .add_enabled_ui(enabled, |ui| {
+                        moqcast_ui::v2::icon_button(
+                            ui,
+                            moqcast_ui::v2::Icon::Fullscreen,
+                            fullscreen_label,
+                        )
+                    })
+                    .inner
+                    .clicked()
+                {
+                    ui.ctx()
+                        .send_viewport_cmd(ViewportCommand::Fullscreen(!fullscreen));
+                }
+                let _ = moqcast_ui::v2::player_info_control(
+                    ui,
+                    info,
+                    player_info_locale(view.locale),
+                    now,
+                    player_info_snapshot(view, volume.muted()),
+                    enabled,
+                );
+            });
         });
     });
     action
@@ -390,6 +379,45 @@ fn live_badge(ui: &mut egui::Ui) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn playback_status_text_matches_the_centered_content_block() {
+        {
+            let (phase, label, text_offset) = (MediaPhase::Stopping, "Stopping playback", 0.0);
+            let ctx = egui::Context::default();
+            moqcast_ui::v2::install(&ctx);
+            let surface = Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(600.0, 300.0));
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 700.0),
+                    )),
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default()
+                        .show(root, |ui| paint_status(ui, surface, Locale::English, phase));
+                },
+            );
+            output.textures_delta.clear();
+            let rect = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) if text.galley.job.text == label => {
+                        Some(text.galley.rect.translate(text.pos.to_vec2()))
+                    }
+                    _ => None,
+                })
+                .expect("playback status label is drawn");
+            assert!(
+                (rect.center().x - surface.center().x).abs() < 2.0
+                    && (rect.center().y - surface.center().y - text_offset).abs() < 2.0,
+                "message {rect:?} must match centered {phase:?} block in {surface:?}"
+            );
+        }
+    }
+
     fn assert_size(actual: egui::Vec2, expected: egui::Vec2) {
         assert!((actual.x - expected.x).abs() < 0.001);
         assert!((actual.y - expected.y).abs() < 0.001);
@@ -398,7 +426,7 @@ mod tests {
     #[test]
     fn windowed_surface_reserves_the_attached_toolbar() {
         let layout = player_layout(None, egui::vec2(900.0, 700.0), false);
-        assert_size(layout.surface, egui::vec2(880.0, 495.0));
+        assert_size(layout.surface, egui::vec2(900.0, 636.0));
     }
 
     #[test]
@@ -408,29 +436,32 @@ mod tests {
             egui::vec2(900.0, 700.0),
             false,
         );
-        assert_size(layout.surface, egui::vec2(880.0, 495.0));
-        assert_size(layout.image, egui::vec2(278.4375, 495.0));
+        assert_size(layout.surface, egui::vec2(900.0, 636.0));
+        assert_size(layout.image, egui::vec2(357.75, 636.0));
     }
 
     #[test]
     fn constrained_height_keeps_stage_and_toolbar_inside_the_page() {
         let layout = player_layout(None, egui::vec2(632.0, 356.0), false);
-        assert_size(layout.surface, egui::vec2(540.444_46, 304.0));
-        assert_eq!(layout.surface.y + Size::PLAYER_TOOLBAR, 356.0);
+        assert_size(layout.surface, egui::vec2(632.0, 292.0));
+        assert_eq!(
+            layout.surface.y + moqcast_ui::v2::PLAYER_TOOLBAR_HEIGHT,
+            356.0
+        );
     }
 
     #[test]
     fn preparing_first_frame_and_watching_keep_identical_player_rects() {
         let available = Rect::from_min_size(egui::pos2(24.0, 32.0), egui::vec2(900.0, 700.0));
-        let preparing = player_rects(available, false);
-        let first_frame = player_rects(available, false);
-        let watching = player_rects(available, false);
+        let preparing = moqcast_ui::v2::player_rects(available, false);
+        let first_frame = moqcast_ui::v2::player_rects(available, false);
+        let watching = moqcast_ui::v2::player_rects(available, false);
         assert_eq!(preparing, first_frame);
         assert_eq!(first_frame, watching);
         assert_eq!(preparing.toolbar.top(), preparing.stage.bottom());
 
-        let fullscreen_preparing = player_rects(available, true);
-        let fullscreen_watching = player_rects(available, true);
+        let fullscreen_preparing = moqcast_ui::v2::player_rects(available, true);
+        let fullscreen_watching = moqcast_ui::v2::player_rects(available, true);
         assert_eq!(fullscreen_preparing, fullscreen_watching);
         assert_eq!(
             fullscreen_preparing.toolbar.bottom(),
@@ -447,8 +478,8 @@ mod tests {
     #[test]
     fn compact_toolbar_reserves_volume_and_actions() {
         let layout = control_layout(360.0);
-        assert_eq!(layout.actions_width, 328.0);
-        assert_eq!(layout.info_width, 24.0);
+        assert_eq!(layout.actions_width, 344.0);
+        assert_eq!(layout.info_width, 8.0);
         assert_eq!(layout.button_width, COMPACT_CONTROL_BUTTON_WIDTH);
     }
 

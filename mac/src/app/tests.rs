@@ -25,17 +25,6 @@ fn developer_mode_defaults_off_and_requires_an_explicit_true_value() {
 }
 
 #[test]
-fn layout_breakpoints_match_the_frozen_preview() {
-    assert_eq!(ContentLayout::for_width(919.0), ContentLayout::SingleColumn);
-    assert_eq!(ContentLayout::for_width(920.0), ContentLayout::ListDetail);
-    assert_eq!(
-        NavigationLayout::for_width(919.0),
-        NavigationLayout::TwoRows
-    );
-    assert_eq!(NavigationLayout::for_width(920.0), NavigationLayout::OneRow);
-}
-
-#[test]
 fn peer_presentation_keeps_presence_and_session_independent() {
     let waiting = PeerPresentation::from(&peer(true, PeerSession::Waiting));
     assert_eq!(waiting.presence, PresenceView::Nearby);
@@ -74,22 +63,6 @@ fn screen_availability_uses_only_the_canonical_peer_path() {
     assert_eq!(
         screen_availability("peer-b", &screens),
         crate::remote::ScreenAvailability::Unavailable
-    );
-}
-
-#[test]
-fn selection_survives_lost_while_the_session_is_healthy() {
-    let mut peers = std::collections::BTreeMap::new();
-    peers.insert("peer-a".to_owned(), peer(false, PeerSession::Connected));
-    peers.insert("peer-b".to_owned(), peer(true, PeerSession::Waiting));
-
-    assert_eq!(
-        selected_peer(Some("peer-a"), &peers),
-        Some("peer-a".to_owned())
-    );
-    assert_eq!(
-        selected_peer(Some("gone"), &peers),
-        Some("peer-a".to_owned())
     );
 }
 
@@ -204,34 +177,8 @@ fn nearby_action_pending_coalesces_duplicate_start_intents_until_acknowledged() 
 }
 
 #[test]
-fn shared_navigation_uses_the_compact_height_below_the_split_breakpoint() {
-    assert_eq!(navigation_height(919.0), Size::APP_BAR_COMPACT);
-    assert_eq!(navigation_height(920.0), Size::APP_BAR);
-}
-
-#[test]
-fn scrollable_pages_have_independent_stable_ids() {
-    let nearby = Page::Nearby.scroll_id();
-    let share = Page::ScreenShare.scroll_id();
-    let settings = Page::Settings.scroll_id();
-    assert_ne!(nearby, share);
-    assert_ne!(nearby, settings);
-    assert_ne!(share, settings);
-    assert_eq!(nearby, Page::Nearby.scroll_id());
-}
-
-#[test]
-fn centered_page_content_leaves_the_scrollbar_at_the_viewport_edge() {
-    let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1040.0, 700.0));
-    let content = moqcast_ui::page_content_rect(viewport, PageWidth::Narrow);
-    assert_eq!(content.center().x, viewport.center().x);
-    assert!(content.right() < viewport.right());
-    assert_eq!(content.width(), Size::PAGE_NARROW_MAX);
-}
-
-#[test]
 fn ordinary_ui_copy_keeps_internal_provenance_private() {
-    let source = include_str!("../app.rs");
+    let source = concat!(include_str!("../app.rs"), include_str!("desktop.rs"));
     let forbidden = [
         ["commit", " SHA"].concat(),
         ["A", "BI"].concat(),
@@ -256,7 +203,7 @@ fn identity_copy_shows_current_run_and_remote_peer_ids_without_provenance() {
         "Nearby is ready",
         Some("local-peer"),
     );
-    let remote = peer_list_subtitle(Locale::English, "remote-peer", "Connected");
+    let remote = peer_list_subtitle(Locale::English, "remote-peer");
 
     assert_eq!(local_device_id_label(Locale::English), "This device ID");
     assert_eq!(remote_device_id_label(Locale::English), "Device ID");
@@ -346,3 +293,5 @@ fn system_audio_action_requires_an_idle_primary_display() {
     snapshot.media.begin(MediaPhase::PreparingShare);
     assert!(!system_audio_action_available(&snapshot));
 }
+
+mod layout;

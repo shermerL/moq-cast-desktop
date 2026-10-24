@@ -49,6 +49,8 @@ pub(super) enum RuntimeEvent {
 struct Outbound {
     connection: moq_tokio::Connection,
     task: JoinHandle<()>,
+    record: peer::PeerRecord,
+    deadline: tokio::time::Instant,
 }
 
 #[derive(Clone)]
@@ -105,9 +107,49 @@ impl SessionFoundation {
         peer_id: &str,
         record: &peer::PeerRecord,
     ) -> Result<TransportUpdate, DialError> {
+        let mut deadline = tokio::time::Instant::now() + peer::RECONNECT_BUDGET;
+        if let (Some(outbound), Some(state)) =
+            (self.outbound.get(peer_id), self.states.get(peer_id))
+        {
+            if outbound.connection.connected() || state.phase() == TransportPhase::Connected {
+                return Ok(TransportUpdate {
+                    subject: SessionSubject::Peer(peer_id.into()),
+                    state,
+                });
+            }
+            if state.phase() == TransportPhase::Connecting {
+                // Only new addresses for the same advertisement can refresh this attempt.
+                // Repeated answers must not restart its clock or cross authentication identities.
+                let previous = &outbound.record;
+                if previous.has_node
+                    || record.has_node
+                    || previous.credential != record.credential
+                    || previous.fingerprint != record.fingerprint
+                    || !record
+                        .addrs
+                        .iter()
+                        .any(|addr| !previous.addrs.contains(addr))
+                    || tokio::time::Instant::now() >= outbound.deadline
+                {
+                    return Ok(TransportUpdate {
+                        subject: SessionSubject::Peer(peer_id.into()),
+                        state,
+                    });
+                }
+                deadline = outbound.deadline;
+                tracing::debug!(
+                    peer_id,
+                    previous_addresses = ?previous.addrs,
+                    addresses = ?record.addrs,
+                    previous_address_count = previous.addrs.len(),
+                    address_count = record.addrs.len(),
+                    "refreshing pending peer addresses within original connection budget"
+                );
+            }
+        }
         self.stop_outbound(peer_id).await;
         let state = self.states.begin(peer_id);
-        let connection = match peer::dial(record, self.origins.clone()) {
+        let connection = match peer::dial(record, self.origins.clone(), deadline) {
             Ok(connection) => connection,
             Err(error) => {
                 self.states
@@ -120,9 +162,28 @@ impl SessionFoundation {
         let peer_id = peer_id.to_owned();
         let observed_peer = peer_id.clone();
         let generation = state.generation();
+        tracing::debug!(
+            stage = "transport",
+            generation,
+            peer_id = %peer_id,
+            addresses = ?record.addrs,
+            address_count = record.addrs.len(),
+            ipv4_count = record.addrs.iter().filter(|addr| addr.is_ipv4()).count(),
+            ipv6_count = record.addrs.iter().filter(|addr| addr.is_ipv6()).count(),
+            remaining_ms = deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .as_millis() as u64,
+            "starting outbound candidate set"
+        );
         let task = tokio::spawn(async move {
-            match observed.established().await {
-                Ok(connection) => {
+            match tokio::time::timeout_at(deadline, observed.clone().established()).await {
+                Ok(Ok(connection)) => {
+                    tracing::debug!(
+                        stage = "transport",
+                        generation,
+                        peer_id = %observed_peer,
+                        "outbound connection established"
+                    );
                     let _ = events
                         .send(RuntimeEvent::Outbound {
                             peer: observed_peer.clone(),
@@ -130,7 +191,8 @@ impl SessionFoundation {
                             phase: TransportPhase::Connected,
                         })
                         .await;
-                    let _ = connection.closed().await;
+                    let reason = connection.closed().await;
+                    tracing::debug!(stage = "transport", generation, peer_id = %observed_peer, ?reason, "outbound connection closed");
                     let _ = events
                         .send(RuntimeEvent::Outbound {
                             peer: observed_peer,
@@ -139,7 +201,20 @@ impl SessionFoundation {
                         })
                         .await;
                 }
-                Err(_) => {
+                result => {
+                    tracing::warn!(
+                        stage = "transport",
+                        generation,
+                        peer_id = %observed_peer,
+                        error = ?result.as_ref().map(|result| result.as_ref().err()),
+                        setup_deadline = result.is_err(),
+                        authentication = matches!(&result, Ok(Err(error)) if error.is_auth()),
+                        "outbound connection setup failed"
+                    );
+                    if result.is_err() {
+                        observed.abort(moq_tokio::moq_net::Error::Cancel);
+                        tracing::warn!("peer connection exhausted its original setup budget");
+                    }
                     let _ = events
                         .send(RuntimeEvent::Outbound {
                             peer: observed_peer,
@@ -150,8 +225,15 @@ impl SessionFoundation {
                 }
             }
         });
-        self.outbound
-            .insert(peer_id.clone(), Outbound { connection, task });
+        self.outbound.insert(
+            peer_id.clone(),
+            Outbound {
+                connection,
+                task,
+                record: record.clone(),
+                deadline,
+            },
+        );
         Ok(TransportUpdate {
             subject: SessionSubject::Peer(peer_id),
             state,
@@ -176,6 +258,7 @@ impl SessionFoundation {
                     phase,
                 } => {
                     let Some(state) = self.states.transition(&peer, generation, phase) else {
+                        tracing::debug!(peer_id = %peer, generation, ?phase, "ignored stale outbound connection event");
                         continue;
                     };
                     return Some(TransportUpdate {
@@ -286,6 +369,182 @@ mod tests {
 
     use super::{SessionFoundation, SessionSubject, TransportPhase, peer::PeerRecord};
 
+    fn assert_closed(connection: &moq_tokio::Connection) {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+        let mut closed = std::pin::pin!(connection.closed());
+        assert!(
+            matches!(
+                closed
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop())),
+                Poll::Ready(_)
+            ),
+            "owner returned before its connection loop closed"
+        );
+    }
+
+    async fn pending_peer() -> (SessionFoundation, PeerRecord, tokio::net::UdpSocket) {
+        let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let bound = SessionFoundation::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let fingerprint = bound.advertisement().fingerprint.clone();
+        let foundation = bound.start("proof".into()).await.unwrap();
+        let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = silent.local_addr().unwrap();
+        let record = PeerRecord {
+            urls: vec![format!("moqt://{addr}").parse().unwrap()],
+            addrs: vec![addr],
+            has_node: false,
+            fingerprint: Some(fingerprint),
+            credential: "proof".into(),
+        };
+        (foundation, record, silent)
+    }
+
+    #[tokio::test]
+    async fn late_addresses_connect_without_extending_budget_or_accepting_stale_failure() {
+        let (mut foundation, mut record, silent) = pending_peer().await;
+        let first = foundation.connect_record("remote", &record).await.unwrap();
+        let deadline = foundation.outbound["remote"].deadline;
+        let old_connection = foundation.outbound["remote"].connection.clone();
+        // Observe a real QUIC packet before discovering the usable candidate.
+        tokio::time::timeout_at(deadline, silent.recv(&mut [0; 2048]))
+            .await
+            .unwrap()
+            .unwrap();
+        record.addrs.push(foundation.advertisement().addr);
+        let refreshed = foundation.connect_record("remote", &record).await.unwrap();
+        assert!(refreshed.state.generation() > first.state.generation());
+        assert_eq!(foundation.outbound["remote"].deadline, deadline);
+        assert_closed(&old_connection);
+        let current = foundation.outbound["remote"].connection.clone();
+        let _established = tokio::time::timeout_at(deadline, current.clone().established())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The handshake has won even if its Connected event has not reached the UI.
+        record.addrs.push("127.0.0.1:9".parse().unwrap());
+        let kept = foundation.connect_record("remote", &record).await.unwrap();
+        assert_eq!(kept.state.generation(), refreshed.state.generation());
+        assert!(current.connected());
+        foundation
+            .events
+            .send(super::RuntimeEvent::Outbound {
+                peer: "remote".into(),
+                generation: first.state.generation(),
+                phase: TransportPhase::Failed,
+            })
+            .await
+            .unwrap();
+        let connected = tokio::time::timeout_at(deadline, async {
+            loop {
+                let update = foundation.recv().await.unwrap();
+                if matches!(&update.subject, SessionSubject::Peer(id) if id == "remote") {
+                    assert_eq!(update.state.generation(), refreshed.state.generation());
+                    assert_eq!(update.state.phase(), TransportPhase::Connected);
+                    break update;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let kept = foundation.connect_record("remote", &record).await.unwrap();
+        assert_eq!(kept, connected);
+        let disconnected = foundation.disconnect("remote").await.unwrap();
+        assert!(disconnected.state.generation() > refreshed.state.generation());
+        assert_closed(&current);
+        // Drain the queued old failure without waiting for a new network event.
+        foundation
+            .events
+            .send(super::RuntimeEvent::ListenerStopped)
+            .await
+            .unwrap();
+        while let Some(update) = foundation.recv().await {
+            assert!(
+                !matches!(&update.subject, SessionSubject::Peer(id) if id == "remote"),
+                "old outbound callbacks survived disconnect"
+            );
+        }
+        assert_eq!(foundation.state("remote"), Some(disconnected.state));
+        foundation.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn address_refresh_ignores_duplicates_reordering_and_changed_authentication() {
+        let (mut foundation, mut record, _silent) = pending_peer().await;
+        record.addrs.push("127.0.0.1:9".parse().unwrap());
+        let first = foundation.connect_record("remote", &record).await.unwrap();
+        let deadline = foundation.outbound["remote"].deadline;
+        record.addrs.reverse();
+        record.addrs.push(record.addrs[0]);
+        let kept = foundation.connect_record("remote", &record).await.unwrap();
+        assert_eq!(kept, first);
+        record.addrs.push(foundation.advertisement().addr);
+        let mut changed = record.clone();
+        changed.credential = "other".into();
+        assert_eq!(
+            foundation.connect_record("remote", &changed).await.unwrap(),
+            first
+        );
+        changed = record.clone();
+        changed.fingerprint = Some("00".repeat(32));
+        assert_eq!(
+            foundation.connect_record("remote", &changed).await.unwrap(),
+            first
+        );
+        changed = record.clone();
+        changed.has_node = true;
+        assert_eq!(
+            foundation.connect_record("remote", &changed).await.unwrap(),
+            first
+        );
+        assert_eq!(foundation.outbound["remote"].deadline, deadline);
+        foundation.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn expired_address_refresh_does_not_start_another_budget() {
+        let (mut foundation, mut record, _silent) = pending_peer().await;
+        let first = foundation.connect_record("remote", &record).await.unwrap();
+        // Inject an expired deadline; no wall-clock sleep is needed to test admission.
+        let expired = tokio::time::Instant::now() - Duration::from_secs(1);
+        foundation.outbound.get_mut("remote").unwrap().deadline = expired;
+        record.addrs.push(foundation.advertisement().addr);
+        assert_eq!(
+            foundation.connect_record("remote", &record).await.unwrap(),
+            first
+        );
+        assert_eq!(foundation.outbound["remote"].deadline, expired);
+        foundation.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_refreshed_pending_connection() {
+        let (mut foundation, mut record, _silent) = pending_peer().await;
+        foundation.connect_record("remote", &record).await.unwrap();
+        let old = foundation.outbound["remote"].connection.clone();
+        let second = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        record.addrs.push(second.local_addr().unwrap());
+        foundation.connect_record("remote", &record).await.unwrap();
+        let current = foundation.outbound["remote"].connection.clone();
+        foundation.shutdown().await.unwrap();
+        assert_closed(&old);
+        assert_closed(&current);
+    }
+
+    fn unused_record() -> PeerRecord {
+        PeerRecord {
+            urls: vec![],
+            addrs: vec![],
+            has_node: false,
+            fingerprint: None,
+            credential: String::new(),
+        }
+    }
+
     #[tokio::test]
     async fn stopped_outbound_releases_its_local_udp_socket() {
         let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -307,6 +566,8 @@ mod tests {
             super::Outbound {
                 connection,
                 task: tokio::spawn(std::future::pending()),
+                record: unused_record(),
+                deadline: tokio::time::Instant::now(),
             },
         );
         foundation.stop_outbound("test").await;
@@ -385,9 +646,15 @@ mod tests {
             .unwrap();
         let connection = client.connect("moqt://127.0.0.1:9".parse::<url::Url>().unwrap());
         let observed = connection.clone();
-        foundation
-            .outbound
-            .insert("test".into(), super::Outbound { connection, task });
+        foundation.outbound.insert(
+            "test".into(),
+            super::Outbound {
+                connection,
+                task,
+                record: unused_record(),
+                deadline: tokio::time::Instant::now(),
+            },
+        );
         foundation.stop_outbound("test").await;
         let mut closed = std::pin::pin!(observed.closed());
         assert!(

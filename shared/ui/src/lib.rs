@@ -2,6 +2,8 @@
 
 #![warn(missing_docs)]
 
+pub mod v2;
+
 mod components;
 mod interaction;
 mod theme;

@@ -105,6 +105,9 @@ sed \
     -e "s/__BUILD_VERSION__/$build_version/g" \
     "$mac_directory/packaging/Info.plist.in" > "$app_directory/Contents/Info.plist"
 cp "$mac_directory/assets/icons/MoQCast.icns" "$app_directory/Contents/Resources/MoQCast.icns"
+mkdir -p "$app_directory/Contents/Resources/licenses"
+cp "$mac_directory/../shared/ui/assets/fonts/OFL.txt" "$app_directory/Contents/Resources/licenses/NotoSansSC-OFL.txt"
+cp "$mac_directory/../shared/ui/assets/fonts/SOURCE.md" "$app_directory/Contents/Resources/licenses/NotoSansSC-SOURCE.md"
 cp "$mac_directory/packaging/entitlements.plist" "$app_directory/Contents/Resources/entitlements.plist"
 
 build_info="$app_directory/Contents/Resources/build-info.txt"

@@ -9,12 +9,14 @@ use super::SessionOrigins;
 use crate::{contract::cluster_path, network::discovery::PeerRecord};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const RECONNECT_BUDGET: Duration = Duration::from_secs(3);
+pub(super) const RECONNECT_BUDGET: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Error)]
 pub(crate) enum DialError {
     #[error("peer did not advertise a certificate fingerprint")]
     MissingFingerprint,
+    #[error("peer connection budget exhausted during address refresh")]
+    BudgetExhausted,
     #[error("peer did not advertise a reachable address")]
     NoAddresses,
     #[error(transparent)]

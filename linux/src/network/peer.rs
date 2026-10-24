@@ -9,7 +9,7 @@ use super::discovery::PeerRecord;
 use super::security::peer_path;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const RECONNECT_BUDGET: Duration = Duration::from_secs(3);
+pub(crate) const RECONNECT_BUDGET: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Error)]
 pub(crate) enum DialError {
