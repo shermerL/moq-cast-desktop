@@ -432,7 +432,9 @@ impl MoqCastApp {
                                     } else {
                                         self.text("观看", "Watch")
                                     },
-                                    watch_enabled: owned || snapshot.can_watch(id, &path),
+                                    watch_enabled: owned
+                                        || (self.nearby_action_pending.is_none()
+                                            && snapshot.can_watch(id, &path)),
                                     details_label: self.text("设备详情", "Device details"),
                                     compact,
                                 },
@@ -639,6 +641,7 @@ impl MoqCastApp {
                     label: self.text("开始共享", "Start sharing"),
                     size: vec2(156.0, 44.0),
                     enabled: !self.picker_pending
+                        && self.nearby_action_pending.is_none()
                         && snapshot
                             .share_selection
                             .as_ref()

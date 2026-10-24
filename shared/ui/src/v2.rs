@@ -819,72 +819,81 @@ mod tests {
 
     #[test]
     fn device_details_never_emit_watch_and_disabled_watch_does_not_activate() {
-        for (point, enabled, expect_details, expect_watch) in [
-            (egui::pos2(100.0, 44.0), true, true, false),
-            (egui::pos2(612.0, 44.0), true, false, true),
-            (egui::pos2(720.0, 44.0), true, true, false),
-            (egui::pos2(612.0, 44.0), false, false, false),
-        ] {
-            let ctx = Context::default();
-            install(&ctx);
-            let mut result = RowResponse::default();
-            for events in [
-                vec![],
-                vec![
-                    egui::Event::PointerMoved(point),
-                    egui::Event::PointerButton {
-                        pos: point,
-                        button: egui::PointerButton::Primary,
-                        pressed: true,
-                        modifiers: Default::default(),
-                    },
-                ],
-                vec![egui::Event::PointerButton {
-                    pos: point,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: Default::default(),
-                }],
-            ] {
-                let input = egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(740.0, 100.0),
-                    )),
-                    events,
-                    ..Default::default()
-                };
-                let mut output = ctx.run_ui(input, |root| {
-                    egui::CentralPanel::default()
-                        .frame(Frame::NONE)
-                        .show(root, |ui| {
-                            result = nearby_row(
-                                ui,
-                                NearbyRow {
-                                    id: egui::Id::new("peer"),
-                                    name: "Long device name",
-                                    subtitle: "Current run ID",
-                                    status: "Available",
-                                    tone: StatusTone::Active,
-                                    current: false,
-                                    watch_label: "Watch",
-                                    watch_enabled: enabled,
-                                    details_label: "Details",
-                                    compact: false,
-                                },
-                            );
+        for dark in [false, true] {
+            for current in [false, true] {
+                for (point, enabled, expect_details, expect_watch) in [
+                    (egui::pos2(100.0, 44.0), true, true, false),
+                    (egui::pos2(612.0, 44.0), true, false, true),
+                    (egui::pos2(720.0, 44.0), true, true, false),
+                    (egui::pos2(612.0, 44.0), false, false, false),
+                ] {
+                    let ctx = Context::default();
+                    install(&ctx);
+                    ctx.set_theme(if dark {
+                        egui::Theme::Dark
+                    } else {
+                        egui::Theme::Light
+                    });
+                    let mut result = RowResponse::default();
+                    for events in [
+                        vec![],
+                        vec![
+                            egui::Event::PointerMoved(point),
+                            egui::Event::PointerButton {
+                                pos: point,
+                                button: egui::PointerButton::Primary,
+                                pressed: true,
+                                modifiers: Default::default(),
+                            },
+                        ],
+                        vec![egui::Event::PointerButton {
+                            pos: point,
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            modifiers: Default::default(),
+                        }],
+                    ] {
+                        let input = egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(740.0, 100.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        };
+                        let mut output = ctx.run_ui(input, |root| {
+                            egui::CentralPanel::default()
+                                .frame(Frame::NONE)
+                                .show(root, |ui| {
+                                    result = nearby_row(
+                                        ui,
+                                        NearbyRow {
+                                            id: egui::Id::new("peer"),
+                                            name: "Long device name",
+                                            subtitle: "Current run ID",
+                                            status: "Available",
+                                            tone: StatusTone::Active,
+                                            current,
+                                            watch_label: "Watch",
+                                            watch_enabled: enabled,
+                                            details_label: "Details",
+                                            compact: false,
+                                        },
+                                    );
+                                });
                         });
-                });
-                output.textures_delta.clear();
+                        output.textures_delta.clear();
+                    }
+                    assert_eq!(
+                        result.details, expect_details,
+                        "details at {point:?}, enabled={enabled}"
+                    );
+                    assert_eq!(
+                        result.watch, expect_watch,
+                        "watch at {point:?}, enabled={enabled}"
+                    );
+                }
             }
-            assert_eq!(
-                result.details, expect_details,
-                "details at {point:?}, enabled={enabled}"
-            );
-            assert_eq!(
-                result.watch, expect_watch,
-                "watch at {point:?}, enabled={enabled}"
-            );
         }
     }
 }

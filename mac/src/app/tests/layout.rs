@@ -503,3 +503,178 @@ fn sharing_can_enable_nearby_without_leaving_source_setup() {
         "the visible recovery action sends a runtime command"
     );
 }
+
+#[test]
+fn pending_nearby_off_disables_new_watch_before_runtime_acknowledges() {
+    for (pending, discovered, available) in [
+        (false, true, true),
+        (true, true, true),
+        (false, false, true),
+        (true, false, true),
+        (false, false, false),
+    ] {
+        let ctx = egui::Context::default();
+        moqcast_ui::v2::install(&ctx);
+        let (mut app, mut commands) = app();
+        let mut s = snapshot(1);
+        s.peers.get_mut("peer-00").unwrap().discovered = discovered;
+        s.remote_screens.insert(
+            crate::contract::screen_path("peer-00"),
+            crate::remote::ScreenView {
+                peer_id: "peer-00".into(),
+                availability: if available {
+                    ScreenAvailability::Available
+                } else {
+                    ScreenAvailability::Withdrawn
+                },
+            },
+        );
+        if pending {
+            app.nearby_action_pending = Some(NearbyActionPending {
+                action: NearbyAction::TurnOff,
+                discovery_generation: s.discovery.generation(),
+            });
+        }
+        let size = egui::vec2(1040.0, 700.0);
+        render(&ctx, &mut app, &s, size, vec![]);
+        let out = render(&ctx, &mut app, &s, size, vec![]);
+        let pos = painted(&out, "Watch").center();
+        for pressed in [true, false] {
+            render(
+                &ctx,
+                &mut app,
+                &s,
+                size,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let expected = available && !pending;
+        assert_eq!(
+            commands(),
+            expected,
+            "pending={pending} discovered={discovered} available={available}"
+        );
+        assert_eq!(app.page, if expected { Page::Watch } else { Page::Nearby });
+    }
+}
+
+#[test]
+fn pending_nearby_off_disables_new_share_before_runtime_acknowledges() {
+    for pending in [false, true] {
+        let ctx = egui::Context::default();
+        moqcast_ui::v2::install(&ctx);
+        let (mut app, mut commands) = app();
+        let mut s = snapshot(0);
+        app.page = Page::ScreenShare;
+        app.capture_permission = CapturePermission::Allowed;
+        s.share_selection = Some(crate::publication::Selection::Display {
+            display_id: 1,
+            primary: true,
+            label: "Display".into(),
+        });
+        if pending {
+            app.request_turn_off_nearby(&s);
+            assert!(commands());
+        }
+        let size = egui::vec2(1040.0, 700.0);
+        render(&ctx, &mut app, &s, size, vec![]);
+        let out = render(&ctx, &mut app, &s, size, vec![]);
+        let pos = painted(&out, "Start sharing").center();
+        for pressed in [true, false] {
+            render(
+                &ctx,
+                &mut app,
+                &s,
+                size,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert_eq!(commands(), !pending, "pending={pending}");
+    }
+}
+
+#[test]
+fn return_to_owned_player_survives_lost_and_pending_off_without_media_commands() {
+    for phase in [
+        MediaPhase::PreparingWatch,
+        MediaPhase::Watching,
+        MediaPhase::Stopping,
+        MediaPhase::Failed,
+    ] {
+        let (mut app, mut commands) = app();
+        let mut s = snapshot(1);
+        s.peers.get_mut("peer-00").unwrap().discovered = false;
+        s.media_owner = Some(MediaOwner::Watch);
+        s.media_peer = Some("peer-00".into());
+        s.media.begin(phase);
+        app.request_turn_off_nearby(&s);
+        assert!(commands());
+        let ctx = egui::Context::default();
+        moqcast_ui::v2::install(&ctx);
+        let size = egui::vec2(1040.0, 700.0);
+        render(&ctx, &mut app, &s, size, vec![]);
+        let out = render(&ctx, &mut app, &s, size, vec![]);
+        let pos = painted(&out, "Return").center();
+        for pressed in [true, false] {
+            render(
+                &ctx,
+                &mut app,
+                &s,
+                size,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert_eq!(app.page, Page::Watch);
+        assert!(
+            !commands(),
+            "return must not start or stop media: {phase:?}"
+        );
+    }
+}
+
+#[test]
+fn nearby_off_acknowledgement_allows_reopening_without_clearing_early() {
+    let (mut app, mut commands) = app();
+    let mut s = snapshot(0);
+    app.request_turn_off_nearby(&s);
+    assert!(commands());
+    reconcile_nearby_action(&mut app.nearby_action_pending, &s);
+    assert!(app.nearby_action_pending.is_some());
+    s.nearby_stopping = true;
+    reconcile_nearby_action(&mut app.nearby_action_pending, &s);
+    assert!(app.nearby_action_pending.is_some());
+    s.nearby_stopping = false;
+    s.discovery.begin(DiscoveryPhase::Stopped);
+    reconcile_nearby_action(&mut app.nearby_action_pending, &s);
+    assert!(app.nearby_action_pending.is_none());
+    app.request_turn_on_nearby(&s);
+    assert!(commands());
+    assert!(app.nearby_action_pending.is_some());
+    s.discovery.begin(DiscoveryPhase::Starting);
+    reconcile_nearby_action(&mut app.nearby_action_pending, &s);
+    assert!(app.nearby_action_pending.is_none());
+}

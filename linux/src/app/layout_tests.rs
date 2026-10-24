@@ -11,6 +11,7 @@ fn fixture() -> (MoqCastApp, tokio::sync::mpsc::Receiver<UserCommand>) {
             selected_peer: None,
             settings_open: false,
             confirm_nearby_off: false,
+            nearby_turn_off_pending: false,
             theme_preference: egui::ThemePreference::Light,
             locale: Locale::English,
             system_audio: false,
@@ -216,4 +217,257 @@ fn rendering_after_nearby_off_does_not_restart_discovery() {
             UserCommand::StartDiscovery | UserCommand::RetryDiscovery
         ));
     }
+}
+
+#[test]
+fn nearby_highlights_only_playing_not_preparing_or_stopping() {
+    for media in [
+        MediaState::PreparingView {
+            path: crate::screen_path::for_peer("peer"),
+        },
+        MediaState::Viewing {
+            path: crate::screen_path::for_peer("peer"),
+        },
+        MediaState::StoppingView {
+            path: crate::screen_path::for_peer("peer"),
+        },
+    ] {
+        let (mut app, mut commands) = fixture();
+        app.nearby_turn_off_pending = true;
+        let mut s = AppSnapshot {
+            media: media.clone(),
+            local_peer_id: Some("local".into()),
+            discovery: DiscoveryState::Ready,
+            ..Default::default()
+        };
+        s.peers.insert(
+            "peer".into(),
+            PeerSnapshot {
+                name: "Computer".into(),
+                endpoints: vec![],
+                fingerprint_pinned: true,
+                dial_role: DialRole::Outbound,
+                discovery: PeerDiscoveryState::Lost,
+                transport: TransportState::Connected,
+                screen: ScreenAvailability::Available,
+            },
+        );
+        let ctx = egui::Context::default();
+        theme::configure(&ctx);
+        ctx.set_theme(egui::Theme::Light);
+        let out = render(&ctx, &mut app, &s, egui::vec2(1040.0, 700.0), vec![]);
+        let highlighted = out.shapes.iter().any(|shape| {
+            matches!(&shape.shape,
+            egui::Shape::Rect(rect) if rect.fill == moqcast_ui::v2::Palette::new(false).soft
+                && rect.rect.width() > 400.0 && rect.rect.height() < 100.0)
+        });
+        assert_eq!(
+            highlighted,
+            matches!(media, MediaState::Viewing { .. }),
+            "{media:?}"
+        );
+        let size = egui::vec2(1040.0, 700.0);
+        let out = render(&ctx, &mut app, &s, size, vec![]);
+        let pos = painted(&out, "Return").center();
+        for pressed in [true, false] {
+            render(
+                &ctx,
+                &mut app,
+                &s,
+                size,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert_eq!(app.page, Page::Watch);
+        assert!(
+            commands.try_recv().is_err(),
+            "return must not start or stop media"
+        );
+    }
+}
+
+#[test]
+fn pending_nearby_off_disables_new_watch_before_runtime_acknowledges() {
+    check_pending_off(Page::Nearby);
+}
+
+#[test]
+fn pending_nearby_off_disables_new_share_before_runtime_acknowledges() {
+    check_pending_off(Page::ScreenShare);
+}
+
+fn check_pending_off(page: Page) {
+    for (pending, discovered, available) in [
+        (false, true, true),
+        (true, true, true),
+        (false, false, true),
+        (true, false, true),
+        (false, false, false),
+    ] {
+        let (mut app, mut commands) = fixture();
+        app.page = page;
+        let mut s = AppSnapshot {
+            local_peer_id: Some("local".into()),
+            discovery: DiscoveryState::Ready,
+            sources: SourceCatalog::Portal,
+            ..Default::default()
+        };
+        s.peers.insert(
+            "peer".into(),
+            PeerSnapshot {
+                name: "Computer".into(),
+                endpoints: vec![],
+                fingerprint_pinned: true,
+                dial_role: DialRole::Outbound,
+                discovery: if discovered {
+                    PeerDiscoveryState::Found
+                } else {
+                    PeerDiscoveryState::Lost
+                },
+                transport: TransportState::Connected,
+                screen: if available {
+                    ScreenAvailability::Available
+                } else {
+                    ScreenAvailability::Withdrawn
+                },
+            },
+        );
+        s.update_remote_screen(crate::screen_path::for_peer("peer"), available);
+        if pending {
+            app.send(UserCommand::StopDiscovery);
+            assert!(matches!(
+                commands.try_recv(),
+                Ok(UserCommand::StopDiscovery)
+            ));
+        }
+        let ctx = egui::Context::default();
+        theme::configure(&ctx);
+        let size = egui::vec2(1040.0, 700.0);
+        render(&ctx, &mut app, &s, size, vec![]);
+        let out = render(&ctx, &mut app, &s, size, vec![]);
+        let label = if page == Page::Nearby {
+            app.locale.watch()
+        } else {
+            "Start sharing"
+        };
+        let pos = painted(&out, label).center();
+        for pressed in [true, false] {
+            render(
+                &ctx,
+                &mut app,
+                &s,
+                size,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert_eq!(
+            commands.try_recv().is_ok(),
+            !pending && (page != Page::Nearby || available),
+            "{page:?} pending={pending} discovered={discovered} available={available}"
+        );
+    }
+}
+
+#[test]
+fn nearby_pending_intent_clears_after_cleanup_and_is_not_set_on_queue_failure() {
+    let (mut app, mut commands) = fixture();
+    let ctx = egui::Context::default();
+    theme::configure(&ctx);
+    let size = egui::vec2(1040.0, 700.0);
+    let mut s = AppSnapshot {
+        local_peer_id: Some("local".into()),
+        discovery: DiscoveryState::Ready,
+        ..Default::default()
+    };
+    app.send(UserCommand::StopDiscovery);
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(UserCommand::StopDiscovery)
+    ));
+    render(&ctx, &mut app, &s, size, vec![]);
+    assert!(app.nearby_turn_off_pending);
+    s.lan_stopping = true;
+    s.local_peer_id = None;
+    render(&ctx, &mut app, &s, size, vec![]);
+    assert!(app.nearby_turn_off_pending);
+    s.lan_stopping = false;
+    s.discovery = DiscoveryState::Idle;
+    render(&ctx, &mut app, &s, size, vec![]);
+    assert!(!app.nearby_turn_off_pending);
+    let out = render(&ctx, &mut app, &s, size, vec![]);
+    let pos = painted(&out, "Turn on Nearby").center();
+    for pressed in [true, false] {
+        render(
+            &ctx,
+            &mut app,
+            &s,
+            size,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+    }
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(UserCommand::StartDiscovery)
+    ));
+    drop(commands);
+    app.send(UserCommand::StopDiscovery);
+    assert!(app.command_error.is_some());
+    assert!(!app.nearby_turn_off_pending);
+}
+
+#[test]
+fn nearby_off_during_startup_waits_for_terminal_discovery_state() {
+    let (mut app, mut commands) = fixture();
+    let ctx = egui::Context::default();
+    theme::configure(&ctx);
+    let mut s = AppSnapshot {
+        discovery: DiscoveryState::Scanning,
+        ..Default::default()
+    };
+    app.send(UserCommand::StopDiscovery);
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(UserCommand::StopDiscovery)
+    ));
+    let size = egui::vec2(1040.0, 700.0);
+    render(&ctx, &mut app, &s, size, vec![]);
+    assert!(
+        app.nearby_turn_off_pending,
+        "startup without a local ID is not a shutdown acknowledgement"
+    );
+    s.lan_stopping = true;
+    s.discovery = DiscoveryState::Idle;
+    render(&ctx, &mut app, &s, size, vec![]);
+    assert!(app.nearby_turn_off_pending);
+    s.lan_stopping = false;
+    s.discovery = DiscoveryState::Error;
+    render(&ctx, &mut app, &s, size, vec![]);
+    assert!(
+        !app.nearby_turn_off_pending,
+        "completed cleanup errors must not lock the retry action"
+    );
 }

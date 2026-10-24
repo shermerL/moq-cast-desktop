@@ -27,7 +27,10 @@ fn main() -> eframe::Result {
 struct Catalog {
     dark: bool,
     long_list: bool,
+    empty: bool,
     last_action: String,
+    lan_stopping: bool,
+    media_busy: bool,
 }
 
 impl eframe::App for Catalog {
@@ -45,6 +48,9 @@ impl eframe::App for Catalog {
                     });
                 }
                 ui.checkbox(&mut self.long_list, "40 rows / scroll");
+                ui.checkbox(&mut self.empty, "No devices");
+                ui.checkbox(&mut self.lan_stopping, "Nearby stopping");
+                ui.checkbox(&mut self.media_busy, "Media slot occupied");
             });
         });
         egui::CentralPanel::default()
@@ -69,36 +75,57 @@ impl eframe::App for Catalog {
                 }
                 ui.add_space(m.gap);
                 p.card().show(ui, |ui| {
-                    ui.label("附近设备 · 可用 / 未共享 / 连接中 / 已离开");
+                    ui.label("设备状态与动作 · 模拟快照，不建立连接");
                     ui.add_space(12.0);
                     egui::ScrollArea::vertical()
                         .max_height((ui.available_height() - 45.0).max(80.0))
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .show(ui, |ui| {
-                            for n in 0..if self.long_list { 40 } else { 4 } {
+                            // Platform snapshots decide permissions. These fixtures exercise the visual inputs only.
+                            let states = [
+                                ("已发现", v2::StatusTone::Neutral, false, false, false),
+                                ("正在连接", v2::StatusTone::Busy, false, false, false),
+                                ("连接失败", v2::StatusTone::Error, false, false, false),
+                                ("无法验证连接", v2::StatusTone::Error, false, false, false),
+                                ("已连接", v2::StatusTone::Active, false, false, false),
+                                ("可观看", v2::StatusTone::Active, false, true, false),
+                                ("正在准备观看", v2::StatusTone::Busy, false, false, true),
+                                ("正在观看", v2::StatusTone::Active, true, false, true),
+                                ("正在停止观看", v2::StatusTone::Busy, false, false, true),
+                            ];
+                            if self.empty {
+                                ui.label("尚未发现设备");
+                            }
+                            let count = if self.empty {
+                                0
+                            } else if self.long_list {
+                                40
+                            } else {
+                                states.len()
+                            };
+                            for n in 0..count {
                                 let name =
                                     format!("设备 {n} · Very long desktop name with 中文内容");
-                                let status =
-                                    ["可观看", "未共享", "连接中", "已离开附近范围"][n % 4];
+                                let (status, tone, current, available, returning) =
+                                    states[n % states.len()];
                                 let response = v2::nearby_row(
                                     ui,
                                     NearbyRow {
                                         id: egui::Id::new(n),
                                         name: &name,
-                                        subtitle: if m.compact {
-                                            status
-                                        } else {
-                                            "Device ID: 0123456789abcdef0123456789abcdef"
-                                        },
+                                        subtitle: "Device ID: 0123456789abcdef0123456789abcdef",
                                         status,
-                                        tone: if n % 4 == 0 {
-                                            v2::StatusTone::Active
+                                        tone,
+                                        current,
+                                        watch_label: if returning {
+                                            "返回播放器"
                                         } else {
-                                            v2::StatusTone::Neutral
+                                            "观看"
                                         },
-                                        current: false,
-                                        watch_label: "观看",
-                                        watch_enabled: n % 4 == 0,
+                                        watch_enabled: returning
+                                            || (available
+                                                && !self.lan_stopping
+                                                && !self.media_busy),
                                         details_label: "设备详情",
                                         compact: m.compact,
                                     },
@@ -107,7 +134,10 @@ impl eframe::App for Catalog {
                                     self.last_action = format!("Details {n}");
                                 }
                                 if response.watch {
-                                    self.last_action = format!("Watch {n}");
+                                    self.last_action = format!(
+                                        "{} {n}",
+                                        if returning { "Return" } else { "Watch" }
+                                    );
                                 }
                             }
                         });

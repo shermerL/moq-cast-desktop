@@ -5,6 +5,13 @@ use moqcast_ui::v2::{self, Action, ActionTone, Metrics, Palette, StatusTone};
 
 impl MoqCastApp {
     pub(super) fn desktop_shell(&mut self, root: &mut egui::Ui, snapshot: &AppSnapshot) {
+        // Keep local shutdown intent until the resource owner has finished releasing LAN state.
+        if !snapshot.lan_stopping
+            && !snapshot.discovery.is_active()
+            && snapshot.local_peer_id.is_none()
+        {
+            self.nearby_turn_off_pending = false;
+        }
         let p = Palette::for_ui(root);
         let metrics = Metrics::for_width(root.ctx().content_rect().width());
         egui::Panel::top("v2-header")
@@ -63,7 +70,7 @@ impl MoqCastApp {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             let active = snapshot.discovery.is_active();
                             if (Action {
-                                label: if snapshot.lan_stopping {
+                                label: if snapshot.lan_stopping || self.nearby_turn_off_pending {
                                     self.text("正在关闭", "Turning off")
                                 } else if active {
                                     self.text("关闭附近设备", "Turn off Nearby")
@@ -71,7 +78,7 @@ impl MoqCastApp {
                                     self.text("开启附近设备", "Turn on Nearby")
                                 },
                                 size: vec2(148.0, 40.0),
-                                enabled: !snapshot.lan_stopping,
+                                enabled: !snapshot.lan_stopping && !self.nearby_turn_off_pending,
                                 tone: if active {
                                     ActionTone::Danger
                                 } else {
@@ -96,7 +103,14 @@ impl MoqCastApp {
                                 }
                             }
                             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                let (tone, status) = discovery_status(snapshot, self.locale);
+                                let (tone, status) = if self.nearby_turn_off_pending {
+                                    (
+                                        StatusTone::Busy,
+                                        self.text("正在关闭附近设备", "Turning off Nearby"),
+                                    )
+                                } else {
+                                    discovery_status(snapshot, self.locale)
+                                };
                                 tone.indicator(ui);
                                 ui.add(
                                     egui::Label::new(
@@ -145,14 +159,22 @@ impl MoqCastApp {
                         } else {
                             self.nearby(ui, snapshot, metrics);
                         }
-                    } else if let Some(command) = pages::screen_share::show(
-                        ui,
-                        self.locale,
-                        snapshot,
-                        &mut self.system_audio,
-                        &mut self.selected_source,
-                    ) {
-                        self.send(command);
+                    } else {
+                        let enabled = !self.nearby_turn_off_pending;
+                        let command = ui
+                            .add_enabled_ui(enabled, |ui| {
+                                pages::screen_share::show(
+                                    ui,
+                                    self.locale,
+                                    snapshot,
+                                    &mut self.system_audio,
+                                    &mut self.selected_source,
+                                )
+                            })
+                            .inner;
+                        if enabled && let Some(command) = command {
+                            self.send(command);
+                        }
                     }
                 });
             });
@@ -298,7 +320,13 @@ impl MoqCastApp {
         if self.command_error.is_some() || snapshot.last_error.is_some() {
             v2::notice(ui, StatusTone::Error, self.locale.operation_failed());
         }
-        if let Some(action) = pages::nearby::show(ui, self.locale, snapshot, metrics.compact) {
+        if let Some(action) = pages::nearby::show(
+            ui,
+            self.locale,
+            snapshot,
+            metrics.compact,
+            self.nearby_turn_off_pending,
+        ) {
             match action {
                 pages::nearby::NearbyAction::Details(id) => self.selected_peer = Some(id),
                 pages::nearby::NearbyAction::Watch(command) => {

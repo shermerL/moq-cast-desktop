@@ -48,6 +48,7 @@ pub(in crate::app) fn show(
     locale: Locale,
     snapshot: &AppSnapshot,
     compact: bool,
+    stopping: bool,
 ) -> Option<NearbyAction> {
     let p = Palette::for_ui(ui);
     let mut result = None;
@@ -83,13 +84,13 @@ pub(in crate::app) fn show(
                         subtitle: &format!("{}: {id}", locale.text("设备 ID", "Device ID")),
                         status,
                         tone,
-                        current,
+                        current: current && matches!(snapshot.media, MediaState::Viewing { .. }),
                         watch_label: if current {
                             locale.text("返回播放器", "Return")
                         } else {
                             locale.watch()
                         },
-                        watch_enabled: current || can_watch(snapshot, id),
+                        watch_enabled: current || (!stopping && can_watch(snapshot, id)),
                         details_label: locale.device_details(),
                         compact,
                     },

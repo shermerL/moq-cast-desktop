@@ -44,6 +44,7 @@ pub struct MoqCastApp {
     selected_peer: Option<String>,
     settings_open: bool,
     confirm_nearby_off: bool,
+    nearby_turn_off_pending: bool,
     theme_preference: egui::ThemePreference,
     locale: Locale,
     system_audio: bool,
@@ -99,6 +100,7 @@ impl MoqCastApp {
             theme_preference,
             settings_open: false,
             confirm_nearby_off: false,
+            nearby_turn_off_pending: false,
             page: Page::default(),
             selected_peer: None,
             locale,
@@ -116,10 +118,14 @@ impl MoqCastApp {
     }
 
     fn send(&mut self, command: UserCommand) {
+        let stopping = matches!(command, UserCommand::StopDiscovery);
         self.command_error = self.runtime.try_send(command).err().map(|error| {
             tracing::warn!(stage = "ui-command", %error, "user command could not be queued");
             error.to_string()
         });
+        if stopping && self.command_error.is_none() {
+            self.nearby_turn_off_pending = true;
+        }
     }
 
     fn text<'a>(&self, zh: &'a str, en: &'a str) -> &'a str {

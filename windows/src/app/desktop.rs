@@ -244,7 +244,7 @@ impl MoqCastApp {
                             ),
                             status,
                             tone,
-                            current,
+                            current: current && self.snapshot.view.phase == ViewPhase::Viewing,
                             watch_label: if current {
                                 self.text("返回播放器", "Return")
                             } else {
@@ -856,6 +856,109 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn nearby_highlights_only_playing_not_preparing_or_stopping() {
+        for phase in [
+            ViewPhase::Preparing,
+            ViewPhase::Viewing,
+            ViewPhase::Stopping,
+        ] {
+            let (mut app, mut commands) = fixture();
+            app.nearby_turn_off_pending = true;
+            app.snapshot.peers.insert(
+                "peer".into(),
+                PeerView {
+                    id: "peer".into(),
+                    candidates: vec![],
+                    should_dial: false,
+                    authenticated_discovery: false,
+                    tls_pinned: true,
+                    present: false,
+                    transport: Default::default(),
+                    screen: ScreenAvailability::Available,
+                },
+            );
+            app.snapshot.view.phase = phase;
+            app.snapshot.view.path = Some(crate::screen_path::for_peer("peer"));
+            let ctx = egui::Context::default();
+            v2::install(&ctx);
+            ctx.set_theme(egui::Theme::Light);
+            let out = render(&ctx, &mut app, vec2(1040.0, 700.0), vec![]);
+            let highlighted = out.shapes.iter().any(|shape| {
+                matches!(&shape.shape,
+                egui::Shape::Rect(rect) if rect.fill == Palette::new(false).soft
+                    && rect.rect.width() > 400.0 && rect.rect.height() < 100.0)
+            });
+            assert_eq!(highlighted, phase == ViewPhase::Viewing, "{phase:?}");
+            let size = vec2(1040.0, 700.0);
+            let out = render(&ctx, &mut app, size, vec![]);
+            click(&ctx, &mut app, size, painted(&out, "Return").center());
+            assert_eq!(app.page, Page::Watch);
+            assert!(
+                commands.try_recv().is_err(),
+                "return must not start or stop media"
+            );
+        }
+    }
+
+    #[test]
+    fn nearby_watch_click_requires_route_and_idle_lan_admission() {
+        for (available, pending, sharing, expected) in [
+            (false, false, false, false),
+            (true, false, false, true),
+            (true, true, false, false),
+            (true, false, true, false),
+        ] {
+            let (mut app, mut commands) = fixture();
+            app.snapshot.local_id = Some("local".into());
+            app.snapshot.discovery = DiscoveryState::Ready;
+            app.nearby_turn_off_pending = pending;
+            if sharing {
+                app.snapshot.media.phase = MediaPhase::Sharing;
+            }
+            let availability = if available {
+                ScreenAvailability::Available
+            } else {
+                ScreenAvailability::Unavailable
+            };
+            app.snapshot.peers.insert(
+                "peer".into(),
+                PeerView {
+                    id: "peer".into(),
+                    candidates: vec![],
+                    should_dial: false,
+                    authenticated_discovery: false,
+                    tls_pinned: true,
+                    present: true,
+                    transport: Default::default(),
+                    screen: availability,
+                },
+            );
+            if available {
+                // A route survives advertisement loss; discovery alone is not admission.
+                app.snapshot.peers.get_mut("peer").unwrap().present = false;
+                app.snapshot.remote_screens.insert(
+                    crate::screen_path::for_peer("peer"),
+                    crate::remote::RemoteScreenView {
+                        peer_id: "peer".into(),
+                        availability,
+                    },
+                );
+            }
+            let ctx = egui::Context::default();
+            v2::install(&ctx);
+            let size = vec2(1040.0, 700.0);
+            render(&ctx, &mut app, size, vec![]);
+            let out = render(&ctx, &mut app, size, vec![]);
+            click(&ctx, &mut app, size, painted(&out, "Watch").center());
+            assert_eq!(
+                commands.try_recv().is_ok(),
+                expected,
+                "available={available} pending={pending} sharing={sharing}"
+            );
+        }
+    }
+
     #[test]
     fn nearby_identity_is_visible_without_opening_details() {
         let (mut app, _commands) = fixture();
