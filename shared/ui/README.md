@@ -4,7 +4,7 @@
 
 ## UI v2：独立迁移入口
 
-`moqcast_ui::v2` 是新的可选视觉入口，不覆盖旧 `Theme` 和组件。Mac、Linux、Windows 的 `dev-ui` 候选均已接入 v2；目标平台原生验收仍分别进行。v2 表示视觉代际，Cargo 包版本独立维护，当前为 0.2.0 开发候选，见 [更新记录](CHANGELOG.md)。
+`moqcast_ui::v2` 是新的可选视觉入口，不覆盖旧 `Theme` 和组件。Mac、Linux、Windows 均已接入 v2 并集成 main；目标平台原生验收仍分别进行。v2 表示视觉代际，Cargo 包版本独立维护，当前为 0.2.0，见 [更新记录](CHANGELOG.md)。
 
 - `install` 同时安装浅/深主题；平台保存 `ThemePreference`，支持跟随系统。
 - `Palette` 统一背景、表面、文本、辅助文本、边框、强调色及悬停色；`dialog` 统一弹层的 24pt 内边距。

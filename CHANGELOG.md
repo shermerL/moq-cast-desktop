@@ -4,6 +4,36 @@
 
 This file documents notable changes to MoQCast Desktop.
 
+## 0.7.0 - 2026-10-24
+
+### 中文
+
+- 全新三端桌面界面，统一本机共享、附近设备、播放器、设置与设备详情，并内嵌字体。
+- 改善按钮悬停与点击反馈、音量控制和来源列表滚动，统一设备状态及观看、共享操作权限。
+- 统一关闭附近设备时的媒体停止与连接清理，修复连接建立期间地址更新及 macOS 连接替换的取消处理。
+- Linux 启动时自动开启附近设备；macOS 挂起与恢复期间保留用户的关闭意图。
+- 修复 Windows 和 macOS 播放时丢失颜色矩阵与范围信息的问题。
+- 补齐详细模式下的 mDNS、QUIC 连接诊断，保护日志导出源文件，并修复 Linux 安装包校验文件的可搬移性。
+
+### 已知问题
+
+- 部分 Linux 环境下，其他设备连接至 Linux 可能失败。
+- Windows 观看时可能出现声音继续、视频画面卡住的情况。
+
+### English
+
+- Introduce a redesigned desktop interface across all three platforms, with consistent sharing, nearby devices, playback, settings, and device details, plus bundled fonts.
+- Improve button feedback, volume controls, and source-list scrolling; align device states and the availability of watch and share actions.
+- Align media shutdown and connection cleanup when Nearby is turned off; fix address updates during connection setup and cancellation of pending connection replacements on macOS.
+- Enable Nearby on Linux startup and preserve the user's Nearby-off intent across macOS suspend and resume.
+- Preserve color matrix and range information during Windows and macOS playback.
+- Extend detailed mDNS and QUIC diagnostics, protect source logs during export, and make Linux package checksum files portable.
+
+### Known issues
+
+- Connections from other devices to Linux may fail in some environments.
+- Windows playback may freeze the video while audio continues.
+
 ## 0.6.1 - 2026-10-11
 
 ### 中文
