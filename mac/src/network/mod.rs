@@ -80,6 +80,27 @@ pub(crate) enum StartError {
     Discovery(#[from] mdns::Error),
 }
 
+struct PendingConnection {
+    record: PeerRecord,
+    status: PeerStatus,
+}
+
+impl PendingConnection {
+    async fn complete(&mut self, sessions: &mut SessionFoundation) -> PeerStatus {
+        match sessions.connect(&self.record).await {
+            Ok(transport) => {
+                self.status.session = PeerSession::Connecting;
+                self.status.transport_generation = Some(transport.state.generation());
+            }
+            Err(_) => {
+                self.status.session = PeerSession::Failed;
+                self.status.transport_generation = None;
+            }
+        }
+        self.status.clone()
+    }
+}
+
 pub(crate) struct Services {
     discovery: mdns::Discovery,
     discovery_active: bool,
@@ -92,6 +113,7 @@ pub(crate) struct Services {
     inbound: BTreeSet<u64>,
     pending: VecDeque<Event>,
     next_ordinal: u64,
+    connecting: Option<PendingConnection>,
 }
 
 impl Services {
@@ -126,6 +148,7 @@ impl Services {
             inbound: BTreeSet::new(),
             pending: VecDeque::new(),
             next_ordinal: 0,
+            connecting: None,
         })
     }
 
@@ -135,13 +158,21 @@ impl Services {
                 return Some(event);
             }
 
+            if let Some(connecting) = self.connecting.as_mut() {
+                let status = connecting.complete(&mut self.sessions).await;
+                self.connecting = None;
+                self.peers.insert(status.id.clone(), status.clone());
+                self.pending.push_back(Event::Peer(status));
+                continue;
+            }
+
             let input = tokio::select! {
                 event = self.discovery.recv(), if self.discovery_active => Input::Discovery(event),
                 event = self.sessions.recv(), if self.sessions_active => Input::Session(event),
                 event = self.remote.recv(), if self.remote_active => Input::Remote(event),
                 else => return None,
             };
-            self.handle_input(input).await;
+            self.handle_input(input);
         }
     }
 
@@ -168,9 +199,9 @@ impl Services {
         self.sessions.publish_origin()
     }
 
-    async fn handle_input(&mut self, input: Input) {
+    fn handle_input(&mut self, input: Input) {
         match input {
-            Input::Discovery(Some(mdns::Event::Found(peer))) => self.found(peer).await,
+            Input::Discovery(Some(mdns::Event::Found(peer))) => self.found(peer),
             Input::Discovery(Some(mdns::Event::Lost(id))) => self.lost(&id),
             Input::Discovery(Some(_)) => {}
             Input::Discovery(None) => {
@@ -178,7 +209,7 @@ impl Services {
                 self.pending.push_back(Event::DiscoveryStopped);
             }
             Input::Session(Some(SessionEvent::Transport(update))) => {
-                self.transport(update).await;
+                self.transport(update);
             }
             Input::Session(Some(SessionEvent::ListenerStopped)) => {
                 self.pending.push_back(Event::ListenerStopped);
@@ -189,7 +220,7 @@ impl Services {
         }
     }
 
-    async fn found(&mut self, peer: mdns::Peer) {
+    fn found(&mut self, peer: mdns::Peer) {
         let should_dial = self.discovery.should_dial(&peer.id);
         tracing::debug!(
             stage = "discovery",
@@ -236,16 +267,8 @@ impl Services {
             status.session = PeerSession::Waiting;
             status.transport_generation = None;
         } else if should_connect(update, status.session) {
-            match self.sessions.connect(&record).await {
-                Ok(transport) => {
-                    status.session = PeerSession::Connecting;
-                    status.transport_generation = Some(transport.state.generation());
-                }
-                Err(_) => {
-                    status.session = PeerSession::Failed;
-                    status.transport_generation = None;
-                }
-            }
+            self.connecting = Some(PendingConnection { record, status });
+            return;
         }
 
         self.peers.insert(record.id, status.clone());
@@ -268,7 +291,7 @@ impl Services {
         }
     }
 
-    async fn transport(&mut self, update: session::TransportUpdate) {
+    fn transport(&mut self, update: session::TransportUpdate) {
         match update.subject {
             SessionSubject::Peer(id) => {
                 debug_assert_eq!(update.state.direction(), TransportDirection::Outbound);

@@ -4,7 +4,7 @@ mod peer;
 mod server;
 mod state;
 
-use std::{collections::BTreeMap, net::SocketAddr};
+use std::{collections::BTreeMap, future::Future, net::SocketAddr, pin::Pin};
 
 use tokio::{
     sync::{mpsc, oneshot},
@@ -57,6 +57,12 @@ struct Outbound {
     deadline: tokio::time::Instant,
 }
 
+struct Replacement {
+    record: PeerRecord,
+    deadline: tokio::time::Instant,
+    cleanup: Pin<Box<dyn Future<Output = Result<(), String>> + Send>>,
+}
+
 #[derive(Clone)]
 struct SessionOrigins {
     publish: moq_tokio::moq_net::origin::Producer,
@@ -77,6 +83,7 @@ pub(crate) struct SessionFoundation {
     listener_task: Option<JoinHandle<Result<(), String>>>,
     outbound: BTreeMap<String, Outbound>,
     states: PeerStates,
+    replacement: Option<Replacement>,
     cleanup: crate::cleanup::Errors,
 }
 
@@ -97,54 +104,81 @@ impl SessionFoundation {
         &mut self,
         peer: &PeerRecord,
     ) -> Result<TransportUpdate, DialError> {
-        let peer_id = &peer.id;
-        let record = peer;
-        let mut deadline = tokio::time::Instant::now() + peer::RECONNECT_BUDGET;
-        if let (Some(outbound), Some(state)) =
-            (self.outbound.get(peer_id), self.states.get(peer_id))
-        {
-            let same_identity = outbound.record.credential == record.credential
-                && outbound.record.fingerprint == record.fingerprint
-                && outbound.record.has_node == record.has_node;
-            if same_identity
-                && (outbound.connection.connected() || state.phase() == TransportPhase::Connected)
+        // Services retains the accepted Found operation across select cancellation.
+        // Keep its cleanup future and deadline here, rather than on the recv stack.
+        if self.replacement.is_none() {
+            let peer_id = &peer.id;
+            let record = peer;
+            let mut deadline = tokio::time::Instant::now() + peer::RECONNECT_BUDGET;
+            if let (Some(outbound), Some(state)) =
+                (self.outbound.get(peer_id), self.states.get(peer_id))
             {
-                return Ok(TransportUpdate {
-                    subject: SessionSubject::Peer(peer_id.to_owned()),
-                    state,
-                });
-            }
-            if same_identity && state.phase() == TransportPhase::Connecting {
-                // Only new addresses for the same advertisement can refresh this attempt.
-                // Repeated answers must not restart its clock or cross authentication identities.
-                let previous = &outbound.record;
-                if previous.has_node
-                    || record.has_node
-                    || previous.credential != record.credential
-                    || previous.fingerprint != record.fingerprint
-                    || !record
-                        .addrs
-                        .iter()
-                        .any(|addr| !previous.addrs.contains(addr))
-                    || tokio::time::Instant::now() >= outbound.deadline
+                let same_identity = outbound.record.credential == record.credential
+                    && outbound.record.fingerprint == record.fingerprint
+                    && outbound.record.has_node == record.has_node;
+                if same_identity
+                    && (outbound.connection.connected()
+                        || state.phase() == TransportPhase::Connected)
                 {
                     return Ok(TransportUpdate {
                         subject: SessionSubject::Peer(peer_id.to_owned()),
                         state,
                     });
                 }
-                deadline = outbound.deadline;
-                tracing::debug!(
-                    peer_id,
-                    previous_addresses = ?previous.addrs,
-                    addresses = ?record.addrs,
-                    previous_address_count = previous.addrs.len(),
-                    address_count = record.addrs.len(),
-                    "refreshing pending peer addresses within original connection budget"
-                );
+                if same_identity && state.phase() == TransportPhase::Connecting {
+                    // Only new addresses for the same advertisement can refresh this attempt.
+                    // Repeated answers must not restart its clock or cross authentication identities.
+                    let previous = &outbound.record;
+                    if previous.has_node
+                        || record.has_node
+                        || previous.credential != record.credential
+                        || previous.fingerprint != record.fingerprint
+                        || !record
+                            .addrs
+                            .iter()
+                            .any(|addr| !previous.addrs.contains(addr))
+                        || tokio::time::Instant::now() >= outbound.deadline
+                    {
+                        return Ok(TransportUpdate {
+                            subject: SessionSubject::Peer(peer_id.to_owned()),
+                            state,
+                        });
+                    }
+                    deadline = outbound.deadline;
+                    tracing::debug!(
+                        peer_id,
+                        previous_addresses = ?previous.addrs,
+                        addresses = ?record.addrs,
+                        previous_address_count = previous.addrs.len(),
+                        address_count = record.addrs.len(),
+                        "refreshing pending peer addresses within original connection budget"
+                    );
+                }
             }
+            let outbound = self.outbound.remove(peer_id);
+            self.replacement = Some(Replacement {
+                record: record.clone(),
+                deadline,
+                cleanup: Box::pin(async move {
+                    match outbound {
+                        Some(outbound) => close_outbound(outbound).await,
+                        None => Ok(()),
+                    }
+                }),
+            });
         }
-        self.stop_outbound(peer_id).await;
+        let replacement = self.replacement.as_mut().expect("pending replacement");
+        assert!(
+            replacement.record == *peer,
+            "resume the accepted replacement first"
+        );
+        self.cleanup
+            .result("replacement", replacement.cleanup.as_mut().await);
+        let Replacement {
+            record, deadline, ..
+        } = self.replacement.take().expect("completed cleanup");
+        let peer_id = &record.id;
+        let record = &record;
         let state = self.states.begin(peer_id);
         let dial = if tokio::time::Instant::now() >= deadline {
             Err(DialError::BudgetExhausted)
@@ -285,6 +319,11 @@ impl SessionFoundation {
     }
 
     pub(crate) async fn shutdown(mut self) -> Result<(), String> {
+        // Off drains an interrupted cleanup without opening its replacement.
+        if let Some(mut replacement) = self.replacement.take() {
+            self.cleanup
+                .result("replacement", replacement.cleanup.as_mut().await);
+        }
         let peers = self.outbound.keys().cloned().collect::<Vec<_>>();
         for peer in peers {
             self.stop_outbound(&peer).await;
@@ -311,12 +350,8 @@ impl SessionFoundation {
         let Some(outbound) = self.outbound.remove(peer) else {
             return;
         };
-        outbound.connection.abort(moq_tokio::moq_net::Error::Cancel);
-        outbound.task.abort();
         self.cleanup
-            .join("outbound observer", outbound.task.await, true);
-        // Abort requests shutdown; closed observes the connection loop actually exiting.
-        let _ = outbound.connection.closed().await;
+            .result("outbound", close_outbound(outbound).await);
     }
 
     #[cfg(test)]
@@ -352,9 +387,20 @@ impl BoundServer {
             listener_task: Some(listener_task),
             outbound: BTreeMap::new(),
             states: PeerStates::default(),
+            replacement: None,
             cleanup: Default::default(),
         })
     }
+}
+
+async fn close_outbound(outbound: Outbound) -> Result<(), String> {
+    outbound.connection.abort(moq_tokio::moq_net::Error::Cancel);
+    outbound.task.abort();
+    let mut errors = crate::cleanup::Errors::default();
+    errors.join("observer", outbound.task.await, true);
+    // Abort requests shutdown; closed observes the connection loop actually exiting.
+    let _ = outbound.connection.closed().await;
+    errors.finish()
 }
 
 fn spawn_origin() -> (moq_tokio::moq_net::origin::Producer, JoinHandle<()>) {
@@ -487,6 +533,154 @@ mod tests {
             );
         }
         assert_eq!(foundation.states.get("remote"), None);
+        foundation.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accepted_found_survives_receive_cancellation() {
+        use crate::network::{DialRole, PeerSession, PeerStatus, PendingConnection};
+        for identity_change in [false, true] {
+            let (mut foundation, mut record, _silent, reachable) = pending_peer().await;
+            let first = foundation.connect(&record).await.unwrap();
+            let old = foundation.outbound["remote"].connection.clone();
+            record.addrs.push(reachable);
+            if identity_change {
+                record.credential = "new-proof".into();
+            }
+            let mut accepted = PendingConnection {
+                record: record.clone(),
+                status: PeerStatus {
+                    id: record.id.clone(),
+                    ordinal: 1,
+                    discovered: true,
+                    role: DialRole::Active,
+                    session: if identity_change {
+                        PeerSession::Connected
+                    } else {
+                        PeerSession::Connecting
+                    },
+                    transport_generation: Some(first.state.generation()),
+                },
+            };
+            // Poll exactly to the old observer's join, then discard only the recv future.
+            {
+                let mut recv = std::pin::pin!(accepted.complete(&mut foundation));
+                std::future::poll_fn(|cx| {
+                    assert!(std::future::Future::poll(recv.as_mut(), cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+            }
+            let deadline = foundation.replacement.as_ref().unwrap().deadline;
+            tokio::time::advance(Duration::from_secs(1)).await;
+            let status = accepted.complete(&mut foundation).await;
+            assert_eq!(status.session, PeerSession::Connecting);
+            assert!(status.transport_generation.unwrap() > first.state.generation());
+            assert_eq!(foundation.outbound["remote"].record, record);
+            assert_eq!(foundation.outbound["remote"].deadline, deadline);
+            assert!(foundation.replacement.is_none());
+            assert_closed(&old);
+            let current = foundation.connect(&record).await.unwrap();
+            assert_eq!(
+                Some(current.state.generation()),
+                status.transport_generation
+            );
+            foundation.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_replacement_cannot_revive_an_exhausted_budget() {
+        let (mut foundation, mut record, _silent, reachable) = pending_peer().await;
+        foundation.connect(&record).await.unwrap();
+        let old = foundation.outbound["remote"].connection.clone();
+        record.addrs.push(reachable);
+        {
+            let mut replacing = std::pin::pin!(foundation.connect(&record));
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(replacing.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+        tokio::time::advance(super::peer::RECONNECT_BUDGET + Duration::from_secs(1)).await;
+        assert!(matches!(
+            foundation.connect(&record).await,
+            Err(super::DialError::BudgetExhausted)
+        ));
+        assert!(foundation.replacement.is_none());
+        assert!(foundation.outbound.is_empty());
+        assert_eq!(
+            foundation.state("remote").unwrap().phase(),
+            TransportPhase::Failed
+        );
+        assert_closed(&old);
+        foundation.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_interrupted_replacement_without_redial() {
+        let (mut foundation, mut record, _silent, reachable) = pending_peer().await;
+        foundation.connect(&record).await.unwrap();
+        let old = foundation.outbound["remote"].connection.clone();
+        record.addrs.push(reachable);
+        {
+            let mut replacing = std::pin::pin!(foundation.connect(&record));
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(replacing.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+        assert!(foundation.outbound.is_empty());
+        // Hold cleanup at an explicit barrier, so shutdown must join the owned work.
+        let replacement = foundation.replacement.as_mut().unwrap();
+        let cleanup = std::mem::replace(&mut replacement.cleanup, Box::pin(async { Ok(()) }));
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (completed, done) = tokio::sync::oneshot::channel();
+        replacement.cleanup = Box::pin(async move {
+            entered.send(()).unwrap();
+            wait.await.unwrap();
+            let result = cleanup.await;
+            completed.send(()).unwrap();
+            result
+        });
+        let shutdown = tokio::spawn(foundation.shutdown());
+        started.await.unwrap();
+        assert!(!shutdown.is_finished());
+        release.send(()).unwrap();
+        shutdown.await.unwrap().unwrap();
+        done.await.unwrap();
+        assert_closed(&old);
+        // A fresh network owner can start after the interrupted owner has closed.
+        SessionFoundation::bind("127.0.0.1:0".parse().unwrap())
+            .unwrap()
+            .start("fresh".into())
+            .await
+            .unwrap()
+            .shutdown()
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_address_replacement_keeps_the_original_deadline() {
+        let (mut foundation, mut record, _silent, reachable) = pending_peer().await;
+        foundation.connect(&record).await.unwrap();
+        let deadline = foundation.outbound["remote"].deadline;
+        record.addrs.push(reachable);
+        {
+            let mut replacing = std::pin::pin!(foundation.connect(&record));
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(replacing.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+        foundation.connect(&record).await.unwrap();
+        assert_eq!(foundation.outbound["remote"].deadline, deadline);
         foundation.shutdown().await.unwrap();
     }
 
