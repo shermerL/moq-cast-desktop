@@ -414,6 +414,24 @@ fn callback_consumed_nonzero(peak: f32) -> bool {
 }
 
 #[cfg(target_os = "windows")]
+fn video_config_requires_restart(
+    current: &hang::catalog::VideoConfig,
+    next: &hang::catalog::VideoConfig,
+) -> bool {
+    // Labels and stream measurements do not require reopening the decoder.
+    current.broadcast != next.broadcast
+        || current.codec != next.codec
+        || current.description != next.description
+        || current.coded_width != next.coded_width
+        || current.coded_height != next.coded_height
+        || current.display_aspect_width != next.display_aspect_width
+        || current.display_aspect_height != next.display_aspect_height
+        || current.enabled != next.enabled
+        || current.optimize_for_latency != next.optimize_for_latency
+        || current.container != next.container
+}
+
+#[cfg(target_os = "windows")]
 #[derive(Clone, PartialEq)]
 struct Selection {
     name: String,
@@ -659,7 +677,7 @@ pub(crate) async fn run(
                         continue;
                     }
                     let video_changed = next.name != selection.name
-                        || next.config != selection.config
+                        || video_config_requires_restart(&selection.config, &next.config)
                         || next.display != selection.display
                         || next.quarter_turns != selection.quarter_turns
                         || next.flip != selection.flip;
@@ -1171,6 +1189,25 @@ mod tests {
     }
 
     #[test]
+    fn stop_and_replay_the_same_source_rejects_previous_frames_and_completion() {
+        let mut view = ViewSnapshot::default();
+        let path = "moqcast.screen/peer-a";
+        let old = view.begin(path).unwrap();
+        assert!(view.decoder_ready(old, path, "decoder".into(), "avc1.640028".into(), 640, 480));
+        assert_eq!(view.begin_stop(), Some(old));
+        assert!(view.begin(path).is_none());
+        assert!(!view.decoder_ready(old, path, "decoder".into(), "avc1.640028".into(), 640, 480));
+        assert!(view.stopped(old));
+        let new = view.begin(path).unwrap();
+        assert!(new > old);
+        assert!(!view.stopped(old));
+        assert!(!view.ended(old, Ok(())));
+        assert!(!view.decoder_ready(old, path, "decoder".into(), "avc1.640028".into(), 640, 480));
+        assert!(view.decoder_ready(new, path, "decoder".into(), "avc1.640028".into(), 640, 480));
+        assert_eq!(view.phase, ViewPhase::Viewing);
+    }
+
+    #[test]
     fn audio_state_is_generation_scoped_and_does_not_end_video() {
         let mut view = ViewSnapshot::default();
         let generation = view.begin("moqcast.screen/peer-a").expect("begin");
@@ -1404,5 +1441,114 @@ mod color_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod catalog_tests {
+    use super::video_config_requires_restart;
+    use hang::catalog::{Container, VideoConfig};
+    use std::time::Duration;
+
+    fn config() -> VideoConfig {
+        VideoConfig::new("avc1.640028".parse::<hang::catalog::VideoCodec>().unwrap())
+    }
+
+    #[test]
+    fn jitter_measurements_do_not_restart_video() {
+        let mut current = config();
+        for jitter in [Some(10), Some(40), None] {
+            let mut next = current.clone();
+            next.jitter = jitter.map(Duration::from_millis);
+            assert!(!video_config_requires_restart(&current, &next));
+            current = next;
+        }
+    }
+
+    #[test]
+    fn delay_measurements_do_not_restart_video() {
+        let mut current = config();
+        for delay in [Some(20), Some(80), None] {
+            let mut next = current.clone();
+            next.delay = delay.map(Duration::from_millis);
+            assert!(!video_config_requires_restart(&current, &next));
+            current = next;
+        }
+    }
+
+    #[test]
+    fn rendition_descriptions_do_not_restart_video() {
+        let current = config();
+        let mut unexpected = Vec::new();
+        for field in ["label", "bitrate", "framerate"] {
+            let mut next = current.clone();
+            match field {
+                "label" => next.label = Some("Screen".to_owned()),
+                "bitrate" => next.bitrate = Some(4_000_000),
+                "framerate" => next.framerate = Some(60.0),
+                _ => unreachable!(),
+            }
+            if video_config_requires_restart(&current, &next)
+                || video_config_requires_restart(&next, &current)
+            {
+                unexpected.push(field);
+            }
+        }
+        assert!(
+            unexpected.is_empty(),
+            "metadata caused restart: {unexpected:?}"
+        );
+    }
+
+    #[test]
+    fn format_and_source_changes_still_restart_video() {
+        let current = config();
+        assert!(!video_config_requires_restart(&current, &current));
+        for field in [
+            "broadcast",
+            "codec",
+            "description",
+            "coded_width",
+            "coded_height",
+            "display_aspect_width",
+            "display_aspect_height",
+            "enabled",
+            "optimize_for_latency",
+            "container",
+        ] {
+            let mut next = current.clone();
+            match field {
+                "broadcast" => next.broadcast = Some("./replacement".into()),
+                "codec" => next.codec = "avc1.42c01e".parse().unwrap(),
+                "description" => next.description = Some(vec![1, 100, 0, 40].into()),
+                "coded_width" => next.coded_width = Some(1920),
+                "coded_height" => next.coded_height = Some(1080),
+                "display_aspect_width" => next.display_aspect_width = Some(16),
+                "display_aspect_height" => next.display_aspect_height = Some(9),
+                "enabled" => next.enabled = false,
+                "optimize_for_latency" => next.optimize_for_latency = Some(false),
+                "container" => next.container = Container::Loc,
+                _ => unreachable!(),
+            }
+            assert!(video_config_requires_restart(&current, &next), "{field}");
+            assert!(video_config_requires_restart(&next, &current), "{field}");
+            // A simultaneous measurement update must not hide a format change.
+            next.jitter = Some(Duration::from_millis(40));
+            assert!(video_config_requires_restart(&current, &next), "{field}");
+        }
+    }
+
+    #[test]
+    fn container_initialization_changes_still_restart_video() {
+        let mut current = config();
+        current.container = Container::Cmaf {
+            init: vec![1, 2, 3].into(),
+        };
+        let mut next = current.clone();
+        assert!(!video_config_requires_restart(&current, &next));
+        next.container = Container::Cmaf {
+            init: vec![1, 2, 4].into(),
+        };
+        assert!(video_config_requires_restart(&current, &next));
     }
 }
