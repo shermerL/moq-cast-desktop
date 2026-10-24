@@ -204,8 +204,8 @@ fn overflow_list_reaches_last_device_and_settings_keep_close_visible() {
     }
     for _ in 0..3 {
         let mut output = render(&ctx, &mut app, &s, size, vec![]);
-        assert!(painted(&output, "Close").is_positive());
-        assert!(painted(&output, "Close").bottom() < size.y);
+        assert!(painted(&output, "Settings").is_positive());
+        assert!(painted(&output, "Settings").bottom() < size.y);
         output.textures_delta.clear();
     }
 }
@@ -222,7 +222,7 @@ fn details_errors_and_player_navigation_preserve_reachable_actions() {
         render(&ctx, &mut app, &s, size, vec![]);
     }
     let output = render(&ctx, &mut app, &s, size, vec![]);
-    assert!(painted(&output, "Close").is_positive());
+    assert!(painted(&output, "Device details").is_positive());
     app.detail_peer = None;
     app.page = Page::ScreenShare;
     app.picker_error = true;
@@ -290,8 +290,8 @@ fn settings_expose_log_export_without_scrolling_or_developer_mode() {
             }
             let output = render(&ctx, &mut app, &s, size, vec![]);
             for label in match locale {
-                Locale::English => ["Export local logs", "Developer mode", "Close"],
-                Locale::Chinese => ["导出本地日志", "开发者模式", "关闭"],
+                Locale::English => ["Export local logs", "Developer mode", "Settings"],
+                Locale::Chinese => ["导出本地日志", "开发者模式", "设置"],
             } {
                 let shape = output
                     .shapes

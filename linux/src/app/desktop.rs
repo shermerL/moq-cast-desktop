@@ -185,16 +185,7 @@ impl MoqCastApp {
                     ) {
                         self.locale = locale;
                     }
-                    close
-                        || (Action {
-                            label: self.text("关闭", "Close"),
-                            size: vec2(108.0, 40.0),
-                            enabled: true,
-                            tone: ActionTone::Neutral,
-                        })
-                        .show(ui)
-                        .clicked()
-                        || self.diagnostics.visible()
+                    close || self.diagnostics.visible()
                 });
             if result.should_close() || result.inner {
                 self.settings_open = false;
@@ -229,14 +220,6 @@ impl MoqCastApp {
                             }
                         });
                     close
-                        || (Action {
-                            label: self.text("关闭", "Close"),
-                            size: vec2(108.0, 40.0),
-                            enabled: true,
-                            tone: ActionTone::Neutral,
-                        })
-                        .show(ui)
-                        .clicked()
                 });
             if result.should_close() || result.inner {
                 self.selected_peer = None;

@@ -176,18 +176,7 @@ impl MoqCastApp {
                     )
                     .clicked();
                     self.s2_settings(ui);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        Action {
-                            label: self.text("关闭", "Close"),
-                            size: vec2(108.0, 42.0),
-                            enabled: true,
-                            tone: ActionTone::Neutral,
-                        }
-                        .show(ui)
-                        .clicked()
-                    })
-                    .inner
-                        || close
+                    close
                 });
             if response.should_close() || response.inner {
                 self.settings_open = false;
@@ -235,18 +224,7 @@ impl MoqCastApp {
                                 ));
                             }
                         });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        Action {
-                            label: self.text("关闭", "Close"),
-                            size: vec2(108.0, 42.0),
-                            enabled: true,
-                            tone: ActionTone::Neutral,
-                        }
-                        .show(ui)
-                        .clicked()
-                    })
-                    .inner
-                        || close
+                    close
                 });
             if response.should_close() || response.inner {
                 self.detail_peer = None;

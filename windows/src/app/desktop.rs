@@ -636,16 +636,7 @@ impl MoqCastApp {
                                 self.diagnostics.hide_window();
                             }
                         });
-                    close
-                        || (Action {
-                            label: self.text("关闭", "Close"),
-                            size: vec2(108.0, 40.0),
-                            enabled: true,
-                            tone: ActionTone::Neutral,
-                        })
-                        .show(ui)
-                        .clicked()
-                        || self.diagnostics.visible()
+                    close || self.diagnostics.visible()
                 });
             if response.should_close() || response.inner {
                 self.settings_open = false;
@@ -682,14 +673,6 @@ impl MoqCastApp {
                             }
                         });
                     close
-                        || (Action {
-                            label: self.text("关闭", "Close"),
-                            size: vec2(108.0, 40.0),
-                            enabled: true,
-                            tone: ActionTone::Neutral,
-                        })
-                        .show(ui)
-                        .clicked()
                 });
             if response.should_close() || response.inner {
                 self.selected_peer = None;
