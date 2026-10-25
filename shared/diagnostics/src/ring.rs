@@ -97,7 +97,8 @@ impl Snapshot {
 
 pub(crate) struct Ring {
     capacity: usize,
-    entries: Mutex<VecDeque<Entry>>,
+    entries: Mutex<VecDeque<(u64, Entry)>>,
+    details: Mutex<VecDeque<(u64, Entry)>>,
     revision: AtomicU64,
     contention_dropped: AtomicU64,
 }
@@ -107,13 +108,20 @@ impl Ring {
         Arc::new(Self {
             capacity: capacity.max(1),
             entries: Mutex::new(VecDeque::with_capacity(capacity.max(1))),
+            details: Mutex::new(VecDeque::with_capacity(capacity.max(1))),
             revision: AtomicU64::new(0),
             contention_dropped: AtomicU64::new(0),
         })
     }
 
     pub(crate) fn push(&self, entry: Entry) {
-        let mut entries = match self.entries.try_lock() {
+        // Detailed traffic never holds the lifecycle ring lock or evicts its entries.
+        let lane = if entry.level == LogLevel::Debug {
+            &self.details
+        } else {
+            &self.entries
+        };
+        let mut entries = match lane.try_lock() {
             Ok(entries) => entries,
             Err(TryLockError::Poisoned(error)) => error.into_inner(),
             Err(TryLockError::WouldBlock) => {
@@ -124,8 +132,8 @@ impl Ring {
         if entries.len() == self.capacity {
             entries.pop_front();
         }
-        entries.push_back(entry);
-        self.revision.fetch_add(1, Ordering::Release);
+        let sequence = self.revision.fetch_add(1, Ordering::AcqRel);
+        entries.push_back((sequence, entry));
     }
 
     pub(crate) fn revision(&self) -> u64 {
@@ -136,13 +144,19 @@ impl Ring {
         let entries = self
             .entries
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .iter()
-            .cloned()
-            .collect();
+            .unwrap_or_else(|error| error.into_inner());
+        let details = self
+            .details
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut ordered = entries.iter().chain(details.iter()).collect::<Vec<_>>();
+        ordered.sort_unstable_by_key(|(sequence, _)| sequence);
         Snapshot {
             revision: self.revision(),
-            entries,
+            entries: ordered
+                .into_iter()
+                .map(|(_, entry)| entry.clone())
+                .collect(),
             dropped,
         }
     }
@@ -193,5 +207,37 @@ mod tests {
 
         assert_eq!(ring.contention_dropped(), 1);
         assert!(ring.snapshot(1).entries().is_empty());
+    }
+    #[test]
+    fn detailed_lane_contention_cannot_drop_a_lifecycle_event() {
+        let ring = Ring::new(2);
+        let held = ring.details.lock().unwrap();
+        ring.push(entry("connection"));
+        let mut detail = entry("packet");
+        detail.level = LogLevel::Debug;
+        ring.push(detail);
+        drop(held);
+        assert_eq!(ring.contention_dropped(), 1);
+        assert_eq!(ring.snapshot(1).entries()[0].event(), "connection");
+    }
+
+    #[test]
+    fn both_lanes_are_bounded_and_snapshot_preserves_insertion_order() {
+        let ring = Ring::new(2);
+        for n in 0..4 {
+            ring.push(entry(&format!("key{n}")));
+            let mut detail = entry(&format!("detail{n}"));
+            detail.level = LogLevel::Debug;
+            ring.push(detail);
+        }
+        let snapshot = ring.snapshot(0);
+        assert_eq!(
+            snapshot
+                .entries()
+                .iter()
+                .map(Entry::event)
+                .collect::<Vec<_>>(),
+            ["key2", "detail2", "key3", "detail3"]
+        );
     }
 }

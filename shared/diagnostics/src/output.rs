@@ -57,7 +57,12 @@ impl RotatingOutput {
             set_owner_only_directory(log_dir)?;
         }
         if let Some(max_file_age) = max_file_age {
-            prune_stale_logs(log_dir, max_file_age, SystemTime::now())?;
+            prune_stale_logs(
+                log_dir,
+                active_path.file_name().unwrap().to_str().unwrap(),
+                max_file_age,
+                SystemTime::now(),
+            )?;
         }
         if owner_only_file_permissions {
             secure_existing_logs(log_dir)?;
@@ -94,7 +99,12 @@ impl RotatingOutput {
         if self.active_path.exists() {
             fs::remove_file(&self.active_path)?;
         }
-        prune_stale_logs(log_dir, max_file_age, now)?;
+        prune_stale_logs(
+            log_dir,
+            self.active_path.file_name().unwrap().to_str().unwrap(),
+            max_file_age,
+            now,
+        )?;
         prepare_active_file(&self.active_path, self.owner_only_file_permissions)?;
         self.file = Some(FileRotate::new(
             &self.active_path,
@@ -188,11 +198,18 @@ fn secure_existing_logs(log_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn prune_stale_logs(log_dir: &Path, max_age: Duration, now: SystemTime) -> io::Result<()> {
+fn prune_stale_logs(
+    log_dir: &Path,
+    active_name: &str,
+    max_age: Duration,
+    now: SystemTime,
+) -> io::Result<()> {
     for entry in fs::read_dir(log_dir)? {
         let entry = entry?;
         let path = entry.path();
-        if !entry.file_type()?.is_file() || !is_log_name(&entry.file_name().to_string_lossy()) {
+        if !entry.file_type()?.is_file()
+            || !is_stream_log_name(&entry.file_name().to_string_lossy(), active_name)
+        {
             continue;
         }
         let stale = entry
@@ -208,10 +225,20 @@ fn prune_stale_logs(log_dir: &Path, max_age: Duration, now: SystemTime) -> io::R
     Ok(())
 }
 
-fn is_log_name(name: &str) -> bool {
-    name == crate::config::ACTIVE_LOG_NAME
+pub(crate) fn is_log_name(name: &str) -> bool {
+    [
+        crate::config::ACTIVE_LOG_NAME,
+        crate::config::DETAIL_LOG_NAME,
+    ]
+    .iter()
+    .any(|active| is_stream_log_name(name, active))
+}
+
+fn is_stream_log_name(name: &str, active: &str) -> bool {
+    name == active
         || name
-            .strip_prefix(&format!("{}.", crate::config::ACTIVE_LOG_NAME))
+            .strip_prefix(active)
+            .and_then(|suffix| suffix.strip_prefix('.'))
             .is_some_and(|suffix| suffix.parse::<usize>().is_ok())
 }
 
@@ -327,7 +354,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let (writer, guard) = Writer::spawn(Box::new(output), 8).unwrap();
+        let (writer, guard) = Writer::spawn(Box::new(output), None, 8).unwrap();
 
         writer.write_line(b"persisted\n");
         let destination = directory.path().join("stderr-failed.zip");
@@ -339,7 +366,7 @@ mod tests {
                     minimal_export_metadata: false,
                     owner_only_file_permissions: false,
                     active_filter: "base=info; detailed=off".to_owned(),
-                    dropped: 0,
+                    losses: crate::export::Losses::default(),
                 },
                 ExportRequest::new(&destination),
             )
@@ -365,8 +392,10 @@ mod tests {
         let directory = tempdir().unwrap();
         let stale = directory.path().join("moqcast.log.4");
         let recent = directory.path().join("moqcast.log.3");
+        let other_stream = directory.path().join("moqcast-detail.log.1");
         let unrelated = directory.path().join("notes.txt");
         fs::write(&stale, "stale\n").unwrap();
+        fs::write(&other_stream, "other stream\n").unwrap();
         fs::write(&recent, "recent\n").unwrap();
         fs::write(&unrelated, "keep\n").unwrap();
         let now = SystemTime::now();
@@ -378,11 +407,36 @@ mod tests {
             .set_times(FileTimes::new().set_modified(stale_time))
             .unwrap();
 
-        prune_stale_logs(directory.path(), Duration::from_secs(7 * 24 * 60 * 60), now).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&other_stream)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(stale_time))
+            .unwrap();
+
+        prune_stale_logs(
+            directory.path(),
+            crate::config::ACTIVE_LOG_NAME,
+            Duration::from_secs(7 * 24 * 60 * 60),
+            now,
+        )
+        .unwrap();
 
         assert!(!stale.exists());
         assert!(recent.exists());
         assert!(unrelated.exists());
+        assert!(
+            other_stream.exists(),
+            "one live writer must not unlink the other stream"
+        );
+        prune_stale_logs(
+            directory.path(),
+            crate::config::DETAIL_LOG_NAME,
+            Duration::from_secs(7 * 24 * 60 * 60),
+            now,
+        )
+        .unwrap();
+        assert!(!other_stream.exists());
     }
 
     #[test]

@@ -8,7 +8,21 @@ use time::OffsetDateTime;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-use crate::config::{ACTIVE_LOG_NAME, BuildInfo};
+use crate::config::BuildInfo;
+use crate::output::is_log_name;
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Losses {
+    pub(crate) queue: u64,
+    pub(crate) detail_queue: u64,
+    pub(crate) ring: u64,
+}
+
+impl Losses {
+    fn total(self) -> u64 {
+        self.queue.saturating_add(self.ring)
+    }
+}
 
 /// A user-selected local destination for a diagnostic archive.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,7 +98,7 @@ pub(crate) fn export(
     minimal_export_metadata: bool,
     owner_only_file_permissions: bool,
     active_filter: &str,
-    dropped: u64,
+    losses: Losses,
     request: ExportRequest,
 ) -> Result<ExportResult, ExportError> {
     let now = OffsetDateTime::now_utc();
@@ -114,7 +128,7 @@ pub(crate) fn export(
     }
     archive.start_file("environment.txt", options)?;
     archive.write_all(
-        environment(build, minimal_export_metadata, active_filter, dropped, now).as_bytes(),
+        environment(build, minimal_export_metadata, active_filter, losses, now).as_bytes(),
     )?;
     archive.finish()?;
 
@@ -173,13 +187,6 @@ fn destination_overlaps_logs(log_dir: &Path, destination: &Path, logs: &[PathBuf
     })
 }
 
-fn is_log_name(name: &str) -> bool {
-    name == ACTIVE_LOG_NAME
-        || name
-            .strip_prefix(&format!("{ACTIVE_LOG_NAME}."))
-            .is_some_and(|suffix| suffix.parse::<usize>().is_ok())
-}
-
 fn collect_logs(log_dir: &Path) -> io::Result<Vec<PathBuf>> {
     let mut logs = Vec::new();
     for entry in fs::read_dir(log_dir)? {
@@ -201,7 +208,7 @@ fn environment(
     build: &BuildInfo,
     minimal_export_metadata: bool,
     active_filter: &str,
-    dropped: u64,
+    losses: Losses,
     now: OffsetDateTime,
 ) -> String {
     let timestamp = format!(
@@ -219,8 +226,13 @@ fn environment(
         one_line(&build.os),
         timestamp,
         one_line(active_filter),
-        dropped
+        losses.total()
     );
+    environment.push_str(&format!(
+        "writer_queue_dropped={}\ndetail_queue_dropped={}\nlifecycle_queue_dropped={}\nring_contention_dropped={}\noutput_errors=0\n",
+        losses.queue, losses.detail_queue,
+        losses.queue.saturating_sub(losses.detail_queue), losses.ring
+    ));
     if !minimal_export_metadata {
         environment.push_str(&format!(
             "build_identity={}\nsource_identity={}\ndependency_identity={}\n",
@@ -238,6 +250,7 @@ fn one_line(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::ACTIVE_LOG_NAME;
     use std::io::Read;
 
     use tempfile::tempdir;
@@ -263,7 +276,10 @@ mod tests {
             false,
             false,
             "base=info; detailed=off",
-            3,
+            Losses {
+                queue: 3,
+                ..Losses::default()
+            },
             ExportRequest::new(&destination),
         )
         .unwrap();
@@ -313,7 +329,10 @@ mod tests {
             true,
             true,
             "base=info; detailed=on",
-            2,
+            Losses {
+                queue: 2,
+                ..Losses::default()
+            },
             ExportRequest::new(&destination),
         )
         .unwrap();
@@ -368,7 +387,7 @@ mod tests {
                 false,
                 false,
                 "base=info; detailed=off",
-                0,
+                Losses::default(),
                 ExportRequest::new(destination),
             )
             .unwrap_err();
@@ -381,7 +400,12 @@ mod tests {
 
     #[test]
     fn archive_open_rejects_hard_links_without_changing_source_bytes() {
-        for name in [ACTIVE_LOG_NAME, "moqcast.log.1"] {
+        for name in [
+            ACTIVE_LOG_NAME,
+            "moqcast.log.1",
+            "moqcast-detail.log",
+            "moqcast-detail.log.1",
+        ] {
             let directory = tempdir().unwrap();
             let source = directory.path().join(name);
             let destination = directory.path().join("export.zip");
@@ -397,13 +421,21 @@ mod tests {
 
     #[test]
     fn export_rejects_hard_link_destinations_and_preserves_all_logs() {
-        for alias_name in [ACTIVE_LOG_NAME, "moqcast.log.1"] {
+        for alias_name in [
+            ACTIVE_LOG_NAME,
+            "moqcast.log.1",
+            "moqcast-detail.log",
+            "moqcast-detail.log.1",
+        ] {
             for owner_only in [false, true] {
                 let directory = tempdir().unwrap();
                 let active = directory.path().join(ACTIVE_LOG_NAME);
                 let rotated = directory.path().join("moqcast.log.1");
                 fs::write(&active, "current\n").unwrap();
                 fs::write(&rotated, "older\n").unwrap();
+                for name in ["moqcast-detail.log", "moqcast-detail.log.1"] {
+                    fs::write(directory.path().join(name), "detail\n").unwrap();
+                }
                 let destination = directory.path().join("export.zip");
                 fs::hard_link(directory.path().join(alias_name), &destination).unwrap();
 
@@ -413,7 +445,7 @@ mod tests {
                     false,
                     owner_only,
                     "info",
-                    0,
+                    Losses::default(),
                     ExportRequest::new(&destination),
                 );
                 assert!(matches!(result, Err(ExportError::DestinationOverlapsLog)));
@@ -463,7 +495,7 @@ mod tests {
             false,
             false,
             "info",
-            0,
+            Losses::default(),
             ExportRequest::new(&destination),
         )
         .unwrap();
@@ -491,7 +523,7 @@ mod tests {
             false,
             false,
             "info",
-            0,
+            Losses::default(),
             ExportRequest::new(directory.path().join("missing/export.zip")),
         );
         assert!(matches!(result, Err(ExportError::Io(_))));
@@ -512,7 +544,7 @@ mod tests {
             false,
             true,
             "info",
-            0,
+            Losses::default(),
             ExportRequest::new(&destination),
         );
         assert!(matches!(result, Err(ExportError::DestinationOverlapsLog)));
@@ -536,7 +568,7 @@ mod tests {
             true,
             true,
             "base=info; detailed=off",
-            0,
+            Losses::default(),
             ExportRequest::new(&destination),
         )
         .unwrap();

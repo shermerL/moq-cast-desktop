@@ -6,11 +6,13 @@ fn exported_log(handle: &Handle, path: &Path) -> String {
     handle.export(ExportRequest::new(path)).unwrap();
     let mut archive = zip::ZipArchive::new(fs::File::open(path).unwrap()).unwrap();
     let mut log = String::new();
-    archive
-        .by_name("moqcast.log")
-        .unwrap()
-        .read_to_string(&mut log)
-        .unwrap();
+    for name in ["moqcast.log", "moqcast-detail.log"] {
+        archive
+            .by_name(name)
+            .unwrap()
+            .read_to_string(&mut log)
+            .unwrap();
+    }
     log
 }
 

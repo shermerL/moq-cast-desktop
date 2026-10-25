@@ -5,10 +5,13 @@ use std::time::Duration;
 use thiserror::Error;
 
 pub(crate) const ACTIVE_LOG_NAME: &str = "moqcast.log";
+pub(crate) const DETAIL_LOG_NAME: &str = "moqcast-detail.log";
 pub(crate) const DEFAULT_RING_CAPACITY: usize = 1_000;
 pub(crate) const DEFAULT_QUEUE_CAPACITY: usize = 4_096;
 pub(crate) const DEFAULT_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const DEFAULT_MAX_LOG_FILES: usize = 5;
+// Raw packet history is intentionally shorter than lifecycle history.
+pub(crate) const MAX_DETAIL_LOG_FILES: usize = 2;
 
 /// An operating-system path convention supported by MoQCast diagnostics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -370,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn defaults_define_eight_mib_and_five_total_log_files() {
+    fn defaults_define_eight_mib_and_five_files_per_stream() {
         assert_eq!(DEFAULT_MAX_FILE_BYTES, 8 * 1024 * 1024);
         assert_eq!(DEFAULT_MAX_LOG_FILES, 5);
     }

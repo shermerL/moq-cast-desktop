@@ -125,7 +125,10 @@ impl Handle {
                 minimal_export_metadata: self.inner.minimal_export_metadata,
                 owner_only_file_permissions: self.inner.owner_only_file_permissions,
                 active_filter: self.active_filter(),
-                dropped: self.dropped_count(),
+                losses: self
+                    .inner
+                    .writer
+                    .losses(self.inner.ring.contention_dropped()),
             },
             request,
         )
@@ -178,7 +181,19 @@ fn build(config: Config) -> (Handle, Option<WorkerGuard>, DiagnosticsLayer) {
             config.max_file_age,
             config.owner_only_file_permissions,
         )?;
-        let (writer, worker) = Writer::spawn(Box::new(output), config.queue_capacity)?;
+        let details = RotatingOutput::new(
+            &paths.log_dir().join(config::DETAIL_LOG_NAME),
+            config.max_file_bytes,
+            config.max_log_files.min(config::MAX_DETAIL_LOG_FILES),
+            config.stderr,
+            config.max_file_age,
+            config.owner_only_file_permissions,
+        )?;
+        let (writer, worker) = Writer::spawn(
+            Box::new(output),
+            Some(Box::new(details)),
+            config.queue_capacity,
+        )?;
         Ok::<_, std::io::Error>((writer, worker, paths.log_dir().to_owned()))
     });
     let (writer, worker, file_status) = match file_result {
@@ -196,7 +211,7 @@ fn build(config: Config) -> (Handle, Option<WorkerGuard>, DiagnosticsLayer) {
                     .unwrap_or_else(|| "local file diagnostics were not configured".to_owned()),
                 Some(Ok(_)) => unreachable!(),
             };
-            match Writer::spawn(output::fallback(config.stderr), config.queue_capacity) {
+            match Writer::spawn(output::fallback(config.stderr), None, config.queue_capacity) {
                 Ok((writer, worker)) => (writer, Some(worker), FileStatus::Unavailable(reason)),
                 Err(error) => (
                     Writer::disabled(),
@@ -296,7 +311,11 @@ where
             &span_context,
         );
         self.ring.push(entry.clone());
-        self.writer.write_line(entry.line.as_bytes());
+        if entry.level == LogLevel::Debug {
+            self.writer.write_detail(entry.line.as_bytes());
+        } else {
+            self.writer.write_line(entry.line.as_bytes());
+        }
     }
 
     fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
@@ -798,7 +817,7 @@ mod tests {
             let mut archive = zip::ZipArchive::new(fs::File::open(destination).unwrap()).unwrap();
             let mut file = String::new();
             archive
-                .by_name("moqcast.log")
+                .by_name("moqcast-detail.log")
                 .unwrap()
                 .read_to_string(&mut file)
                 .unwrap();
@@ -864,7 +883,7 @@ mod tests {
             });
             drop(worker);
             assert_eq!(handle.snapshot().entries().len(), 5);
-            let file = fs::read_to_string(log_dir(&handle).join("moqcast.log")).unwrap();
+            let file = fs::read_to_string(log_dir(&handle).join("moqcast-detail.log")).unwrap();
             for expected in [
                 "TLS handshake: certificate rejected at 192.0.2.1:443",
                 "moqt://[2001:db8::1]:443/",
@@ -1256,3 +1275,6 @@ mod tests {
 
 #[cfg(test)]
 mod quic_tests;
+
+#[cfg(test)]
+mod retention_tests;
