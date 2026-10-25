@@ -16,6 +16,7 @@ default = ["app"]
 app = [
     "dep:block2",
     "dep:eframe",
+    "moq-video/render",
     "dep:moqcast-diagnostics",
     "dep:moqcast-ui",
     "dep:objc2-app-kit",

@@ -18,14 +18,14 @@ pub(crate) struct FrameIdentity {
     pub(crate) sequence: u64,
 }
 
-#[derive(Clone)]
 pub(crate) struct Frame {
     pub(crate) identity: FrameIdentity,
-    pub(crate) width: usize,
-    pub(crate) height: usize,
     pub(crate) display_width: u32,
     pub(crate) display_height: u32,
-    pub(crate) rgba: Vec<u8>,
+    pub(crate) video: moq_video::Frame,
+    pub(crate) quarter_turns: u8,
+    pub(crate) flip: bool,
+    pub(crate) presentation_error: Option<watch::Sender<Option<String>>>,
 }
 
 pub(crate) enum Event {
@@ -497,6 +497,8 @@ async fn run_inner(playback: PlaybackRun) -> anyhow::Result<()> {
         wake,
         volume,
     } = playback;
+    // Each run owns its feedback channel; retained frames cannot fail a later run.
+    let (presentation_error, mut presentation_errors) = watch::channel(None::<String>);
     let mut catalog = tokio::select! {
         biased;
         _ = wait_for_cancel(&mut cancel) => return Ok(()),
@@ -598,10 +600,8 @@ async fn run_inner(playback: PlaybackRun) -> anyhow::Result<()> {
                 let display = selected.identity.display;
                 let quarter_turns = selected.identity.quarter_turns;
                 let flip = selected.identity.flip;
-                let frame = tokio::task::spawn_blocking(move || {
-                    Frame::from_video(decoded, identity, display, quarter_turns, flip)
-                })
-                .await??;
+                let mut frame = Frame::from_video(decoded, identity, display, quarter_turns, flip)?;
+                frame.presentation_error = Some(presentation_error.clone());
                 let width = frame.display_width;
                 let height = frame.display_height;
                 let decoder_generation = frame.identity.decoder_generation;
@@ -642,6 +642,12 @@ async fn run_inner(playback: PlaybackRun) -> anyhow::Result<()> {
                         "remote playback cancellation received"
                     );
                     break Ok(());
+                }
+                changed = presentation_errors.changed() => {
+                    changed.expect("playback owns the presentation sender");
+                    if let Some(error) = presentation_errors.borrow_and_update().clone() {
+                        break Err(anyhow::anyhow!("video presentation failed: {error}"));
+                    }
                 }
                 update = catalog.next() => {
                     let Some(update) = update? else {
@@ -716,6 +722,10 @@ async fn run_inner(playback: PlaybackRun) -> anyhow::Result<()> {
                             let decoder = tokio::select! {
                                 biased;
                                 _ = wait_for_cancel(&mut cancel) => break Ok(()),
+                                error = presentation_errors.wait_for(Option::is_some) => {
+                                    let error = error.expect("playback owns the presentation sender").clone().expect("nonempty presentation error");
+                                    break Err(anyhow::anyhow!("video presentation failed: {error}"));
+                                }
                                 result = video.decoder(&broadcast, video_max_age) => result?,
                             };
                             decoder_name = Some(decoder.name().to_owned());
@@ -863,7 +873,7 @@ async fn run_inner(playback: PlaybackRun) -> anyhow::Result<()> {
 }
 
 impl Frame {
-    fn from_video(
+    pub(crate) fn from_video(
         frame: moq_video::Frame,
         identity: FrameIdentity,
         display: Option<(u32, u32)>,
@@ -876,23 +886,50 @@ impl Frame {
             width > 0 && height > 0 && width.is_multiple_of(2) && height.is_multiple_of(2),
             "remote I420 frame dimensions must be non-zero and even"
         );
-        let image = frame
-            .surface
-            .to_rgba(&moq_video::convert::Config::default())?;
-        let (rgba, width, height) =
-            orient_rgba(image.into_data(), width, height, quarter_turns, flip);
+        let quarter_turns = quarter_turns % 4;
+        let (width, height) = if quarter_turns.is_multiple_of(2) {
+            (width, height)
+        } else {
+            (height, width)
+        };
         let (display_width, display_height) = display.unwrap_or((width as u32, height as u32));
         Ok(Self {
             identity,
-            width,
-            height,
             display_width,
             display_height,
-            rgba,
+            video: frame,
+            quarter_turns,
+            flip,
+            presentation_error: None,
         })
+    }
+    #[cfg(test)]
+    pub(crate) fn rgba_reference(&self) -> Vec<u8> {
+        let image = self.video.surface.to_rgba(&Default::default()).unwrap();
+        orient_rgba(
+            image.into_data(),
+            self.video.size().width as usize,
+            self.video.size().height as usize,
+            self.quarter_turns,
+            self.flip,
+        )
+        .0
+    }
+
+    /// Map displayed coordinates back to the unrotated source, then undo its mirror.
+    pub(crate) fn source_uv(&self, x: f32, y: f32) -> [f32; 2] {
+        let (x, y) = match self.quarter_turns {
+            0 => (x, y),
+            1 => (y, 1.0 - x),
+            2 => (1.0 - x, 1.0 - y),
+            3 => (1.0 - y, x),
+            _ => unreachable!("orientation normalized at frame creation"),
+        };
+        [if self.flip { 1.0 - x } else { x }, y]
     }
 }
 
+#[cfg(test)]
 fn orient_rgba(
     source: Vec<u8>,
     width: usize,
@@ -1242,7 +1279,7 @@ mod color_tests {
     }
 
     fn assert_pixel(frame: &Frame, expected: [u8; 4]) {
-        for pixel in frame.rgba.chunks_exact(4) {
+        for pixel in frame.rgba_reference().chunks_exact(4) {
             for (actual, expected) in pixel.iter().zip(expected) {
                 assert!(
                     actual.abs_diff(expected) <= 2,
@@ -1322,14 +1359,19 @@ mod color_tests {
                     flip != 0,
                 );
                 let dims = if turns % 2 == 0 { (2, 4) } else { (4, 2) };
-                assert_eq!((result.width, result.height), dims);
-                for (pixel, source_index) in result.rgba.chunks_exact(4).zip(expected) {
+                let actual_dims = if result.quarter_turns.is_multiple_of(2) {
+                    (result.video.size().width, result.video.size().height)
+                } else {
+                    (result.video.size().height, result.video.size().width)
+                };
+                assert_eq!(actual_dims, dims);
+                for (pixel, source_index) in result.rgba_reference().chunks_exact(4).zip(expected) {
                     let offset = source_index * 4;
-                    assert_eq!(pixel, &plain.rgba[offset..offset + 4]);
+                    assert_eq!(pixel, &plain.rgba_reference()[offset..offset + 4]);
                 }
                 assert!(
                     result
-                        .rgba
+                        .rgba_reference()
                         .chunks_exact(4)
                         .all(|p| p[0] == p[1] && p[1] == p[2] && p[3] == 255)
                 );

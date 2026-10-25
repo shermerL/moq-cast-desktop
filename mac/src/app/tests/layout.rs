@@ -21,9 +21,7 @@ fn app() -> (MoqCastApp, impl FnMut() -> bool) {
         runtime,
         system_lifecycle: None,
         player: player::Player::default(),
-        playback_texture: None,
-        playback_identity: None,
-        playback_display: None,
+        video: None,
         capture_picker: None,
         capture_permission: CapturePermission::Denied,
         picker_kind: capture_picker::Kind::default(),
@@ -677,4 +675,40 @@ fn nearby_off_acknowledgement_allows_reopening_without_clearing_early() {
     s.discovery.begin(DiscoveryPhase::Starting);
     reconcile_nearby_action(&mut app.nearby_action_pending, &s);
     assert!(app.nearby_action_pending.is_none());
+}
+
+#[test]
+fn presentation_failure_reaches_its_session_when_commands_are_full() {
+    let (mut failed_app, _commands) = app();
+    while failed_app.runtime.stop_watching() {}
+    let (failure, receiver) = tokio::sync::watch::channel(None::<String>);
+    let mut frame = crate::playback::Frame::from_video(
+        moq_video::Frame::new(
+            moq_video::Surface::I420(
+                moq_video::I420::new(moq_video::Size::new(2, 2), vec![128; 6]).unwrap(),
+            ),
+            moq_tokio::moq_net::Timestamp::ZERO,
+        ),
+        crate::playback::FrameIdentity {
+            view_generation: 7,
+            decoder_generation: 1,
+            sequence: 1,
+        },
+        None,
+        0,
+        false,
+    )
+    .unwrap();
+    frame.presentation_error = Some(failure);
+    failed_app.fail_video(&frame, &anyhow::anyhow!("injected renderer failure"));
+    assert_eq!(
+        receiver.borrow().as_deref(),
+        Some("injected renderer failure")
+    );
+    assert!(failed_app.command_error);
+    // A retained frame's callback must not enqueue an unscoped stop for a new watch.
+    drop(receiver);
+    let (mut next_app, mut next_commands) = app();
+    next_app.fail_video(&frame, &anyhow::anyhow!("late renderer failure"));
+    assert!(!next_commands(), "old frame must not stop the new playback");
 }

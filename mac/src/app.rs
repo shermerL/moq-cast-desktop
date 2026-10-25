@@ -5,6 +5,7 @@ mod desktop;
 mod diagnostics;
 mod player;
 mod system_lifecycle;
+mod video;
 mod view;
 
 use eframe::egui::{self, Align, Color32, Frame, Key, Layout, Modifiers};
@@ -14,7 +15,6 @@ use moqcast_ui::{PlayerFrameSample, install_ui_font};
 use self::view::{ConnectionView, PresenceView};
 use self::view::{PeerPresentation, screen_availability};
 use crate::network::PeerSession;
-use crate::playback::FrameIdentity;
 use crate::remote::ScreenAvailability;
 use crate::runtime::{
     AppSnapshot, DiscoveryPhase, Generation, MediaOwner, MediaPhase, NearbyIssue, PeerSnapshot,
@@ -94,9 +94,7 @@ pub(crate) struct MoqCastApp {
     runtime: RuntimeOwner,
     system_lifecycle: Option<system_lifecycle::Observer>,
     player: player::Player,
-    playback_texture: Option<egui::TextureHandle>,
-    playback_identity: Option<FrameIdentity>,
-    playback_display: Option<(u32, u32)>,
+    video: Option<video::Presenter>,
     capture_picker: Option<capture_picker::Picker>,
     capture_permission: CapturePermission,
     picker_kind: capture_picker::Kind,
@@ -134,6 +132,10 @@ impl MoqCastApp {
                 .storage
                 .and_then(|storage| storage.get_string(STORAGE_DEVELOPER_MODE)),
         );
+        let render_state = context
+            .wgpu_render_state
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("GPU renderer unavailable"))?;
         let repaint = context.egui_ctx.clone();
         let runtime = RuntimeOwner::start(move || repaint.request_repaint())?;
         let system_lifecycle = Some(system_lifecycle::Observer::new(runtime.system_lifecycle()));
@@ -156,9 +158,7 @@ impl MoqCastApp {
             runtime,
             system_lifecycle,
             player: player::Player::default(),
-            playback_texture: None,
-            playback_identity: None,
-            playback_display: None,
+            video: Some(video::Presenter::new(render_state)),
             capture_picker: None,
             capture_permission,
             picker_kind: capture_picker::Kind::default(),
@@ -189,47 +189,28 @@ impl MoqCastApp {
         }
     }
 
-    fn update_playback_texture(&mut self, context: &egui::Context, snapshot: &AppSnapshot) {
-        let active = Self::player_active(snapshot);
-        if !active {
-            self.playback_texture = None;
-            self.playback_identity = None;
-            self.playback_display = None;
-            return;
-        }
-        let Some(frame) = self.runtime.playback_frame() else {
-            if snapshot.media.phase() != MediaPhase::Watching {
-                self.playback_texture = None;
-                self.playback_identity = None;
-                self.playback_display = None;
-            }
+    fn update_playback_texture(&mut self, snapshot: &AppSnapshot) {
+        let generation =
+            Self::player_active(snapshot).then_some(snapshot.media.generation().value());
+        let frame = self.runtime.playback_frame();
+        let Some(video) = self.video.as_mut() else {
             return;
         };
-        if frame.identity.view_generation != snapshot.media.generation().value()
-            || self
-                .playback_identity
-                .is_some_and(|identity| identity >= frame.identity)
-        {
-            return;
+        if let Err(error) = video.update(generation, frame.as_deref()) {
+            self.fail_video(
+                frame.as_deref().expect("presentation needs a frame"),
+                &error,
+            );
         }
-        let image = egui::ColorImage::from_rgba_unmultiplied(
-            [frame.width, frame.height],
-            frame.rgba.as_slice(),
-        );
-        match self.playback_texture.as_mut() {
-            Some(texture) if texture.size() == [frame.width, frame.height] => {
-                texture.set(image, egui::TextureOptions::LINEAR);
-            }
-            _ => {
-                self.playback_texture = Some(context.load_texture(
-                    "moqcast-remote-screen",
-                    image,
-                    egui::TextureOptions::LINEAR,
-                ));
-            }
+    }
+
+    fn fail_video(&mut self, frame: &crate::playback::Frame, error: &anyhow::Error) {
+        tracing::error!(%error, view_generation = frame.identity.view_generation, "remote video presentation failed");
+        self.command_error = true;
+        // Feedback belongs to this frame's run, not the bounded UI command queue.
+        if let Some(failure) = &frame.presentation_error {
+            failure.send_replace(Some(error.to_string()));
         }
-        self.playback_identity = Some(frame.identity);
-        self.playback_display = Some((frame.display_width, frame.display_height));
     }
 
     fn player_active(snapshot: &AppSnapshot) -> bool {
@@ -289,18 +270,22 @@ impl MoqCastApp {
 
     fn watch_player(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
         let device_name = self.player_device_name(snapshot);
-        let texture = self.playback_texture.as_ref().zip(self.playback_display);
+        let texture = self.video.as_ref().and_then(video::Presenter::texture);
         match self.player.show(
             ui,
             player::PlayerView {
                 locale: self.locale,
                 generation: snapshot.media.generation().value(),
                 phase: snapshot.media.phase(),
-                frame: self.playback_identity.map(|identity| PlayerFrameSample {
-                    view_generation: identity.view_generation,
-                    decoder_generation: identity.decoder_generation,
-                    sequence: identity.sequence,
-                }),
+                frame: self
+                    .video
+                    .as_ref()
+                    .and_then(video::Presenter::identity)
+                    .map(|identity| PlayerFrameSample {
+                        view_generation: identity.view_generation,
+                        decoder_generation: identity.decoder_generation,
+                        sequence: identity.sequence,
+                    }),
                 video_codec: snapshot.media_video_codec.as_deref(),
                 decoder: snapshot.media_decoder.as_deref(),
                 audio: &snapshot.watch_audio,
@@ -379,7 +364,7 @@ impl eframe::App for MoqCastApp {
         ) {
             self.confirm_turn_off_nearby = false;
         }
-        self.update_playback_texture(ui.ctx(), &snapshot);
+        self.update_playback_texture(&snapshot);
         let player_active = Self::player_active(&snapshot);
         let fullscreen = self.player.reconcile_fullscreen(ui.ctx(), player_active);
         if fullscreen {

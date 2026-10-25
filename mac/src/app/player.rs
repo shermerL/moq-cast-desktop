@@ -1,13 +1,13 @@
 //! Shared-system remote screen player surface and controls.
 
-use eframe::egui::{self, Align, Color32, Layout, Rect, Sense, TextureHandle, ViewportCommand};
+use eframe::egui::{self, Align, Color32, Layout, Rect, Sense, ViewportCommand};
 use moqcast_ui::v2::PLAYER_VOLUME_CONTROL_WIDTH;
 use moqcast_ui::{
     COLORS, PlayerAudioState, PlayerFrameSample, PlayerInfoLocale, PlayerInfoSnapshot,
     PlayerInfoState, PlayerVolumeState, Size, TypographyRole, typography,
 };
 
-use super::Locale;
+use super::{Locale, video::Texture};
 use crate::playback::{AudioPhase, AudioSnapshot};
 use crate::runtime::MediaPhase;
 
@@ -96,7 +96,7 @@ pub(super) struct PlayerView<'a> {
     pub(super) decoder: Option<&'a str>,
     pub(super) audio: &'a AudioSnapshot,
     pub(super) device_name: &'a str,
-    pub(super) texture: Option<(&'a TextureHandle, (u32, u32))>,
+    pub(super) texture: Option<Texture>,
 }
 
 #[derive(Default)]
@@ -127,7 +127,7 @@ impl Player {
         }
         let source = view
             .texture
-            .map(|(_, (width, height))| egui::vec2(width as f32, height as f32));
+            .map(|texture| egui::vec2(texture.display.0 as f32, texture.display.1 as f32));
         let available = ui.available_rect_before_wrap();
         let available = Rect::from_min_size(
             available.min,
@@ -165,18 +165,13 @@ fn paint_surface(
     ui: &mut egui::Ui,
     surface: Rect,
     image_size: egui::Vec2,
-    texture: Option<(&TextureHandle, (u32, u32))>,
+    texture: Option<Texture>,
 ) {
-    let Some((texture, _)) = texture else {
+    let Some(texture) = texture else {
         return;
     };
     let image = Rect::from_center_size(surface.center(), image_size);
-    ui.painter().image(
-        texture.id(),
-        image,
-        Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-        Color32::WHITE,
-    );
+    ui.painter().add(texture.mesh(image));
 }
 
 fn paint_status(ui: &mut egui::Ui, surface: Rect, locale: Locale, phase: MediaPhase) {
@@ -330,7 +325,7 @@ fn player_info_snapshot<'a>(view: &'a PlayerView<'a>, muted: bool) -> PlayerInfo
         generation: view.generation,
         source: Some(view.device_name),
         frame: view.frame,
-        resolution: view.texture.map(|(_, display)| display),
+        resolution: view.texture.map(|texture| texture.display),
         video_codec: view.video_codec,
         decoder: view.decoder,
         audio_state: player_audio_state(view.audio.phase, muted),

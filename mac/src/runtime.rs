@@ -2394,11 +2394,19 @@ mod tests {
                         decoder_generation: 1,
                         sequence: 1,
                     },
-                    width: 1,
-                    height: 1,
-                    display_width: 1,
-                    display_height: 1,
-                    rgba: vec![0, 0, 0, 255],
+                    display_width: 2,
+                    display_height: 2,
+                    video: moq_video::Frame::new(
+                        moq_video::Surface::rgba(
+                            &[0, 0, 0, 255].repeat(4),
+                            moq_video::Size::new(2, 2),
+                        )
+                        .unwrap(),
+                        moq_tokio::moq_net::Timestamp::ZERO,
+                    ),
+                    quarter_turns: 0,
+                    flip: false,
+                    presentation_error: None,
                 });
                 let (frames, frame_rx) = watch::channel(Some(frame));
                 let services_stopped = Arc::new(AtomicBool::new(false));
