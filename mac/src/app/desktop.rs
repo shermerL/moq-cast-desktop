@@ -213,6 +213,16 @@ impl MoqCastApp {
                                 );
                                 ui.separator();
                                 ui.label(peer_line(view, self.locale));
+                                let estimate = peer.bandwidth.sample();
+                                moqcast_ui::v2::connection_estimates(
+                                    ui,
+                                    estimate.send_bps,
+                                    estimate.recv_bps,
+                                    match self.locale {
+                                        Locale::Chinese => moqcast_ui::PlayerInfoLocale::Chinese,
+                                        Locale::English => moqcast_ui::PlayerInfoLocale::English,
+                                    },
+                                );
                                 ui.label(screen_label(
                                     screen_availability(&peer_id, &snapshot.remote_screens),
                                     self.locale,

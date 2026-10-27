@@ -781,6 +781,7 @@ mod tests {
 
     fn peer(id: &str) -> PeerView {
         PeerView {
+            bandwidth: Default::default(),
             id: id.to_owned(),
             candidates: Vec::new(),
             should_dial: true,

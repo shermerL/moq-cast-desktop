@@ -29,6 +29,7 @@ pub(crate) enum SessionSubject {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TransportUpdate {
+    pub(crate) bandwidth: moqcast_lan_state::bandwidth::View,
     pub(crate) subject: SessionSubject,
     pub(crate) state: TransportState,
 }
@@ -47,6 +48,7 @@ pub(super) enum RuntimeEvent {
 }
 
 struct Outbound {
+    bandwidth: moqcast_lan_state::bandwidth::View,
     connection: moq_tokio::Connection,
     task: JoinHandle<()>,
     record: peer::PeerRecord,
@@ -113,6 +115,7 @@ impl SessionFoundation {
         {
             if outbound.connection.connected() || state.phase() == TransportPhase::Connected {
                 return Ok(TransportUpdate {
+                    bandwidth: outbound.bandwidth.clone(),
                     subject: SessionSubject::Peer(peer_id.into()),
                     state,
                 });
@@ -132,6 +135,7 @@ impl SessionFoundation {
                     || tokio::time::Instant::now() >= outbound.deadline
                 {
                     return Ok(TransportUpdate {
+                        bandwidth: outbound.bandwidth.clone(),
                         subject: SessionSubject::Peer(peer_id.into()),
                         state,
                     });
@@ -175,6 +179,8 @@ impl SessionFoundation {
                 .as_millis() as u64,
             "starting outbound candidate set"
         );
+        let observation = moqcast_lan_state::bandwidth::Observation::default();
+        let bandwidth = observation.view();
         let task = tokio::spawn(async move {
             match tokio::time::timeout_at(deadline, observed.clone().established()).await {
                 Ok(Ok(connection)) => {
@@ -191,7 +197,13 @@ impl SessionFoundation {
                             phase: TransportPhase::Connected,
                         })
                         .await;
-                    let reason = connection.closed().await;
+                    let reason = crate::bandwidth::outbound(
+                        &connection,
+                        observation,
+                        &observed_peer,
+                        generation,
+                    )
+                    .await;
                     tracing::debug!(stage = "transport", generation, peer_id = %observed_peer, ?reason, "outbound connection closed");
                     let _ = events
                         .send(RuntimeEvent::Outbound {
@@ -228,6 +240,7 @@ impl SessionFoundation {
         self.outbound.insert(
             peer_id.clone(),
             Outbound {
+                bandwidth: bandwidth.clone(),
                 connection,
                 task,
                 record: record.clone(),
@@ -235,6 +248,7 @@ impl SessionFoundation {
             },
         );
         Ok(TransportUpdate {
+            bandwidth,
             subject: SessionSubject::Peer(peer_id),
             state,
         })
@@ -244,6 +258,7 @@ impl SessionFoundation {
         self.stop_outbound(peer).await;
         let state = self.states.disconnect(peer)?;
         Some(TransportUpdate {
+            bandwidth: Default::default(),
             subject: SessionSubject::Peer(peer.to_owned()),
             state,
         })
@@ -262,12 +277,18 @@ impl SessionFoundation {
                         continue;
                     };
                     return Some(TransportUpdate {
+                        bandwidth: self
+                            .outbound
+                            .get(&peer)
+                            .map(|outbound| outbound.bandwidth.clone())
+                            .unwrap_or_default(),
                         subject: SessionSubject::Peer(peer),
                         state,
                     });
                 }
                 RuntimeEvent::Inbound { id, phase } => {
                     return Some(TransportUpdate {
+                        bandwidth: Default::default(),
                         subject: SessionSubject::Inbound(id),
                         state: TransportState::inbound(id, phase),
                     });
@@ -417,6 +438,8 @@ mod tests {
         record.addrs.push(foundation.advertisement().addr);
         let refreshed = foundation.connect_record("remote", &record).await.unwrap();
         assert!(refreshed.state.generation() > first.state.generation());
+        assert_ne!(first.bandwidth, refreshed.bandwidth);
+        assert_eq!(first.bandwidth.sample(), Default::default());
         assert_eq!(foundation.outbound["remote"].deadline, deadline);
         assert_closed(&old_connection);
         let current = foundation.outbound["remote"].connection.clone();
@@ -429,6 +452,7 @@ mod tests {
         record.addrs.push("127.0.0.1:9".parse().unwrap());
         let kept = foundation.connect_record("remote", &record).await.unwrap();
         assert_eq!(kept.state.generation(), refreshed.state.generation());
+        assert_eq!(kept.bandwidth, refreshed.bandwidth);
         assert!(current.connected());
         foundation
             .events
@@ -456,6 +480,7 @@ mod tests {
         let disconnected = foundation.disconnect("remote").await.unwrap();
         assert!(disconnected.state.generation() > refreshed.state.generation());
         assert_closed(&current);
+        assert_eq!(refreshed.bandwidth.sample(), Default::default());
         // Drain the queued old failure without waiting for a new network event.
         foundation
             .events
@@ -564,6 +589,7 @@ mod tests {
         foundation.outbound.insert(
             "test".into(),
             super::Outbound {
+                bandwidth: Default::default(),
                 connection,
                 task: tokio::spawn(std::future::pending()),
                 record: unused_record(),
@@ -649,6 +675,7 @@ mod tests {
         foundation.outbound.insert(
             "test".into(),
             super::Outbound {
+                bandwidth: Default::default(),
                 connection,
                 task,
                 record: unused_record(),

@@ -660,6 +660,16 @@ impl MoqCastApp {
                                 ui.label(&id);
                                 let (tone, status) = row_status(self.locale, &self.snapshot, peer);
                                 v2::notice(ui, tone, status);
+                                let estimate = peer.bandwidth.sample();
+                                v2::connection_estimates(
+                                    ui,
+                                    estimate.send_bps,
+                                    estimate.recv_bps,
+                                    match self.locale {
+                                        Locale::Chinese => moqcast_ui::PlayerInfoLocale::Chinese,
+                                        Locale::English => moqcast_ui::PlayerInfoLocale::English,
+                                    },
+                                );
                                 if !peer.present {
                                     ui.label(
                                         self.text(
@@ -868,6 +878,7 @@ mod tests {
             app.snapshot.peers.insert(
                 "peer".into(),
                 PeerView {
+                    bandwidth: Default::default(),
                     id: "peer".into(),
                     candidates: vec![],
                     should_dial: false,
@@ -924,6 +935,7 @@ mod tests {
             app.snapshot.peers.insert(
                 "peer".into(),
                 PeerView {
+                    bandwidth: Default::default(),
                     id: "peer".into(),
                     candidates: vec![],
                     should_dial: false,
@@ -965,6 +977,7 @@ mod tests {
         app.snapshot.peers.insert(
             "remote-peer".into(),
             PeerView {
+                bandwidth: Default::default(),
                 id: "remote-peer".into(),
                 candidates: vec![],
                 should_dial: false,
@@ -1058,6 +1071,7 @@ mod tests {
             ..Default::default()
         };
         let p = PeerView {
+            bandwidth: Default::default(),
             id: "peer".into(),
             candidates: vec![],
             should_dial: false,
@@ -1233,6 +1247,7 @@ mod tests {
             ..Default::default()
         };
         let peer = PeerView {
+            bandwidth: Default::default(),
             id: "peer".into(),
             candidates: vec![],
             should_dial: false,

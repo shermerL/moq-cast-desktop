@@ -1671,3 +1671,32 @@ mod controls_contract_tests {
         });
     }
 }
+
+/// Show connection estimates without suggesting a speed test or free capacity.
+pub fn connection_estimates(
+    ui: &mut Ui,
+    send_bps: Option<u64>,
+    recv_bps: Option<u64>,
+    locale: crate::PlayerInfoLocale,
+) {
+    let chinese = matches!(locale, crate::PlayerInfoLocale::Chinese);
+    let format = |rate: Option<u64>| match rate {
+        Some(rate) => format!("{:.2} Mbps", rate as f64 / 1_000_000.0),
+        None => if chinese { "不可用" } else { "Unavailable" }.to_owned(),
+    };
+    ui.separator();
+    ui.label(if chinese { "连接带宽估计" } else { "Connection bandwidth estimate" })
+        .on_hover_text(if chinese { "本机发送与对端报告的接收方向估计。不是测速结果或剩余可用带宽；未关联的入站连接不显示。" } else { "Local send estimate and peer-reported receive estimate. Not a speed test or spare capacity; unattributed inbound connections are not shown." });
+    ui.label(format!(
+        "{}: {}",
+        if chinese { "发送" } else { "Send" },
+        format(send_bps)
+    ));
+    ui.label(format!(
+        "{}: {}",
+        if chinese { "接收" } else { "Receive" },
+        format(recv_bps)
+    ));
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_secs(1));
+}

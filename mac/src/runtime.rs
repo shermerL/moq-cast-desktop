@@ -148,6 +148,7 @@ pub(crate) enum NearbyIssue {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PeerSnapshot {
+    pub(crate) bandwidth: moqcast_lan_state::bandwidth::View,
     pub(crate) ordinal: u64,
     pub(crate) discovered: bool,
     pub(crate) session: PeerSession,
@@ -1617,6 +1618,7 @@ fn apply_network_event(
     match event {
         NetworkEvent::Peer(peer) => {
             let view = PeerSnapshot {
+                bandwidth: peer.bandwidth,
                 ordinal: peer.ordinal,
                 discovered: peer.discovered,
                 session: peer.session,
@@ -1662,6 +1664,7 @@ fn apply_network_event(
                 snapshot.peers.insert(
                     peer_id.clone(),
                     PeerSnapshot {
+                        bandwidth: Default::default(),
                         ordinal,
                         discovered: false,
                         session: PeerSession::Waiting,
@@ -1798,6 +1801,7 @@ mod tests {
         snapshot.peers.insert(
             "peer".into(),
             PeerSnapshot {
+                bandwidth: Default::default(),
                 ordinal: 1,
                 discovered: false,
                 session: PeerSession::Waiting,
@@ -1830,6 +1834,7 @@ mod tests {
         snapshot.peers.insert(
             "peer".into(),
             PeerSnapshot {
+                bandwidth: Default::default(),
                 ordinal: 1,
                 discovered: false,
                 session: PeerSession::Waiting,
@@ -2348,6 +2353,7 @@ mod tests {
         snapshot.peers.insert(
             "remote-peer".to_owned(),
             PeerSnapshot {
+                bandwidth: Default::default(),
                 ordinal: 1,
                 discovered: true,
                 session: PeerSession::Connected,
@@ -2572,6 +2578,7 @@ mod tests {
             discovery,
             session,
             NetworkEvent::Peer(network::PeerStatus {
+                bandwidth: Default::default(),
                 id: "internal-peer".to_owned(),
                 ordinal: 1,
                 discovered: false,
@@ -2596,6 +2603,7 @@ mod tests {
             discovery,
             session,
             NetworkEvent::Peer(network::PeerStatus {
+                bandwidth: Default::default(),
                 id: "internal-peer".to_owned(),
                 ordinal: 1,
                 discovered: false,
@@ -2637,6 +2645,7 @@ mod tests {
             discovery,
             session,
             NetworkEvent::Peer(network::PeerStatus {
+                bandwidth: Default::default(),
                 id: "passive-peer".to_owned(),
                 ordinal: 1,
                 discovered: true,
@@ -2691,6 +2700,7 @@ mod tests {
         snapshot.peers.insert(
             "passive-peer".to_owned(),
             PeerSnapshot {
+                bandwidth: Default::default(),
                 ordinal: 1,
                 discovered: false,
                 session: PeerSession::Waiting,
@@ -2737,6 +2747,7 @@ mod tests {
         snapshot.peers.insert(
             "peer".into(),
             PeerSnapshot {
+                bandwidth: Default::default(),
                 ordinal: 1,
                 discovered: true,
                 session: PeerSession::Waiting,
@@ -2773,6 +2784,7 @@ mod tests {
         snapshot.peers.insert(
             "passive-peer".to_owned(),
             PeerSnapshot {
+                bandwidth: Default::default(),
                 ordinal: 1,
                 discovered: true,
                 session: PeerSession::Waiting,
@@ -2797,6 +2809,7 @@ mod tests {
         snapshot.peers.insert(
             "passive-peer".to_owned(),
             PeerSnapshot {
+                bandwidth: Default::default(),
                 ordinal: 1,
                 discovered: true,
                 session: PeerSession::Waiting,
@@ -2934,6 +2947,7 @@ mod tests {
         snapshot.peers.insert(
             "peer".to_owned(),
             PeerSnapshot {
+                bandwidth: Default::default(),
                 ordinal: 1,
                 discovered: true,
                 session: PeerSession::Connected,
@@ -3129,6 +3143,7 @@ mod tests {
         snapshot.peers.insert(
             "peer".to_owned(),
             PeerSnapshot {
+                bandwidth: Default::default(),
                 ordinal: 1,
                 discovered: true,
                 session: PeerSession::Connected,

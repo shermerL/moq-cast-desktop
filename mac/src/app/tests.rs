@@ -3,6 +3,7 @@ use super::*;
 
 fn peer(discovered: bool, session: PeerSession) -> PeerSnapshot {
     PeerSnapshot {
+        bandwidth: Default::default(),
         ordinal: 1,
         discovered,
         session,

@@ -1,6 +1,8 @@
 //! Shared application policy over discovery, attributed transport and content facts.
 //! This crate owns no sockets, credentials, retries or platform resources.
 
+pub mod bandwidth;
+
 /// Only transport facts attributable to this particular peer belong here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Connection {

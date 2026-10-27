@@ -176,6 +176,7 @@ fn nearby_identity_is_visible_without_opening_details() {
     snapshot.peers.insert(
         "remote-peer".into(),
         PeerSnapshot {
+            bandwidth: Default::default(),
             name: "Remote device".into(),
             endpoints: vec![],
             fingerprint_pinned: true,
@@ -243,6 +244,7 @@ fn nearby_highlights_only_playing_not_preparing_or_stopping() {
         s.peers.insert(
             "peer".into(),
             PeerSnapshot {
+                bandwidth: Default::default(),
                 name: "Computer".into(),
                 endpoints: vec![],
                 fingerprint_pinned: true,
@@ -323,6 +325,7 @@ fn check_pending_off(page: Page) {
         s.peers.insert(
             "peer".into(),
             PeerSnapshot {
+                bandwidth: Default::default(),
                 name: "Computer".into(),
                 endpoints: vec![],
                 fingerprint_pinned: true,

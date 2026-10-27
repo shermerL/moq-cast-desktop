@@ -158,6 +158,7 @@ pub struct DiscoveredPeer {
 /// Combined discovery, transport, and screen state for one known peer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerSnapshot {
+    pub(crate) bandwidth: moqcast_lan_state::bandwidth::View,
     /// Human-readable peer label.
     pub name: String,
     /// Resolved candidate endpoints in dial order.
@@ -321,6 +322,7 @@ impl AppSnapshot {
                 current.screen.clone_from(&screen);
             })
             .or_insert_with(|| PeerSnapshot {
+                bandwidth: Default::default(),
                 name: peer.name,
                 endpoints: peer.endpoints,
                 fingerprint_pinned: peer.fingerprint_pinned,
@@ -356,6 +358,9 @@ impl AppSnapshot {
     /// Update one exact outbound transport without affecting other peers.
     pub fn set_transport(&mut self, peer_id: &str, transport: TransportState) {
         if let Some(peer) = self.peers.get_mut(peer_id) {
+            if transport != TransportState::Connected {
+                peer.bandwidth = Default::default();
+            }
             peer.transport = transport;
         }
         self.prune_inactive_peer(peer_id);
@@ -400,6 +405,7 @@ impl AppSnapshot {
             self.peers
                 .entry(peer_id.clone())
                 .or_insert_with(|| PeerSnapshot {
+                    bandwidth: Default::default(),
                     name: peer_id.clone(),
                     endpoints: Vec::new(),
                     fingerprint_pinned: false,

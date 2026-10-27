@@ -8,6 +8,9 @@
 #[path = "../../shared/task-cleanup.rs"]
 mod cleanup;
 
+#[path = "../../shared/connection-bandwidth.rs"]
+mod bandwidth;
+
 mod app;
 mod audio;
 mod build_info;

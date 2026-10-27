@@ -18,3 +18,7 @@ cargo clippy --locked --manifest-path shared/lan-state/Cargo.toml --all-targets 
 三端现有 CI 均显式执行此库测试，并在修改 shared/lan-state 时触发相应平台检查。仅构建依赖不会运行依赖内部测试，不能省略此步骤。
 
 任务清理错误汇总放在独立的 `shared/task-cleanup.rs` 内部模块，由三端应用测试覆盖。它复用各应用现有 tokio，不给此纯状态库增加依赖；只汇总异常，不决定资源停止顺序。
+
+## 连接估计视图
+
+`bandwidth::Observation` 仅保存一个当前样本与 epoch，不持有网络对象。连接 owner 独占写入，`View` 是 Weak 观察句柄，owner 停止后读取为空；重连清空旧值，旧 epoch 不能覆盖当前值，未知与零值分开。UI 快照比较句柄身份，不把数值变化当作设备生命周期事件。网络采样保留在三端复用的 `shared/connection-bandwidth.rs` 私有模块中，不在此库增加运行时或定时器。

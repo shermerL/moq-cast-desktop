@@ -1448,11 +1448,18 @@ impl Supervisor {
 
         match result {
             Ok(session) => {
+                let observation = moqcast_lan_state::bandwidth::Observation::default();
+                if let SessionKey::Outbound(peer_id) = &key
+                    && let Some(peer) = self.state.peers.get_mut(peer_id)
+                {
+                    peer.bandwidth = observation.view();
+                }
                 self.session_watchers.spawn(watch_session(
                     key.clone(),
                     generation,
                     session.clone(),
                     self.operation_tx.clone(),
+                    observation,
                 ));
                 resources.session = Some(session);
                 match key {
@@ -1694,8 +1701,20 @@ async fn watch_session(
     generation: u64,
     session: PeerSession,
     events: mpsc::Sender<OperationEvent>,
+    observation: moqcast_lan_state::bandwidth::Observation,
 ) {
-    let error = session.closed_error().await;
+    let error = match (&key, &session) {
+        (SessionKey::Outbound(peer), PeerSession::Outbound(connection)) => {
+            crate::bandwidth::outbound(connection, observation, peer, generation)
+                .await
+                .err()
+                .map(|error| error.to_string())
+        }
+        (SessionKey::Inbound(id), PeerSession::Inbound(session)) => {
+            Some(crate::bandwidth::inbound(session, *id).await.to_string())
+        }
+        _ => session.closed_error().await,
+    };
     let _ = events
         .send(OperationEvent::SessionClosed {
             key,
@@ -3255,13 +3274,32 @@ mod tests {
             .state
             .set_transport("peer-b", TransportState::Connected);
 
+        let observation = moqcast_lan_state::bandwidth::Observation::default();
+        observation.update(
+            0,
+            moqcast_lan_state::bandwidth::Sample {
+                send_bps: Some(123),
+                recv_bps: Some(456),
+            },
+        );
+        supervisor.state.peers.get_mut("peer-b").unwrap().bandwidth = observation.view();
+
         let action = supervisor.session_closed(SessionKey::Outbound("peer-b".into()), 8, None);
 
         assert!(matches!(action, super::LoopAction::Unchanged));
+        assert_eq!(
+            supervisor.state.peers["peer-b"].bandwidth.sample().send_bps,
+            Some(123)
+        );
         assert!(supervisor.mesh.outbound.contains_key("peer-b"));
         assert_eq!(
             supervisor.state.peers["peer-b"].transport,
             TransportState::Connected
+        );
+        supervisor.session_closed(SessionKey::Outbound("peer-b".into()), 9, None);
+        assert_eq!(
+            supervisor.state.peers["peer-b"].bandwidth.sample(),
+            Default::default()
         );
     }
 

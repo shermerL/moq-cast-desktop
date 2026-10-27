@@ -85,6 +85,7 @@ pub(crate) struct TransportView {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PeerView {
+    pub(crate) bandwidth: moqcast_lan_state::bandwidth::View,
     pub(crate) id: String,
     pub(crate) candidates: Vec<String>,
     pub(crate) should_dial: bool,
@@ -292,6 +293,7 @@ impl RuntimeSnapshot {
                 peer.screen = screen;
             })
             .or_insert(PeerView {
+                bandwidth: Default::default(),
                 id: summary.id,
                 candidates: summary.candidates,
                 should_dial: summary.should_dial,
@@ -320,6 +322,7 @@ impl RuntimeSnapshot {
             self.peers
                 .entry(peer_id.clone())
                 .or_insert_with(|| PeerView {
+                    bandwidth: Default::default(),
                     id: peer_id.clone(),
                     candidates: Vec::new(),
                     should_dial: false,
@@ -1535,6 +1538,11 @@ fn apply_session_update(snapshot: &mut RuntimeSnapshot, update: TransportUpdate)
                 phase = ?phase,
                 "peer transport state changed"
             );
+            if let Some(current) = snapshot.peers.get_mut(&peer)
+                && generation >= current.transport.generation
+            {
+                current.bandwidth = update.bandwidth;
+            }
             snapshot.apply_transport(
                 &peer,
                 TransportView {

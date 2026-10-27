@@ -740,6 +740,67 @@ mod tests {
     }
 
     #[test]
+    fn bandwidth_details_follow_mode_and_survive_export() {
+        use std::io::Read as _;
+        let directory = tempdir().unwrap();
+        let cfg = Config::new(Paths::for_test(directory.path()), BuildInfo::new("test"))
+            .with_stderr(false)
+            .with_private_location_redaction();
+        let (handle, worker, layer) = build(cfg);
+        let subscriber = Registry::default().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            let emit = || {
+                tracing::debug!(target: "moqcast_macos::bandwidth", stage = "bandwidth",
+                    direction = "outbound", peer_id = "fixture", generation = 7_u64, epoch = 2_u64,
+                    send_bps = ?Some(1_250_000_u64), recv_bps = ?None::<u64>, "connection bandwidth estimate");
+                tracing::debug!(target: "moqcast_windows::bandwidth", stage = "bandwidth",
+                    direction = "inbound", inbound_id = 3_u64, send_bps = ?Some(0_u64),
+                    recv_bps = ?Some(2_500_000_u64), "unattributed connection bandwidth estimate");
+                tracing::debug!(target: "moq_cast_desktop::bandwidth", stage = "bandwidth",
+                    direction = "outbound", peer_id = "fixture", generation = 8_u64, epoch = 1_u64,
+                    send_bps = ?None::<u64>, recv_bps = ?None::<u64>, "connection bandwidth estimate");
+            };
+            emit();
+            assert!(handle.snapshot().entries().is_empty());
+            handle.set_detailed(true);
+            emit();
+            assert_eq!(handle.snapshot().entries().len(), 3);
+            handle.set_detailed(false);
+            emit();
+            assert_eq!(handle.snapshot().entries().len(), 3);
+        });
+        let destination = directory.path().join("bandwidth.zip");
+        handle.export(ExportRequest::new(&destination)).unwrap();
+        let mut archive = zip::ZipArchive::new(fs::File::open(destination).unwrap()).unwrap();
+        let mut text = String::new();
+        archive
+            .by_name("moqcast-detail.log")
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        assert_eq!(text.lines().count(), 3);
+        for field in [
+            "generation",
+            "epoch",
+            "inbound_id",
+            "send_bps",
+            "recv_bps",
+            "1250000",
+            "2500000",
+            "None",
+        ] {
+            assert!(text.contains(field), "missing {field}");
+        }
+        let inbound = text
+            .lines()
+            .find(|line| line.contains("unattributed"))
+            .unwrap();
+        assert!(!inbound.contains("peer_id"));
+        assert_eq!(handle.dropped_count(), 0);
+        drop(worker);
+    }
+
+    #[test]
     fn mdns_log_bridge_preserves_receive_parse_cache_and_resolve_evidence() {
         use std::io::Read as _;
 

@@ -41,6 +41,7 @@ fn snapshot(count: usize) -> AppSnapshot {
         s.peers.insert(
             format!("peer-{n:02}"),
             PeerSnapshot {
+                bandwidth: Default::default(),
                 ordinal: n as u64 + 1,
                 discovered: true,
                 session: if n % 2 == 0 {

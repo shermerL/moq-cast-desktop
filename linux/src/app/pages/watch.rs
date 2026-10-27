@@ -112,6 +112,7 @@ mod tests {
         snapshot.peers.insert(
             "peer-a".to_owned(),
             PeerSnapshot {
+                bandwidth: Default::default(),
                 name: "Office display".to_owned(),
                 endpoints: Vec::new(),
                 fingerprint_pinned: true,

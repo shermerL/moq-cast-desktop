@@ -233,6 +233,16 @@ impl MoqCastApp {
                                 let (_, status) =
                                     pages::nearby::peer_status(snapshot, &id, peer, self.locale);
                                 ui.label(status);
+                                let estimate = peer.bandwidth.sample();
+                                v2::connection_estimates(
+                                    ui,
+                                    estimate.send_bps,
+                                    estimate.recv_bps,
+                                    match self.locale {
+                                        Locale::Chinese => moqcast_ui::PlayerInfoLocale::Chinese,
+                                        Locale::English => moqcast_ui::PlayerInfoLocale::English,
+                                    },
+                                );
                                 ui.label(match peer.discovery {
                                     PeerDiscoveryState::Found => self.locale.discovery_found(),
                                     PeerDiscoveryState::Lost => self.locale.discovery_lost(),

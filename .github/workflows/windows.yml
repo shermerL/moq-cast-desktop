@@ -10,6 +10,7 @@ on:
       - "shared/ui/**"
       - "shared/lan-state/**"
       - "shared/task-cleanup.rs"
+      - "shared/connection-bandwidth.rs"
       - ".github/workflows/windows.yml"
   pull_request:
     paths:
@@ -19,6 +20,7 @@ on:
       - "shared/ui/**"
       - "shared/lan-state/**"
       - "shared/task-cleanup.rs"
+      - "shared/connection-bandwidth.rs"
       - ".github/workflows/windows.yml"
   workflow_dispatch:
 

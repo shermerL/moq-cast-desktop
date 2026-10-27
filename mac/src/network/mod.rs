@@ -53,6 +53,7 @@ impl PeerSession {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PeerStatus {
+    pub(crate) bandwidth: moqcast_lan_state::bandwidth::View,
     pub(crate) id: String,
     pub(crate) ordinal: u64,
     pub(crate) discovered: bool,
@@ -89,10 +90,12 @@ impl PendingConnection {
     async fn complete(&mut self, sessions: &mut SessionFoundation) -> PeerStatus {
         match sessions.connect(&self.record).await {
             Ok(transport) => {
+                self.status.bandwidth = transport.bandwidth;
                 self.status.session = PeerSession::Connecting;
                 self.status.transport_generation = Some(transport.state.generation());
             }
             Err(_) => {
+                self.status.bandwidth = Default::default();
                 self.status.session = PeerSession::Failed;
                 self.status.transport_generation = None;
             }
@@ -253,6 +256,10 @@ impl Services {
         };
         let previous = self.peers.get(&record.id).cloned();
         let mut status = PeerStatus {
+            bandwidth: previous
+                .as_ref()
+                .map(|peer| peer.bandwidth.clone())
+                .unwrap_or_default(),
             id: record.id.clone(),
             ordinal,
             discovered: true,
@@ -264,6 +271,7 @@ impl Services {
         };
 
         if role == DialRole::Passive {
+            status.bandwidth = Default::default();
             status.session = PeerSession::Waiting;
             status.transport_generation = None;
         } else if should_connect(update, status.session) {
@@ -301,6 +309,7 @@ impl Services {
                 if status.transport_generation != Some(update.state.generation()) {
                     return;
                 }
+                status.bandwidth = update.bandwidth;
                 status.session = map_phase(update.state.phase());
                 let status = status.clone();
                 self.pending.push_back(Event::Peer(status.clone()));
@@ -387,6 +396,7 @@ mod tests {
 
     fn status(role: DialRole, session: PeerSession) -> PeerStatus {
         PeerStatus {
+            bandwidth: Default::default(),
             id: "peer".to_owned(),
             ordinal: 1,
             discovered: false,

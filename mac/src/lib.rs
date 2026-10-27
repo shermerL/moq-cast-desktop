@@ -4,6 +4,10 @@
 #[path = "../../shared/task-cleanup.rs"]
 mod cleanup;
 
+#[cfg(feature = "network")]
+#[path = "../../shared/connection-bandwidth.rs"]
+mod bandwidth;
+
 #[cfg(feature = "app")]
 mod app;
 #[cfg(any(feature = "app", test))]

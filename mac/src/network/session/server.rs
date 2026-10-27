@@ -124,7 +124,7 @@ pub(super) async fn run_listener(
                             phase: TransportPhase::Connected,
                         })
                         .await;
-                    let reason = session.closed().await;
+                    let reason = crate::bandwidth::inbound(&session, id).await;
                     tracing::debug!(
                         stage = "transport",
                         inbound_id = id,

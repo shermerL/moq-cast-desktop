@@ -121,6 +121,7 @@ mod tests {
 
     fn peer() -> PeerSnapshot {
         PeerSnapshot {
+            bandwidth: Default::default(),
             name: "Computer".into(),
             endpoints: vec![],
             fingerprint_pinned: true,
