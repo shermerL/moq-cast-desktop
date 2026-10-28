@@ -646,9 +646,8 @@ pub(crate) async fn run(
                     }
                 } => {}
                 _ = audio_task.clock.changed() => {
-                    if audio_task.clock.anchor().is_none() {
-                        scheduler.reset();
-                    }
+                    // Losing an audio estimate changes pacing, not the video timeline.
+                    // The next iteration presents queued frames without an audio master.
                 }
                 _ = reports.tick() => {
                     let stats = scheduler.take_stats();
