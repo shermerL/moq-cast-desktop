@@ -586,7 +586,7 @@ mod selection_tests {
             }
             let old = selected("audio", current.clone());
             let new = selected("audio", next);
-            if old != new || new != old {
+            if old != new {
                 restarted.push(field);
             }
         }
@@ -622,7 +622,7 @@ mod selection_tests {
             next.jitter = Some(Duration::from_millis(40));
             let old = selected("audio", current.clone());
             let new = selected("audio", next);
-            assert!(old != new && new != old, "{field} failed to replace audio");
+            assert!(old != new, "{field} failed to replace audio");
         }
         let old = selected("audio", current.clone());
         assert!(old != selected("replacement", current));
