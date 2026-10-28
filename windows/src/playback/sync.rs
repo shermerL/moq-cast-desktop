@@ -463,6 +463,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn audio_clock_loss_keeps_pending_video_and_its_high_water_mark() {
+        for ended in [false, true] {
+            let now = Instant::now();
+            let (writer, mut reader) = audio_clock();
+            writer.update(clock(now));
+            reader.changed().await;
+            let mut scheduler = VideoScheduler::default();
+            scheduler.push(ms(1_000), "first", now);
+            assert_eq!(scheduler.advance(reader.anchor(), now).frame, Some("first"));
+            scheduler.push(ms(1_020), "last", now);
+            assert_eq!(scheduler.advance(reader.anchor(), now).frame, None);
+            if ended {
+                drop(writer);
+            } else {
+                writer.update(None);
+            }
+            reader.changed().await;
+            let next = scheduler.advance(reader.anchor(), now);
+            assert!(!next.audio_master);
+            assert_eq!(next.frame, Some("last"));
+            scheduler.push(ms(1_010), "old", now);
+            assert_eq!(scheduler.advance(None, now).frame, None);
+            let stats = scheduler.take_stats();
+            assert_eq!(stats.resets, 0);
+            assert_eq!(stats.nonmonotonic, 1);
+        }
+    }
+
+    #[test]
+    fn continuous_audio_handover_and_recovery_preserve_video_progress() {
+        let now = Instant::now();
+        let mut scheduler = VideoScheduler::default();
+        scheduler.push(ms(980), 0, now);
+        assert_eq!(scheduler.advance(None, now).frame, Some(0));
+        for index in 0..6 {
+            let at = now + ms(index * 20);
+            let pts = ms(1_000 + index * 20);
+            scheduler.push(pts, index + 1, at);
+            // An unavailable estimate falls back to latest, then audio can take over again.
+            let anchor = if index == 2 {
+                None
+            } else {
+                AudioAnchor::new(pts + ms(100), ms(100), at)
+            };
+            assert_eq!(scheduler.advance(anchor, at).frame, Some(index + 1));
+        }
+        assert_eq!(scheduler.take_stats().late, 0);
+    }
+
+    #[tokio::test]
     async fn old_audio_task_cannot_update_or_clear_replacement_clock() {
         let now = Instant::now();
         let (old, mut old_reader) = audio_clock();

@@ -23,7 +23,7 @@ fn remote_audio_decode_config() -> moq_audio::decode::Options {
     options
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub(super) enum Selection {
     NotPublished,
     Unsupported,
@@ -31,6 +31,37 @@ pub(super) enum Selection {
         name: String,
         config: Box<hang::catalog::AudioConfig>,
     },
+}
+
+impl PartialEq for Selection {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::NotPublished, Self::NotPublished) | (Self::Unsupported, Self::Unsupported) => {
+                true
+            }
+            (
+                Self::Playable {
+                    name: current_name,
+                    config: current,
+                },
+                Self::Playable {
+                    name: next_name,
+                    config: next,
+                },
+            ) => {
+                // Labels and stream measurements do not change the decoder or sink.
+                current_name == next_name
+                    && current.broadcast == next.broadcast
+                    && current.codec == next.codec
+                    && current.description == next.description
+                    && current.sample_rate == next.sample_rate
+                    && current.channel_count == next.channel_count
+                    && current.container == next.container
+                    && current.enabled == next.enabled
+            }
+            _ => false,
+        }
+    }
 }
 
 impl Selection {
@@ -524,5 +555,95 @@ mod tests {
         assert_eq!(config.output.format, moq_audio::Format::F32);
         assert!(matches!(config.start, moq_audio::decode::Start::Latest));
         assert_eq!(config.max_delay, Duration::from_millis(80));
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::Selection;
+    use hang::catalog::{AudioCodec, AudioConfig, Container};
+    use std::time::Duration;
+
+    fn selected(name: &str, config: AudioConfig) -> Selection {
+        Selection::Playable {
+            name: name.to_owned(),
+            config: Box::new(config),
+        }
+    }
+
+    #[test]
+    fn audio_measurements_and_labels_preserve_the_running_task() {
+        let current = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+        let mut restarted = Vec::new();
+        for field in ["label", "bitrate", "jitter", "delay"] {
+            let mut next = current.clone();
+            match field {
+                "label" => next.label = Some("System sound".to_owned()),
+                "bitrate" => next.bitrate = Some(128_000),
+                "jitter" => next.jitter = Some(Duration::from_millis(40)),
+                "delay" => next.delay = Some(Duration::from_millis(80)),
+                _ => unreachable!(),
+            }
+            let old = selected("audio", current.clone());
+            let new = selected("audio", next);
+            if old != new || new != old {
+                restarted.push(field);
+            }
+        }
+        assert!(
+            restarted.is_empty(),
+            "metadata restarted audio: {restarted:?}"
+        );
+    }
+
+    #[test]
+    fn audio_source_and_format_changes_still_replace_the_task() {
+        let current = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+        for field in [
+            "broadcast",
+            "codec",
+            "description",
+            "sample_rate",
+            "channel_count",
+            "container",
+            "enabled",
+        ] {
+            let mut next = current.clone();
+            match field {
+                "broadcast" => next.broadcast = Some("./replacement".into()),
+                "codec" => next.codec = AudioCodec::Pcm,
+                "description" => next.description = Some(vec![1, 2, 3].into()),
+                "sample_rate" => next.sample_rate = 44_100,
+                "channel_count" => next.channel_count = 1,
+                "container" => next.container = Container::Loc,
+                "enabled" => next.enabled = false,
+                _ => unreachable!(),
+            }
+            next.jitter = Some(Duration::from_millis(40));
+            let old = selected("audio", current.clone());
+            let new = selected("audio", next);
+            assert!(old != new && new != old, "{field} failed to replace audio");
+        }
+        let old = selected("audio", current.clone());
+        assert!(old != selected("replacement", current));
+        assert!(old != Selection::NotPublished);
+        assert!(old != Selection::Unsupported);
+        assert!(Selection::NotPublished != Selection::Unsupported);
+        assert!(Selection::NotPublished == Selection::NotPublished);
+        assert!(Selection::Unsupported == Selection::Unsupported);
+    }
+
+    #[test]
+    fn audio_container_initialization_changes_replace_the_task() {
+        let mut current = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+        current.container = Container::Cmaf {
+            init: vec![1, 2, 3].into(),
+        };
+        let mut next = current.clone();
+        assert!(selected("audio", current.clone()) == selected("audio", next.clone()));
+        next.container = Container::Cmaf {
+            init: vec![1, 2, 4].into(),
+        };
+        assert!(selected("audio", current) != selected("audio", next));
     }
 }
