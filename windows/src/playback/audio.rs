@@ -88,7 +88,8 @@ impl Selection {
 
 struct Playback {
     consumer: moq_audio::decode::Consumer,
-    sink: moq_audio::playback::Sink,
+    sink: Option<moq_audio::playback::Sink>,
+    engine: moq_audio::playback::Engine,
 }
 
 struct VolumeListener {
@@ -117,6 +118,11 @@ fn volume_scalar(percent: u8) -> f32 {
     f32::from(percent.min(100)) / 100.0
 }
 
+fn timestamp_rounding(scale: u64) -> Duration {
+    let quantum = scale.min(moq_tokio::moq_net::Timescale::default().as_u64());
+    Duration::from_micros(1_000_000u64.div_ceil(quantum) + 1_000_000u64.div_ceil(scale) + 1)
+}
+
 impl Playback {
     async fn open(
         broadcast: &moq_tokio::moq_net::broadcast::Consumer,
@@ -131,7 +137,29 @@ impl Playback {
         input.sample_rate = consumer.sample_rate();
         input.layout = consumer.layout();
         let sink = engine.sink(input)?;
-        Ok(Self { consumer, sink })
+        Ok(Self {
+            consumer,
+            sink: Some(sink),
+            engine,
+        })
+    }
+
+    fn sink(&self) -> &moq_audio::playback::Sink {
+        self.sink
+            .as_ref()
+            .expect("sink is only absent while draining")
+    }
+
+    async fn restart_sink(&mut self) -> anyhow::Result<()> {
+        let mut input = moq_audio::playback::Input::default();
+        input.format = moq_audio::Format::F32;
+        input.sample_rate = self.consumer.sample_rate();
+        input.layout = self.consumer.layout();
+        replace_sink(&mut self.sink, moq_audio::playback::Sink::finish, || {
+            self.engine.sink(input)
+        })
+        .await?;
+        Ok(())
     }
 
     async fn read(&mut self) -> anyhow::Result<Option<moq_audio::Frame>> {
@@ -147,6 +175,18 @@ impl Playback {
             last_error: None,
         }
     }
+}
+
+// Taking the sink gives the pending drain sole cleanup ownership. A cancelled
+// replacement must not create an output or leave old PCM behind in a reused sink.
+async fn replace_sink<S, F: std::future::Future<Output = ()>, E>(
+    sink: &mut Option<S>,
+    finish: impl FnOnce(S) -> F,
+    reopen: impl FnOnce() -> Result<S, E>,
+) -> Result<(), E> {
+    finish(sink.take().expect("active sink")).await;
+    *sink = Some(reopen()?);
+    Ok(())
 }
 
 pub(super) struct Task {
@@ -271,7 +311,7 @@ async fn run(
             return;
         }
     };
-    let _volume_listener = VolumeListener::spawn(playback.sink.control(), volume);
+    let mut _volume_listener = VolumeListener::spawn(playback.sink().control(), volume.clone());
     tracing::info!(
         broadcast = ?events.path,
         view_generation = events.generation,
@@ -293,6 +333,7 @@ async fn run(
     let mut callback_nonzero_observed = false;
     let mut timeline = sync::AudioTimeline::default();
     let mut output_trust = sync::AudioOutputTrust::default();
+    let mut previous_rounding = Duration::ZERO;
 
     loop {
         tokio::select! {
@@ -367,6 +408,31 @@ async fn run(
 
                 let pts = Duration::from_micros(timestamp_us.min(u128::from(u64::MAX)) as u64);
                 let duration = Duration::from_micros(duration_us.min(u128::from(u64::MAX)) as u64);
+                // Match the decoder's transport-quantization allowance. Conversion
+                // to microseconds can round the sum of PTS and duration once more.
+                let rounding = timestamp_rounding(frame.timestamp.scale().as_u64());
+                let boundary_rounding = rounding.max(previous_rounding);
+                previous_rounding = rounding;
+                if timeline.needs_drain(pts, boundary_rounding) {
+                    clock.update(None);
+                    tracing::info!(view_generation = events.generation, frame_pts_us = %timestamp_us,
+                        "draining previous audio span before resuming after a timestamp gap");
+                    // Keep this one decoded frame and the old volume listener while
+                    // draining. Cancelling the audio task drops the drain and frame.
+                    if let Err(error) = playback.restart_sink().await {
+                        tracing::warn!(view_generation = events.generation, error = %error,
+                            "could not resume audio after a timestamp gap; video continues");
+                        let mut audio = playback.snapshot(ViewAudioPhase::Failed, &codec);
+                        audio.last_error = Some("Remote audio output could not resume.".to_owned());
+                        events.send(audio).await;
+                        return;
+                    }
+                    _volume_listener = VolumeListener::spawn(playback.sink().control(), volume.clone());
+                    timeline = sync::AudioTimeline::default();
+                    output_trust = sync::AudioOutputTrust::default();
+                    tracing::info!(view_generation = events.generation, frame_pts_us = %timestamp_us,
+                        "audio output span replaced on the existing engine");
+                }
                 if clock.observe_source(&mut timeline, pts, duration) {
                     tracing::warn!(
                         view_generation = events.generation,
@@ -374,8 +440,8 @@ async fn run(
                     );
                 }
 
-                let buffered_before = playback.sink.buffered();
-                let write = match playback.sink.write(&frame.data) {
+                let buffered_before = playback.sink().buffered();
+                let write = match playback.sink.as_mut().expect("active sink").write(&frame.data) {
                     Ok(write) => write,
                     Err(error) => {
                         stats.write_failed();
@@ -414,7 +480,7 @@ async fn run(
                             write.accepted_sample_frames,
                             playback.consumer.sample_rate(),
                         ),
-                        playback.sink.buffered(),
+                        playback.sink().buffered(),
                         now,
                     )
                 } else {
@@ -428,7 +494,7 @@ async fn run(
                         view_generation = events.generation,
                         track = ?name,
                         frame_pts_us = %timestamp_us,
-                        buffered_us = %playback.sink.buffered().as_micros(),
+                        buffered_us = %playback.sink().buffered().as_micros(),
                         accepted_sample_frames = write.accepted_sample_frames,
                         dropped_sample_frames = write.dropped_sample_frames,
                         elapsed_ms,
@@ -483,8 +549,8 @@ fn log_interval(
     stats: &mut AudioStats,
 ) -> f32 {
     let report = stats.take_report();
-    let buffered_us = playback.sink.buffered().as_micros();
-    let peak = playback.sink.peak();
+    let buffered_us = playback.sink().buffered().as_micros();
+    let peak = playback.sink().peak();
     tracing::info!(
         broadcast = ?events.path,
         view_generation = events.generation,
@@ -539,6 +605,207 @@ impl Events {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stopping_the_audio_task_aborts_a_pending_drain_without_touching_replay() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Owned(Arc<AtomicUsize>);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct Finished(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for Finished {
+            fn drop(&mut self) {
+                let _ = self.0.take().unwrap().send(());
+            }
+        }
+        let released = Arc::new(AtomicUsize::new(0));
+        let created = Arc::new(AtomicUsize::new(0));
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (cleaned, cleanup) = tokio::sync::oneshot::channel();
+        let (writer, clock) = sync::audio_clock();
+        let released_task = released.clone();
+        let created_task = created.clone();
+        let task = tokio::spawn(async move {
+            // Last local to drop, so the acknowledgement covers the owned state.
+            let _finished = Finished(Some(cleaned));
+            let _writer = writer;
+            let _pending_frame = Owned(released_task.clone());
+            let mut sink = Some(Owned(released_task.clone()));
+            replace_sink(
+                &mut sink,
+                |old| async move {
+                    let _old = old;
+                    entered.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                },
+                || {
+                    created_task.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, ()>(Owned(released_task))
+                },
+            )
+            .await
+            .unwrap();
+        });
+        let playback = Task { task, clock };
+        waiting.await.unwrap();
+        let (next_writer, next_clock) = sync::audio_clock();
+        next_writer.update(AudioAnchor::new(
+            Duration::from_secs(2),
+            Duration::from_millis(20),
+            Instant::now(),
+        ));
+        drop(playback);
+        cleanup.await.unwrap();
+        assert_eq!(released.load(Ordering::SeqCst), 2);
+        assert_eq!(created.load(Ordering::SeqCst), 0);
+        assert!(next_clock.anchor().is_some());
+    }
+
+    #[test]
+    fn continuous_pcm_survives_long_quantized_timestamp_sequences() {
+        let rate = 44_100u64;
+        let duration = sync::accepted_pcm_end(Duration::ZERO, 1_024, rate as u32);
+        for scale in [1_000u64, 48_000, 1_000_000] {
+            let mut timeline = sync::AudioTimeline::default();
+            for index in 0..10_000u64 {
+                let stamp = index * 1_024 * scale / rate;
+                let pts = Duration::from_micros(stamp * 1_000_000 / scale);
+                assert!(
+                    !timeline.needs_drain(pts, timestamp_rounding(scale)),
+                    "continuous frame {index}, timescale {scale}"
+                );
+                assert!(!timeline.observe(pts, duration));
+            }
+        }
+    }
+
+    #[test]
+    fn timestamp_tolerance_tracks_transport_precision_not_frame_duration() {
+        assert_eq!(timestamp_rounding(1_000_000), Duration::from_micros(1_002));
+        assert_eq!(timestamp_rounding(1_000), Duration::from_micros(2_001));
+        assert_eq!(timestamp_rounding(48_000), Duration::from_micros(1_022));
+    }
+
+    #[test]
+    fn sink_replacement_waits_for_drain_and_samples_the_latest_volume() {
+        use std::{
+            cell::Cell,
+            future::Future,
+            task::{Context, Waker},
+        };
+        let (done, drained) = tokio::sync::oneshot::channel();
+        let (volume, latest) = watch::channel(80u8);
+        let created = Cell::new(0);
+        let mut sink = Some(80u8);
+        let mut replace = Box::pin(replace_sink(
+            &mut sink,
+            |_| async { drained.await.unwrap() },
+            || {
+                created.set(created.get() + 1);
+                Ok::<_, ()>(*latest.borrow())
+            },
+        ));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(replace.as_mut().poll(&mut cx).is_pending());
+        volume.send_replace(0);
+        assert_eq!(created.get(), 0);
+        done.send(()).unwrap();
+        assert_eq!(
+            replace.as_mut().poll(&mut cx),
+            std::task::Poll::Ready(Ok(()))
+        );
+        drop(replace);
+        assert_eq!(created.get(), 1);
+        assert_eq!(sink, Some(0));
+    }
+
+    #[test]
+    fn cancelling_a_pending_drain_releases_ownership_without_reopening() {
+        use std::{
+            cell::Cell,
+            future::Future,
+            task::{Context, Waker},
+        };
+        struct Owned<'a>(&'a Cell<usize>);
+        impl Drop for Owned<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        let released = Cell::new(0);
+        let created = Cell::new(0);
+        let mut sink = Some(Owned(&released));
+        let (writer, reader) = sync::audio_clock();
+        writer.update(AudioAnchor::new(
+            Duration::from_secs(1),
+            Duration::from_millis(20),
+            Instant::now(),
+        ));
+        let mut replacement = Box::pin(async {
+            let _clock = writer;
+            // Model the one retained decoded frame, owned by the same audio task.
+            let _frame = Owned(&released);
+            replace_sink(
+                &mut sink,
+                |old| async move {
+                    let _old = old;
+                    std::future::pending::<()>().await;
+                },
+                || {
+                    created.set(1);
+                    Ok::<_, ()>(Owned(&released))
+                },
+            )
+            .await
+        });
+        assert!(
+            replacement
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        drop(replacement);
+        assert_eq!(released.get(), 2);
+        assert_eq!(created.get(), 0);
+        assert!(sink.is_none());
+        assert!(reader.anchor().is_none());
+        // A later task owns its own clock; old cleanup cannot clear it.
+        let (next, next_reader) = sync::audio_clock();
+        next.update(AudioAnchor::new(
+            Duration::from_secs(2),
+            Duration::from_millis(20),
+            Instant::now(),
+        ));
+        assert!(next_reader.anchor().is_some());
+    }
+
+    #[test]
+    fn failed_reopening_does_not_restore_a_drained_sink() {
+        use std::{
+            future::Future,
+            task::{Context, Waker},
+        };
+        let mut sink = Some(1);
+        let mut replacement = Box::pin(replace_sink(
+            &mut sink,
+            |_| async {},
+            || Err::<i32, _>("failed"),
+        ));
+        assert_eq!(
+            replacement
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            std::task::Poll::Ready(Err("failed"))
+        );
+        drop(replacement);
+        assert!(sink.is_none());
+    }
 
     #[test]
     fn playback_volume_percent_maps_to_the_sink_gain_range() {

@@ -31,6 +31,14 @@ impl AudioTimeline {
         first
     }
 
+    /// A forward hole cannot share a PCM queue with the previous media span.
+    pub(super) fn needs_drain(&self, pts: Duration, rounding: Duration) -> bool {
+        self.is_continuous()
+            && self
+                .previous
+                .is_some_and(|(_, end)| pts.saturating_sub(end) > rounding)
+    }
+
     pub(super) fn is_continuous(&self) -> bool {
         !self.discontinuous
     }
@@ -39,6 +47,7 @@ impl AudioTimeline {
 #[derive(Default)]
 pub(super) struct AudioOutputTrust {
     dropped: bool,
+    accepted_any: bool,
 }
 
 impl AudioOutputTrust {
@@ -48,8 +57,11 @@ impl AudioOutputTrust {
         accepted_sample_frames: usize,
         dropped_sample_frames: usize,
     ) -> bool {
+        self.accepted_any |= accepted_sample_frames > 0;
         if dropped_sample_frames > 0 {
-            self.dropped = true;
+            // Before the first accepted PCM, a new sink only contains startup
+            // padding. OutputNotReady cannot splice two media spans together.
+            self.dropped |= self.accepted_any;
             return false;
         }
         if accepted_sample_frames == 0 {
@@ -299,6 +311,57 @@ mod tests {
 
     fn clock(now: Instant) -> Option<AudioAnchor> {
         AudioAnchor::new(ms(1_100), ms(100), now)
+    }
+
+    #[test]
+    fn initial_output_not_ready_does_not_permanently_disable_a_new_sink_clock() {
+        let mut output = AudioOutputTrust::default();
+        assert!(!output.observe(Duration::ZERO, 0, 960));
+        assert!(!output.observe(Duration::ZERO, 0, 960));
+        // Only startup padding exists; no earlier accepted PCM can span a gap.
+        assert!(output.observe(ms(50), 960, 0));
+        // A later partial write is different: it leaves accepted PCM in the queue.
+        assert!(!output.observe(ms(60), 480, 480));
+        assert!(!output.observe(ms(60), 960, 0));
+    }
+
+    #[test]
+    fn forward_holes_require_a_new_span_and_can_recover_in_one_playback() {
+        let now = Instant::now();
+        let rounding = Duration::from_micros(1_002);
+        let (writer, reader) = audio_clock();
+        let mut timeline = AudioTimeline::default();
+        let mut scheduler = VideoScheduler::default();
+        for start in [1_000, 1_250, 2_000, 2_170] {
+            if start != 1_000 {
+                assert!(timeline.needs_drain(ms(start), rounding));
+                writer.update(None);
+                assert!(reader.anchor().is_none());
+                // The owner resets only after awaiting the previous Sink's drain.
+                timeline = AudioTimeline::default();
+            }
+            assert!(!writer.observe_source(&mut timeline, ms(start), ms(20)));
+            writer.update(AudioAnchor::new(ms(start + 20), ms(20), now));
+            scheduler.push(ms(start), start, now);
+            let ready = scheduler.advance(reader.anchor(), now);
+            assert!(ready.audio_master);
+            assert_eq!(ready.frame, Some(start));
+        }
+        assert_eq!(scheduler.take_stats().late, 0);
+    }
+
+    #[test]
+    fn timestamp_rounding_does_not_drain_but_a_lost_short_packet_does() {
+        let mut timeline = AudioTimeline::default();
+        timeline.observe(ms(1_000), Duration::from_micros(23_219));
+        let rounding = Duration::from_micros(1_002);
+        assert!(!timeline.needs_drain(Duration::from_micros(1_024_000), rounding));
+        assert!(timeline.needs_drain(Duration::from_micros(1_025_719), rounding));
+        // A backward epoch is not a recoverable forward gap.
+        assert!(!timeline.needs_drain(ms(900), rounding));
+        timeline.observe(ms(900), ms(20));
+        assert!(!timeline.needs_drain(ms(2_000), rounding));
+        assert!(!timeline.is_continuous());
     }
 
     #[test]
