@@ -751,7 +751,7 @@ impl MoqCastApp {
         }
     }
 
-    fn s2_command_notice(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn s2_command_notice(&mut self, ui: &mut egui::Ui) {
         if self.command_error {
             notice(
                 ui,

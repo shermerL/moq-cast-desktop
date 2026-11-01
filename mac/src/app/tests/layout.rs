@@ -713,3 +713,125 @@ fn presentation_failure_reaches_its_session_when_commands_are_full() {
     next_app.fail_video(&frame, &anyhow::anyhow!("late renderer failure"));
     assert!(!next_commands(), "old frame must not stop the new playback");
 }
+
+#[test]
+fn player_stop_rejection_and_retry() {
+    let ctx = egui::Context::default();
+    moqcast_ui::v2::install(&ctx);
+    let (mut app, mut commands) = app();
+    app.page = Page::Watch;
+    let mut s = snapshot(1);
+    s.media.begin(MediaPhase::Watching);
+    s.media_owner = Some(MediaOwner::Watch);
+    let size = egui::vec2(1040.0, 700.0);
+    let mut queued = 0;
+    while app.runtime.set_playback_volume(1, 50) {
+        queued += 1;
+    }
+    assert!(queued > 0);
+    for _ in 0..3 {
+        render(&ctx, &mut app, &s, size, vec![]);
+    }
+    let output = render(&ctx, &mut app, &s, size, vec![]);
+    let stop = painted(&output, "Stop watching").center();
+    for pressed in [true, false] {
+        render(
+            &ctx,
+            &mut app,
+            &s,
+            size,
+            vec![
+                egui::Event::PointerMoved(stop),
+                egui::Event::PointerButton {
+                    pos: stop,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+    }
+    assert!(app.command_error, "rejected Stop has no feedback");
+    let output = render(&ctx, &mut app, &s, size, vec![]);
+    assert!(
+        painted(
+            &output,
+            "The action could not be sent. Check service status before trying again."
+        )
+        .is_positive()
+    );
+    assert_eq!(s.media.phase(), MediaPhase::Watching);
+    assert_eq!(app.page, Page::Watch);
+    for _ in 0..queued {
+        assert!(commands());
+    }
+    assert!(!commands());
+    let stop = painted(&output, "Stop watching").center();
+    for pressed in [true, false] {
+        render(
+            &ctx,
+            &mut app,
+            &s,
+            size,
+            vec![
+                egui::Event::PointerMoved(stop),
+                egui::Event::PointerButton {
+                    pos: stop,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+    }
+    assert!(!app.command_error);
+    assert!(commands());
+    assert!(!commands());
+    assert_eq!(s.media.phase(), MediaPhase::Watching);
+}
+
+#[test]
+fn player_stop_rejection_with_closed_runtime_is_visible() {
+    let ctx = egui::Context::default();
+    moqcast_ui::v2::install(&ctx);
+    let (mut app, commands) = app();
+    drop(commands);
+    app.page = Page::Watch;
+    let mut snapshot = snapshot(1);
+    snapshot.media.begin(MediaPhase::Watching);
+    snapshot.media_owner = Some(MediaOwner::Watch);
+    let size = egui::vec2(1040.0, 700.0);
+    for _ in 0..3 {
+        render(&ctx, &mut app, &snapshot, size, vec![]);
+    }
+    let output = render(&ctx, &mut app, &snapshot, size, vec![]);
+    let stop = painted(&output, "Stop watching").center();
+    for pressed in [true, false] {
+        render(
+            &ctx,
+            &mut app,
+            &snapshot,
+            size,
+            vec![
+                egui::Event::PointerMoved(stop),
+                egui::Event::PointerButton {
+                    pos: stop,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+    }
+    assert!(app.command_error);
+    let output = render(&ctx, &mut app, &snapshot, size, vec![]);
+    assert!(
+        painted(
+            &output,
+            "The action could not be sent. Check service status before trying again."
+        )
+        .is_positive()
+    );
+    assert_eq!(app.page, Page::Watch);
+    assert_eq!(snapshot.media.phase(), MediaPhase::Watching);
+}
