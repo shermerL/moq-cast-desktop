@@ -39,10 +39,11 @@ fi
 mkdir -p "$OUTPUT_ROOT"
 OUTPUT_ROOT=$(CDPATH= cd -- "$OUTPUT_ROOT" && pwd)
 cd "$LINUX_DIR"
-GENERATED_INFO="$LINUX_DIR/target/release/moqcast-build-info.txt"
+TARGET_DIR="$LINUX_DIR/target"
+GENERATED_INFO="$TARGET_DIR/release/moqcast-build-info.txt"
 MOQCAST_BUILD_IDENTITY="$PACKAGE_VARIANT" \
 MOQCAST_PROVENANCE_OUTPUT="$GENERATED_INFO" \
-cargo build --locked --release
+cargo build --locked --release --target-dir "$TARGET_DIR"
 VERSION=$(sed -n 's/^app_version=//p' "$GENERATED_INFO")
 if [[ -z $VERSION ]]; then
     echo "Generated provenance is missing app_version." >&2
@@ -68,7 +69,7 @@ mkdir "$APPDIR"
 mkdir -p "$(dirname -- "$BUILD_INFO_FILE")"
 write_build_info "$BUILD_INFO_FILE" "$GENERATED_INFO"
 
-install -Dm755 target/release/moq-cast-desktop "$APPDIR/usr/bin/moq-cast-desktop"
+install -Dm755 "$TARGET_DIR/release/moq-cast-desktop" "$APPDIR/usr/bin/moq-cast-desktop"
 install -Dm755 packaging/appimage/AppRun "$APPDIR/AppRun"
 install -Dm644 packaging/appimage/dev.moq.moqcast.desktop.desktop "$APPDIR/dev.moq.moqcast.desktop.desktop"
 install -Dm644 assets/icons/hicolor/512x512/apps/moqcast.png "$APPDIR/moqcast.png"
