@@ -60,6 +60,8 @@ UI v2 候选复用 shared-ui 的主题、内嵌字体、品牌、页头、设备
 
 ## AppImage 构建输出
 
+Linux 打包 CI 从 `linux/Cargo.lock` 读取 MoQ 提交，检出该提交的 Rust 工作区，按文件生成校验和，并通过 Cargo 源替换解析 Git 依赖。新 runner 可以直接解析锁定的 Rust 依赖，跳过已下线的开发工具子模块 `.claude/shared`。
+
 `./scripts/build-appimage.sh` 显式使用 `linux/target` 作为 Cargo 输出目录，不采用外部 `CARGO_TARGET_DIR` 或 Cargo 配置中的 `build.target-dir`。构建、来源信息和安装程序均从同一目录读取，避免将旧二进制与本次构建信息一起打包。`MOQCAST_PACKAGE_DIR` 仍只指定最终打包目录。
 
 `python3 linux/scripts/check-appimage-build.py`（仓库根目录）使用最小 Rust 程序验证默认/环境变量/Cargo 配置目录及构建失败路径。它只验证产物选择，不替代 Linux AppImage 构建和运行验收。

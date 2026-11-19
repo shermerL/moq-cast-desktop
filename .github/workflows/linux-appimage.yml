@@ -110,7 +110,8 @@ jobs:
             libxrandr-dev \
             nasm \
             patchelf \
-            pkg-config
+            pkg-config \
+            python3
 
       - name: Install Rust toolchain
         run: |
@@ -129,6 +130,9 @@ jobs:
           key: linux-cargo-${{ matrix.variant }}-rust1.95.0-${{ hashFiles('linux/Cargo.lock', 'shared/build-provenance/Cargo.lock', 'shared/diagnostics/Cargo.lock', 'shared/ui/Cargo.lock') }}
           restore-keys: |
             linux-cargo-${{ matrix.variant }}-rust1.95.0-
+
+      - name: Prepare locked MoQ sources
+        run: python3 linux/scripts/prepare-ci-moq-source.py
 
       - name: Download AppImage tooling
         run: |
