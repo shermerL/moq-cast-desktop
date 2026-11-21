@@ -2,6 +2,9 @@
 
 use egui::{Color32, Context, Frame, Margin, Response, RichText, Stroke, Ui, Vec2};
 
+mod form;
+pub use form::{TextField, select};
+
 /// Semantic colors for the S2 desktop shell.
 #[derive(Clone, Copy)]
 pub struct Palette {
@@ -62,7 +65,11 @@ impl Palette {
                 text: rgb(0x17232d),
                 muted: rgb(0x65757f),
                 border: rgb(0xdce5e9),
-                accent: rgb(0x167c82),
+                accent: rgb(if cfg!(target_os = "macos") {
+                    0x1d7670
+                } else {
+                    0x167c82
+                }),
                 success: rgb(0x40a66d),
                 warning: rgb(0x8b5b12),
                 danger: rgb(0xae2b24),
@@ -916,6 +923,16 @@ pub struct ContextCard<'a> {
 
 /// Renders the local-device context with one bounded primary action.
 pub fn context_card(ui: &mut Ui, content: ContextCard<'_>, metrics: Metrics) -> Response {
+    context_card_with_action(ui, content, metrics, true)
+}
+
+/// Renders the local device while keeping an unavailable action visible.
+pub fn context_card_with_action(
+    ui: &mut Ui,
+    content: ContextCard<'_>,
+    metrics: Metrics,
+    enabled: bool,
+) -> Response {
     let p = Palette::for_ui(ui);
     let mut response = None;
     p.card()
@@ -975,7 +992,7 @@ pub fn context_card(ui: &mut Ui, content: ContextCard<'_>, metrics: Metrics) -> 
             )
             .on_hover_text(content.identity);
             ui.scope_builder(egui::UiBuilder::new().max_rect(action_rect), |ui| {
-                response = Some(action(ui, content.action, action_rect.size(), true));
+                response = Some(action(ui, content.action, action_rect.size(), enabled));
             });
         });
     response.expect("the context card always renders its action")

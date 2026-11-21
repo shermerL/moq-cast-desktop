@@ -1,9 +1,10 @@
-//! Native macOS application shell for Nearby and direct-only sessions.
+//! Native macOS application shell for Nearby and Relay viewing.
 
 mod capture_picker;
 mod desktop;
 mod diagnostics;
 mod player;
+mod relay;
 mod system_lifecycle;
 mod video;
 mod view;
@@ -12,7 +13,7 @@ use eframe::egui::{self, Align, Color32, Frame, Key, Layout, Modifiers};
 use moqcast_ui::{PlayerFrameSample, install_ui_font};
 
 #[cfg(test)]
-use self::view::{ConnectionView, PresenceView};
+use self::view::ConnectionView;
 use self::view::{PeerPresentation, screen_availability};
 use crate::network::PeerSession;
 use crate::remote::ScreenAvailability;
@@ -27,6 +28,7 @@ const STORAGE_DEVELOPER_MODE: &str = "moqcast.macos.developer-mode";
 enum Page {
     #[default]
     Nearby,
+    Relay,
     ScreenShare,
     Watch,
 }
@@ -82,6 +84,7 @@ impl Locale {
 
 pub(crate) struct MoqCastApp {
     page: Page,
+    relay_ui: relay::Ui,
     locale: Locale,
     developer_mode: bool,
     diagnostics: diagnostics::DiagnosticsUi,
@@ -117,9 +120,9 @@ impl MoqCastApp {
             .and_then(|s| s.get_string("moqcast.macos.theme"))
             .as_deref()
         {
-            Some("light") => egui::ThemePreference::Light,
+            Some("system") => egui::ThemePreference::System,
             Some("dark") => egui::ThemePreference::Dark,
-            _ => egui::ThemePreference::System,
+            _ => egui::ThemePreference::Light,
         };
         context.egui_ctx.set_theme(theme_preference);
         let locale = Locale::from_storage(
@@ -146,6 +149,7 @@ impl MoqCastApp {
         };
         Ok(Self {
             page: Page::Nearby,
+            relay_ui: relay::Ui::default(),
             locale,
             developer_mode,
             diagnostics: diagnostics::DiagnosticsUi::new(diagnostics, developer_mode),
@@ -260,6 +264,12 @@ impl MoqCastApp {
     }
 
     fn player_device_name(&self, snapshot: &AppSnapshot) -> String {
+        if matches!(snapshot.media_source, crate::runtime::MediaSource::Relay(_)) {
+            return snapshot
+                .media_path
+                .clone()
+                .unwrap_or_else(|| "Relay".into());
+        }
         snapshot
             .media_peer
             .as_deref()
@@ -295,7 +305,7 @@ impl MoqCastApp {
             },
         ) {
             Some(player::PlayerAction::Stop) => {
-                self.command_error = !self.runtime.stop_watching();
+                self.command_error = !self.runtime.stop_watching(snapshot.media.generation());
             }
             Some(player::PlayerAction::SetVolume {
                 generation,
@@ -338,7 +348,7 @@ impl MoqCastApp {
             if moqcast_ui::v2::dialog_header(ui, self.text("关闭附近设备？", "Turn off Nearby?"), self.text("取消关闭附近设备", "Cancel turning off Nearby")).clicked() {
                 self.confirm_turn_off_nearby = false;
             }
-            ui.label(self.text("关闭会停止当前观看或共享，并断开附近连接。", "Turning off Nearby stops the current watch or share and closes nearby connections."));
+            ui.label(self.text("关闭会停止 LAN 观看或共享，并断开附近连接。Relay 保持连接。", "Turning off Nearby stops LAN media and nearby connections. Relay stays connected."));
             ui.horizontal(|ui| {
                 if (moqcast_ui::v2::Action { label: self.text("取消", "Cancel"), size: egui::vec2(108.0, 42.0), enabled: true, tone: moqcast_ui::v2::ActionTone::Neutral }).show(ui).clicked() { self.confirm_turn_off_nearby = false; }
                 if (moqcast_ui::v2::Action { label: self.text("关闭附近设备", "Turn off Nearby"), size: egui::vec2(148.0,42.0), enabled: true, tone: moqcast_ui::v2::ActionTone::Danger }).show(ui).clicked() {
@@ -358,6 +368,9 @@ impl eframe::App for MoqCastApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_capture_picker(ui.ctx());
         let snapshot = self.runtime.snapshot();
+        if self.relay_ui.reconcile(&snapshot) {
+            self.page = Page::Watch;
+        }
         reconcile_nearby_action(&mut self.nearby_action_pending, &snapshot);
         if matches!(
             snapshot.discovery.phase(),
@@ -629,16 +642,6 @@ fn local_device_description(
 
 fn peer_list_subtitle(locale: Locale, peer_id: &str) -> String {
     format!("{}: {peer_id}", remote_device_id_label(locale))
-}
-
-fn device_status(
-    peer: PeerPresentation,
-    screen: ScreenAvailability,
-    locale: Locale,
-) -> &'static str {
-    peer.facts(screen == ScreenAvailability::Available)
-        .status()
-        .label(locale == Locale::Chinese)
 }
 
 fn peer_line(peer: PeerPresentation, locale: Locale) -> &'static str {

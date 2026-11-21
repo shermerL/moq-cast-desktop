@@ -13,6 +13,7 @@ use tokio::sync::{mpsc, watch};
 use crate::network::{self, Event as NetworkEvent, PeerSession};
 use crate::playback::{self, Event as PlaybackEvent, Frame as PlaybackFrame};
 use crate::publication::{self, Event as PublicationEvent, Selection as ShareSelection};
+use crate::relay;
 use crate::remote::{ScreenAvailability, ScreenView};
 
 const COMMAND_CAPACITY: usize = 32;
@@ -126,6 +127,13 @@ pub(crate) enum MediaOwner {
     Share,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MediaSource {
+    #[default]
+    Nearby,
+    Relay(relay::Selection),
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ShareAudioPhase {
     #[default]
@@ -169,6 +177,8 @@ pub(crate) struct AppSnapshot {
     pub(crate) inbound_sessions: usize,
     pub(crate) nearby_stopping: bool,
     pub(crate) nearby_issue: Option<NearbyIssue>,
+    pub(crate) relay: relay::Snapshot,
+    pub(crate) media_source: MediaSource,
     pub(crate) media_peer: Option<String>,
     pub(crate) media_path: Option<String>,
     pub(crate) media_owner: Option<MediaOwner>,
@@ -200,6 +210,8 @@ impl Default for AppSnapshot {
             inbound_sessions: 0,
             nearby_stopping: false,
             nearby_issue: None,
+            relay: relay::Snapshot::default(),
+            media_source: MediaSource::Nearby,
             media_peer: None,
             media_path: None,
             media_owner: None,
@@ -218,6 +230,16 @@ impl Default for AppSnapshot {
 }
 
 impl AppSnapshot {
+    pub(crate) fn can_watch_relay(&self, selection: &relay::Selection) -> bool {
+        self.runtime.phase() == RuntimePhase::Ready
+            && self.media.phase() == MediaPhase::Idle
+            && self.relay.contains(selection)
+    }
+
+    pub(crate) fn relay_media(&self) -> bool {
+        self.media_owner.is_some() && matches!(self.media_source, MediaSource::Relay(_))
+    }
+
     pub(crate) fn access(&self) -> moqcast_lan_state::Access {
         moqcast_lan_state::Access {
             ready: self.session.phase() == SessionPhase::Listening && !self.nearby_stopping,
@@ -240,6 +262,7 @@ impl AppSnapshot {
         }
         let generation = self.media.begin(MediaPhase::PreparingWatch);
         self.media_owner = Some(MediaOwner::Watch);
+        self.media_source = MediaSource::Nearby;
         self.media_peer = Some(peer.to_owned());
         self.media_path = Some(path.to_owned());
         self.media_decoder = None;
@@ -344,12 +367,19 @@ impl AppSnapshot {
         if self.media_owner != Some(MediaOwner::Watch)
             || !matches!(
                 self.media.phase(),
-                MediaPhase::PreparingWatch | MediaPhase::Watching | MediaPhase::Failed
+                MediaPhase::PreparingWatch
+                    | MediaPhase::Watching
+                    | MediaPhase::Failed
+                    | MediaPhase::Stopping
             )
         {
             return None;
         }
-        Some(self.media.begin(MediaPhase::Stopping))
+        Some(if self.media.phase() == MediaPhase::Stopping {
+            self.media.generation()
+        } else {
+            self.media.begin(MediaPhase::Stopping)
+        })
     }
 
     fn finish_stop_media(&mut self, generation: Generation) -> bool {
@@ -398,6 +428,7 @@ impl AppSnapshot {
         let selection = self.share_selection.clone()?;
         let generation = self.media.begin(MediaPhase::PreparingShare);
         self.media_owner = Some(MediaOwner::Share);
+        self.media_source = MediaSource::Nearby;
         self.media_peer = None;
         self.media_path = None;
         self.media_decoder = None;
@@ -543,9 +574,12 @@ struct ShareStart {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RuntimeCommand {
+    ConnectRelay(relay::Config),
+    DisconnectRelay(Generation),
+    WatchRelay(relay::Selection),
     WatchScreen { peer: String, path: String },
     SetPlaybackVolume { generation: u64, percent: u8 },
-    StopWatching,
+    StopWatching(Generation),
     SelectShareSource(ShareSelection),
     SetShareSystemAudio(bool),
     StartSharing,
@@ -684,8 +718,28 @@ impl RuntimeOwner {
             .is_ok()
     }
 
-    pub(crate) fn stop_watching(&self) -> bool {
-        self.commands.try_send(RuntimeCommand::StopWatching).is_ok()
+    pub(crate) fn connect_relay(&self, config: relay::Config) -> bool {
+        self.commands
+            .try_send(RuntimeCommand::ConnectRelay(config))
+            .is_ok()
+    }
+
+    pub(crate) fn disconnect_relay(&self, generation: Generation) -> bool {
+        self.commands
+            .try_send(RuntimeCommand::DisconnectRelay(generation))
+            .is_ok()
+    }
+
+    pub(crate) fn watch_relay(&self, selection: relay::Selection) -> bool {
+        self.commands
+            .try_send(RuntimeCommand::WatchRelay(selection))
+            .is_ok()
+    }
+
+    pub(crate) fn stop_watching(&self, generation: Generation) -> bool {
+        self.commands
+            .try_send(RuntimeCommand::StopWatching(generation))
+            .is_ok()
     }
 
     pub(crate) fn set_playback_volume(&self, generation: u64, percent: u8) -> bool {
@@ -771,214 +825,431 @@ async fn run(
     let (playback_events_tx, mut playback_events) = mpsc::channel(PLAYBACK_EVENT_CAPACITY);
     let mut playback = playback::Owner::default();
     let mut publication = publication::Owner::default();
-    let mut suspended = false;
+    let mut relay_owner: Option<relay::Owner> = None;
+    let mut relay_request: Option<relay::Request> = None;
+    let mut services: Option<network::Services> = None;
+    let mut generations = begin_network_start(&mut snapshot);
+    let mut starting = Some(start());
+    let mut scan: Option<Pin<Box<tokio::time::Sleep>>> = None;
+    let mut scan_finished = false;
+    let mut nearby_enabled = true;
+    publish_snapshot(&snapshot_tx, &snapshot, &wake);
 
-    'runtime: loop {
-        if suspended {
-            match wait_while_suspended(&mut commands, &mut system_events, true).await {
-                SuspendedAction::Resume { restart_network } => {
-                    suspended = false;
-                    snapshot.runtime.begin(RuntimePhase::Ready);
-                    if !restart_network {
-                        mark_network_stopped(&mut snapshot);
-                        publish_snapshot(&snapshot_tx, &snapshot, &wake);
-                        tracing::info!("keeping Nearby network services off after system wake");
-                        match wait_while_network_stopped(
-                            &mut commands,
-                            &mut system_events,
-                            &mut snapshot,
-                            &snapshot_tx,
-                            &wake,
-                        )
-                        .await
-                        {
-                            StoppedAction::Restart => continue,
-                            StoppedAction::Shutdown => {
-                                stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
-                                return;
-                            }
-                        }
-                    }
-                    tracing::info!("resuming Nearby network services after system wake");
-                }
-                SuspendedAction::Shutdown => {
-                    stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
-                    return;
-                }
-            }
-        }
-        let generations = begin_network_start(&mut snapshot);
-        tracing::info!(
-            discovery_generation = generations.discovery.value(),
-            session_generation = generations.session.value(),
-            "starting Nearby network services"
-        );
-        publish_snapshot(&snapshot_tx, &snapshot, &wake);
-        let mut start_attempt = start();
-        let mut services = loop {
-            tokio::select! {
-                result = &mut start_attempt => match result {
-                    Ok(services) => break services,
-                    Err(issue) => {
-                        tracing::warn!(?issue, "Nearby network services failed to start");
-                        mark_network_failed(&mut snapshot, generations, issue);
-                        publish_snapshot(&snapshot_tx, &snapshot, &wake);
-                        match wait_for_network_restart(&mut commands, &mut system_events).await {
-                            RecoveryAction::Restart => continue 'runtime,
-                            RecoveryAction::Suspend => {
-                                teardown_media(&mut snapshot, &mut playback, &mut publication, &frames).await;
-                                suspend_snapshot(&mut snapshot, &snapshot_tx, &wake);
-                                suspended = true;
-                                continue 'runtime;
-                            }
-                            RecoveryAction::Shutdown => {
-                                teardown_media(&mut snapshot, &mut playback, &mut publication, &frames).await;
-                                stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
-                                return;
-                            }
-                            RecoveryAction::Failed | RecoveryAction::TurnOff => unreachable!(),
-                        }
-                    }
-                },
-                command = commands.recv() => match command {
-                    Some(RuntimeCommand::Shutdown) | None => {
-                        teardown_media(&mut snapshot, &mut playback, &mut publication, &frames).await;
-                        stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
-                        return;
-                    }
-                    Some(RuntimeCommand::RestartNetwork) => continue 'runtime,
-                    Some(RuntimeCommand::StopNetwork) => {
-                        teardown_media(&mut snapshot, &mut playback, &mut publication, &frames).await;
-                        drop(start_attempt);
-                        mark_network_stopped(&mut snapshot);
-                        publish_snapshot(&snapshot_tx, &snapshot, &wake);
-                        match wait_while_network_stopped(
-                            &mut commands,
-                            &mut system_events,
-                            &mut snapshot,
-                            &snapshot_tx,
-                            &wake,
-                        ).await {
-                            StoppedAction::Restart => continue 'runtime,
-                            StoppedAction::Shutdown => {
-                                stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
-                                return;
-                            }
-                        }
-                    }
-                    Some(_) => tracing::debug!(
-                        "ignored media command while Nearby network services are starting"
-                    ),
-                },
-                Some(event) = system_events.recv() => match event {
-                    SystemEvent::Suspend => {
-                        teardown_media(&mut snapshot, &mut playback, &mut publication, &frames).await;
-                        drop(start_attempt);
-                        suspend_snapshot(&mut snapshot, &snapshot_tx, &wake);
-                        suspended = true;
-                        continue 'runtime;
-                    }
-                    SystemEvent::Resume => {}
-                },
-            }
+    loop {
+        let input = tokio::select! {
+            command = commands.recv() => RuntimeInput::Command(command),
+            Some(event) = system_events.recv() => RuntimeInput::System(event),
+            result = async { starting.as_mut().unwrap().await }, if starting.is_some() => RuntimeInput::Started(result),
+            event = async { services.as_mut().unwrap().recv().await }, if services.is_some() => RuntimeInput::Network(event),
+            event = async { relay_owner.as_mut().unwrap().recv().await }, if relay_owner.is_some() => RuntimeInput::Relay(event),
+            result = async { relay_request.as_mut().unwrap().await }, if relay_request.is_some() => RuntimeInput::RelayBroadcast(result),
+            event = playback_events.recv() => RuntimeInput::Playback(event),
+            event = publication.recv() => RuntimeInput::Publication(event),
+            () = async { scan.as_mut().unwrap().await }, if services.is_some() && !scan_finished => RuntimeInput::InitialScanFinished,
         };
-
-        snapshot.local_peer_id = Some(services.local_peer_id().to_owned());
-        snapshot
-            .discovery
-            .apply(generations.discovery, DiscoveryPhase::Scanning);
-        snapshot
-            .session
-            .apply(generations.session, SessionPhase::Listening);
-        snapshot.nearby_issue = None;
-        publish_snapshot(&snapshot_tx, &snapshot, &wake);
-
-        let action = ServiceRun {
-            commands: &mut commands,
-            system_events: &mut system_events,
-            snapshot: &mut snapshot,
-            services: &mut services,
-            generations,
-            playback: &mut playback,
-            playback_events_tx: &playback_events_tx,
-            playback_events: &mut playback_events,
-            publication: &mut publication,
-            frames: &frames,
-            snapshot_tx: &snapshot_tx,
-            wake: &wake,
-        }
-        .run()
-        .await;
-        if action == RecoveryAction::TurnOff {
-            snapshot.nearby_stopping = true;
-            publish_snapshot(&snapshot_tx, &snapshot, &wake);
-            complete_network_turn_off(
-                &mut snapshot,
-                &mut playback,
-                &mut publication,
-                &frames,
-                || services.shutdown(),
-            )
-            .await;
-            publish_snapshot(&snapshot_tx, &snapshot, &wake);
-            match wait_while_network_stopped(
-                &mut commands,
-                &mut system_events,
-                &mut snapshot,
-                &snapshot_tx,
-                &wake,
-            )
-            .await
-            {
-                StoppedAction::Restart => continue,
-                StoppedAction::Shutdown => {
-                    stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
-                    return;
+        match input {
+            RuntimeInput::Started(result) => {
+                starting = None;
+                match result {
+                    Ok(service) => {
+                        snapshot.local_peer_id = Some(service.local_peer_id().to_owned());
+                        snapshot
+                            .discovery
+                            .apply(generations.discovery, DiscoveryPhase::Scanning);
+                        snapshot
+                            .session
+                            .apply(generations.session, SessionPhase::Listening);
+                        snapshot.nearby_issue = None;
+                        services = Some(service);
+                        scan = Some(Box::pin(tokio::time::sleep(Duration::from_secs(3))));
+                        scan_finished = false;
+                    }
+                    Err(issue) => {
+                        mark_network_failed(&mut snapshot, generations, issue);
+                    }
                 }
             }
-        }
-
-        teardown_media(&mut snapshot, &mut playback, &mut publication, &frames).await;
-        if let Err(error) = services.shutdown().await {
-            tracing::error!(%error, "LAN cleanup failed");
-            snapshot.nearby_issue = Some(NearbyIssue::ShutdownFailed);
-        }
-
-        match action {
-            RecoveryAction::Shutdown => {
+            RuntimeInput::Command(Some(RuntimeCommand::Shutdown) | None) => {
+                drop(starting.take());
+                drop(relay_request.take());
+                close_relay(
+                    &mut snapshot,
+                    &mut relay_owner,
+                    &mut playback,
+                    &frames,
+                    &snapshot_tx,
+                    &wake,
+                )
+                .await;
+                complete_network_turn_off(
+                    &mut snapshot,
+                    &mut playback,
+                    &mut publication,
+                    &frames,
+                    || async {
+                        match services.take() {
+                            Some(s) => s.shutdown().await,
+                            None => Ok(()),
+                        }
+                    },
+                )
+                .await;
                 stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
                 return;
             }
-            RecoveryAction::Restart => {
-                tracing::info!("restarting Nearby network services");
-                continue;
-            }
-            RecoveryAction::TurnOff => unreachable!(),
-            RecoveryAction::Suspend => {
-                suspend_snapshot(&mut snapshot, &snapshot_tx, &wake);
-                suspended = true;
-                continue;
-            }
-            RecoveryAction::Failed => {
-                tracing::warn!("Nearby network services ended; waiting for explicit restart");
-                mark_network_failed(&mut snapshot, generations, NearbyIssue::ServicesStopped);
+            RuntimeInput::Command(Some(
+                command @ (RuntimeCommand::StopNetwork | RuntimeCommand::RestartNetwork),
+            )) => {
+                nearby_enabled = command == RuntimeCommand::RestartNetwork;
+                drop(starting.take());
+                snapshot.nearby_stopping = true;
                 publish_snapshot(&snapshot_tx, &snapshot, &wake);
-                match wait_for_network_restart(&mut commands, &mut system_events).await {
-                    RecoveryAction::Restart => continue,
-                    RecoveryAction::Suspend => {
-                        suspend_snapshot(&mut snapshot, &snapshot_tx, &wake);
-                        suspended = true;
-                        continue;
-                    }
-                    RecoveryAction::Shutdown => {
+                complete_network_turn_off(
+                    &mut snapshot,
+                    &mut playback,
+                    &mut publication,
+                    &frames,
+                    || async {
+                        match services.take() {
+                            Some(s) => s.shutdown().await,
+                            None => Ok(()),
+                        }
+                    },
+                )
+                .await;
+                if nearby_enabled {
+                    generations = begin_network_start(&mut snapshot);
+                    starting = Some(start());
+                }
+            }
+            RuntimeInput::System(SystemEvent::Suspend) => {
+                drop(starting.take());
+                drop(relay_request.take());
+                close_relay(
+                    &mut snapshot,
+                    &mut relay_owner,
+                    &mut playback,
+                    &frames,
+                    &snapshot_tx,
+                    &wake,
+                )
+                .await;
+                complete_network_turn_off(
+                    &mut snapshot,
+                    &mut playback,
+                    &mut publication,
+                    &frames,
+                    || async {
+                        match services.take() {
+                            Some(s) => s.shutdown().await,
+                            None => Ok(()),
+                        }
+                    },
+                )
+                .await;
+                suspend_snapshot(&mut snapshot, &snapshot_tx, &wake);
+                match wait_while_suspended(&mut commands, &mut system_events, nearby_enabled).await
+                {
+                    SuspendedAction::Shutdown => {
                         stop_snapshot(&mut snapshot, &snapshot_tx, &wake);
                         return;
                     }
-                    RecoveryAction::Failed | RecoveryAction::TurnOff => unreachable!(),
+                    SuspendedAction::Resume { restart_network } => {
+                        nearby_enabled = restart_network;
+                        snapshot.runtime.begin(RuntimePhase::Ready);
+                        if nearby_enabled {
+                            generations = begin_network_start(&mut snapshot);
+                            starting = Some(start());
+                        } else {
+                            mark_network_stopped(&mut snapshot);
+                        }
+                    }
                 }
             }
+            RuntimeInput::System(SystemEvent::Resume) => {}
+            RuntimeInput::Network(Some(event)) => {
+                apply_network_event(
+                    &mut snapshot,
+                    generations.discovery,
+                    generations.session,
+                    event,
+                );
+                refresh_discovery_result(&mut snapshot, generations.discovery, scan_finished);
+            }
+            RuntimeInput::Network(None) => {
+                complete_network_turn_off(
+                    &mut snapshot,
+                    &mut playback,
+                    &mut publication,
+                    &frames,
+                    || async {
+                        match services.take() {
+                            Some(s) => s.shutdown().await,
+                            None => Ok(()),
+                        }
+                    },
+                )
+                .await;
+                // Cleanup advances the generations, so failure belongs to the new stopped state.
+                generations = NetworkGenerations {
+                    discovery: snapshot.discovery.generation(),
+                    session: snapshot.session.generation(),
+                };
+                mark_network_failed(&mut snapshot, generations, NearbyIssue::ServicesStopped);
+            }
+            RuntimeInput::InitialScanFinished => {
+                finish_initial_scan(&mut snapshot, generations.discovery, &mut scan_finished)
+            }
+            RuntimeInput::Command(Some(RuntimeCommand::ConnectRelay(config))) => {
+                if relay_owner.is_none() {
+                    snapshot.relay.server = config.summary();
+                    snapshot.relay.entries.clear();
+                    snapshot.relay.error = None;
+                    snapshot.relay.version = None;
+                    let generation = snapshot.relay.lifecycle.begin(relay::Phase::Connecting);
+                    match relay::Owner::start(config) {
+                        Ok(owner) => relay_owner = Some(owner),
+                        Err(error) => {
+                            snapshot
+                                .relay
+                                .lifecycle
+                                .apply(generation, relay::Phase::Failed);
+                            snapshot.relay.error = Some(error);
+                        }
+                    }
+                }
+            }
+            RuntimeInput::Command(Some(RuntimeCommand::DisconnectRelay(generation))) => {
+                if generation != snapshot.relay.lifecycle.generation() {
+                    continue;
+                }
+                drop(relay_request.take());
+                close_relay(
+                    &mut snapshot,
+                    &mut relay_owner,
+                    &mut playback,
+                    &frames,
+                    &snapshot_tx,
+                    &wake,
+                )
+                .await;
+            }
+            RuntimeInput::Relay(relay::Event::Connected) => {
+                let generation = snapshot.relay.lifecycle.generation();
+                snapshot
+                    .relay
+                    .lifecycle
+                    .apply(generation, relay::Phase::Connected);
+                snapshot.relay.version = relay_owner.as_ref().and_then(relay::Owner::version);
+                tracing::info!(version = ?snapshot.relay.version, "Relay connection established");
+            }
+            RuntimeInput::Relay(relay::Event::Announcement(event)) => {
+                relay_owner
+                    .as_mut()
+                    .unwrap()
+                    .apply(&mut snapshot.relay, event);
+                if let MediaSource::Relay(selection) = &snapshot.media_source
+                    && snapshot.media_owner == Some(MediaOwner::Watch)
+                    && snapshot.media.phase() != MediaPhase::Failed
+                    && !snapshot.relay.contains(selection)
+                {
+                    relay_request = None;
+                    end_relay_watch(
+                        &mut snapshot,
+                        &mut playback,
+                        &frames,
+                        "The shared broadcast was withdrawn",
+                    )
+                    .await;
+                }
+            }
+            RuntimeInput::Relay(relay::Event::Closed(error)) => {
+                drop(relay_request.take());
+                close_relay(
+                    &mut snapshot,
+                    &mut relay_owner,
+                    &mut playback,
+                    &frames,
+                    &snapshot_tx,
+                    &wake,
+                )
+                .await;
+                snapshot.relay.lifecycle.begin(relay::Phase::Failed);
+                snapshot.relay.error = Some(match snapshot.relay.error.take() {
+                    Some(cleanup) => format!("{error}; {cleanup}"),
+                    None => error,
+                });
+            }
+            RuntimeInput::Command(Some(RuntimeCommand::WatchRelay(selection))) => {
+                if selection.generation != snapshot.relay.lifecycle.generation() {
+                    continue;
+                }
+                snapshot.relay.watch_request = snapshot
+                    .relay
+                    .watch_request
+                    .checked_add(1)
+                    .expect("relay request sequence exhausted");
+                snapshot.relay.error = Some(
+                    "This broadcast is no longer available, or another media task is active".into(),
+                );
+                if snapshot.can_watch_relay(&selection)
+                    && let Some(request) = relay_owner
+                        .as_ref()
+                        .and_then(|owner| owner.request(&selection))
+                {
+                    // A naturally ended playback still owns its joined task until stopped.
+                    if let Err(error) = playback.stop().await {
+                        snapshot.media_error = Some(error);
+                    } else if snapshot.begin_watch("", &selection.path).is_some() {
+                        snapshot.relay.error = None;
+                        snapshot.media_peer = None;
+                        snapshot.media_source = MediaSource::Relay(selection);
+                        frames.send_replace(None);
+                        relay_request = Some(request);
+                    }
+                }
+            }
+            RuntimeInput::RelayBroadcast(result) => {
+                relay_request = None;
+                if let MediaSource::Relay(selection) = &snapshot.media_source
+                    && snapshot.media.phase() == MediaPhase::PreparingWatch
+                    && snapshot.relay.contains(selection)
+                {
+                    match result {
+                        Ok(broadcast) => playback.start(
+                            snapshot.media.generation().value(),
+                            selection.path.clone(),
+                            broadcast,
+                            playback_events_tx.clone(),
+                            frames.clone(),
+                            wake.clone(),
+                        ),
+                        Err(_) => {
+                            snapshot.playback_ended(
+                                snapshot.media.generation(),
+                                Err("Relay could not open this broadcast".into()),
+                            );
+                        }
+                    }
+                }
+            }
+            RuntimeInput::Command(Some(RuntimeCommand::WatchScreen { peer, path })) => {
+                if let Some(services) = &services
+                    && snapshot.can_watch(&peer, &path)
+                {
+                    if let Err(error) = playback.stop().await {
+                        snapshot.media_error = Some(error);
+                    } else {
+                        start_watch(
+                            &mut snapshot,
+                            StartWatch {
+                                services,
+                                playback: &mut playback,
+                                events: &playback_events_tx,
+                                frames: &frames,
+                                wake: &wake,
+                                peer_id: peer,
+                                path,
+                            },
+                        );
+                    }
+                }
+            }
+            RuntimeInput::Command(Some(RuntimeCommand::StopWatching(generation))) => {
+                if snapshot.media_owner == Some(MediaOwner::Watch)
+                    && generation == snapshot.media.generation()
+                {
+                    relay_request = None;
+                    snapshot.media.begin(MediaPhase::Stopping);
+                    publish_snapshot(&snapshot_tx, &snapshot, &wake);
+                    stop_watch(&mut snapshot, &mut playback, &frames).await;
+                }
+            }
+            RuntimeInput::Command(Some(RuntimeCommand::SetPlaybackVolume {
+                generation,
+                percent,
+            })) => {
+                playback.set_volume(generation, percent);
+            }
+            RuntimeInput::Command(Some(RuntimeCommand::SelectShareSource(selection))) => {
+                snapshot.select_share_source(selection);
+            }
+            RuntimeInput::Command(Some(RuntimeCommand::SetShareSystemAudio(enabled))) => {
+                snapshot.set_share_system_audio(enabled);
+            }
+            RuntimeInput::Command(Some(RuntimeCommand::StartSharing)) => {
+                if let Some(services) = &services {
+                    start_share(&mut snapshot, services, &mut publication);
+                }
+            }
+            RuntimeInput::Command(Some(RuntimeCommand::StopSharing)) => {
+                stop_share(&mut snapshot, &mut publication)
+            }
+            RuntimeInput::Playback(Some(event)) => {
+                apply_playback_event(&mut snapshot, &frames, event)
+            }
+            RuntimeInput::Playback(None) => {}
+            RuntimeInput::Publication(event) => apply_publication_event(&mut snapshot, event),
         }
+        publish_snapshot(&snapshot_tx, &snapshot, &wake);
     }
+}
+
+async fn end_relay_watch(
+    snapshot: &mut AppSnapshot,
+    playback: &mut playback::Owner,
+    frames: &watch::Sender<Option<Arc<PlaybackFrame>>>,
+    reason: &str,
+) {
+    if !snapshot.relay_media() {
+        return;
+    }
+    let result = playback.stop().await;
+    frames.send_replace(None);
+    // Withdrawal ends delivery but the same watch still owns the recovery action.
+    snapshot.playback_ended(
+        snapshot.media.generation(),
+        Err(match result {
+            Ok(()) => reason.to_owned(),
+            Err(error) => format!("{reason}; {error}"),
+        }),
+    );
+}
+
+async fn close_relay(
+    snapshot: &mut AppSnapshot,
+    owner: &mut Option<relay::Owner>,
+    playback: &mut playback::Owner,
+    frames: &watch::Sender<Option<Arc<PlaybackFrame>>>,
+    snapshots: &watch::Sender<Arc<AppSnapshot>>,
+    wake: &Arc<dyn Fn() + Send + Sync>,
+) {
+    if owner.is_none() {
+        return;
+    }
+    snapshot.relay.lifecycle.begin(relay::Phase::Disconnecting);
+    if snapshot.relay_media() {
+        snapshot.media.begin(MediaPhase::Stopping);
+    }
+    publish_snapshot(snapshots, snapshot, wake);
+    let mut errors = crate::cleanup::Errors::default();
+    if snapshot.relay_media() {
+        errors.result("playback", playback.stop().await);
+        frames.send_replace(None);
+        snapshot.clear_media(MediaPhase::Idle, None);
+    }
+    errors.result("connection", owner.take().unwrap().close().await);
+    snapshot.relay.entries.clear();
+    snapshot.relay.version = None;
+    snapshot.relay.error = errors.finish().err();
+    snapshot
+        .relay
+        .lifecycle
+        .begin(if snapshot.relay.error.is_some() {
+            relay::Phase::Failed
+        } else {
+            relay::Phase::Disconnected
+        });
 }
 
 #[derive(Clone, Copy)]
@@ -988,23 +1259,8 @@ struct NetworkGenerations {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RecoveryAction {
-    Restart,
-    TurnOff,
-    Suspend,
-    Shutdown,
-    Failed,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SuspendedAction {
     Resume { restart_network: bool },
-    Shutdown,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StoppedAction {
-    Restart,
     Shutdown,
 }
 
@@ -1055,56 +1311,6 @@ fn mark_network_stopped(snapshot: &mut AppSnapshot) {
     snapshot.nearby_issue = None;
 }
 
-async fn wait_for_network_restart(
-    commands: &mut mpsc::Receiver<RuntimeCommand>,
-    system_events: &mut mpsc::UnboundedReceiver<SystemEvent>,
-) -> RecoveryAction {
-    loop {
-        tokio::select! {
-            command = commands.recv() => match command {
-                Some(RuntimeCommand::RestartNetwork) => return RecoveryAction::Restart,
-                Some(RuntimeCommand::Shutdown) | None => return RecoveryAction::Shutdown,
-                Some(_) => {}
-            },
-            Some(event) = system_events.recv() => match event {
-                SystemEvent::Suspend => return RecoveryAction::Suspend,
-                SystemEvent::Resume => {}
-            },
-        }
-    }
-}
-
-async fn wait_while_network_stopped(
-    commands: &mut mpsc::Receiver<RuntimeCommand>,
-    system_events: &mut mpsc::UnboundedReceiver<SystemEvent>,
-    snapshot: &mut AppSnapshot,
-    snapshot_tx: &watch::Sender<Arc<AppSnapshot>>,
-    wake: &Arc<dyn Fn() + Send + Sync>,
-) -> StoppedAction {
-    loop {
-        match wait_for_network_restart(commands, system_events).await {
-            RecoveryAction::Restart => return StoppedAction::Restart,
-            RecoveryAction::Suspend => {
-                suspend_snapshot(snapshot, snapshot_tx, wake);
-                match wait_while_suspended(commands, system_events, false).await {
-                    SuspendedAction::Resume { restart_network } => {
-                        snapshot.runtime.begin(RuntimePhase::Ready);
-                        if restart_network {
-                            return StoppedAction::Restart;
-                        }
-                        mark_network_stopped(snapshot);
-                        publish_snapshot(snapshot_tx, snapshot, wake);
-                        tracing::info!("keeping Nearby network services off after system wake");
-                    }
-                    SuspendedAction::Shutdown => return StoppedAction::Shutdown,
-                }
-            }
-            RecoveryAction::Shutdown => return StoppedAction::Shutdown,
-            RecoveryAction::Failed | RecoveryAction::TurnOff => unreachable!(),
-        }
-    }
-}
-
 async fn wait_while_suspended(
     commands: &mut mpsc::Receiver<RuntimeCommand>,
     system_events: &mut mpsc::UnboundedReceiver<SystemEvent>,
@@ -1135,155 +1341,6 @@ async fn wait_while_suspended(
             Some(RuntimeCommand::RestartNetwork) => restart_network = true,
             Some(RuntimeCommand::StopNetwork) => restart_network = false,
             Some(_) => tracing::debug!("ignored media command while the runtime is suspended"),
-        }
-    }
-}
-
-struct ServiceRun<'a> {
-    commands: &'a mut mpsc::Receiver<RuntimeCommand>,
-    system_events: &'a mut mpsc::UnboundedReceiver<SystemEvent>,
-    snapshot: &'a mut AppSnapshot,
-    services: &'a mut network::Services,
-    generations: NetworkGenerations,
-    playback: &'a mut playback::Owner,
-    playback_events_tx: &'a mpsc::Sender<PlaybackEvent>,
-    playback_events: &'a mut mpsc::Receiver<PlaybackEvent>,
-    publication: &'a mut publication::Owner,
-    frames: &'a watch::Sender<Option<Arc<PlaybackFrame>>>,
-    snapshot_tx: &'a watch::Sender<Arc<AppSnapshot>>,
-    wake: &'a Arc<dyn Fn() + Send + Sync>,
-}
-
-impl ServiceRun<'_> {
-    async fn run(&mut self) -> RecoveryAction {
-        let mut initial_scan = Box::pin(tokio::time::sleep(Duration::from_secs(3)));
-        let mut scan_finished = false;
-        loop {
-            let input = if scan_finished {
-                tokio::select! {
-                    command = self.commands.recv() => RuntimeInput::Command(command),
-                    Some(event) = self.system_events.recv() => RuntimeInput::System(event),
-                    event = self.services.recv() => RuntimeInput::Network(event),
-                    event = self.playback_events.recv() => RuntimeInput::Playback(event),
-                    event = self.publication.recv() => RuntimeInput::Publication(event),
-                }
-            } else {
-                tokio::select! {
-                    command = self.commands.recv() => RuntimeInput::Command(command),
-                    Some(event) = self.system_events.recv() => RuntimeInput::System(event),
-                    event = self.services.recv() => RuntimeInput::Network(event),
-                    event = self.playback_events.recv() => RuntimeInput::Playback(event),
-                    event = self.publication.recv() => RuntimeInput::Publication(event),
-                    () = &mut initial_scan => RuntimeInput::InitialScanFinished,
-                }
-            };
-
-            let previous = self.snapshot.clone();
-            let action = match input {
-                RuntimeInput::Command(Some(RuntimeCommand::Shutdown) | None) => {
-                    Some(RecoveryAction::Shutdown)
-                }
-                RuntimeInput::Command(Some(RuntimeCommand::RestartNetwork)) => {
-                    Some(RecoveryAction::Restart)
-                }
-                RuntimeInput::Command(Some(RuntimeCommand::StopNetwork)) => {
-                    Some(RecoveryAction::TurnOff)
-                }
-                RuntimeInput::Command(Some(RuntimeCommand::WatchScreen { peer, path })) => {
-                    start_watch(
-                        self.snapshot,
-                        StartWatch {
-                            services: self.services,
-                            playback: self.playback,
-                            events: self.playback_events_tx,
-                            frames: self.frames,
-                            wake: self.wake,
-                            peer_id: peer,
-                            path,
-                        },
-                    );
-                    None
-                }
-                RuntimeInput::Command(Some(RuntimeCommand::SetPlaybackVolume {
-                    generation,
-                    percent,
-                })) => {
-                    if self.playback.set_volume(generation, percent) {
-                        tracing::debug!(
-                            view_generation = generation,
-                            volume_percent = percent.min(100),
-                            "remote playback volume changed"
-                        );
-                    } else {
-                        tracing::debug!(
-                            view_generation = generation,
-                            volume_percent = percent.min(100),
-                            "ignored stale remote playback volume change"
-                        );
-                    }
-                    None
-                }
-                RuntimeInput::Command(Some(RuntimeCommand::StopWatching)) => {
-                    stop_watch(self.snapshot, self.playback, self.frames).await;
-                    None
-                }
-                RuntimeInput::Command(Some(RuntimeCommand::SelectShareSource(selection))) => {
-                    self.snapshot.select_share_source(selection);
-                    None
-                }
-                RuntimeInput::Command(Some(RuntimeCommand::SetShareSystemAudio(enabled))) => {
-                    self.snapshot.set_share_system_audio(enabled);
-                    None
-                }
-                RuntimeInput::Command(Some(RuntimeCommand::StartSharing)) => {
-                    start_share(self.snapshot, self.services, self.publication);
-                    None
-                }
-                RuntimeInput::Command(Some(RuntimeCommand::StopSharing)) => {
-                    stop_share(self.snapshot, self.publication);
-                    None
-                }
-                RuntimeInput::System(SystemEvent::Suspend) => Some(RecoveryAction::Suspend),
-                RuntimeInput::System(SystemEvent::Resume) => None,
-                RuntimeInput::Network(Some(event)) => {
-                    apply_network_event(
-                        self.snapshot,
-                        self.generations.discovery,
-                        self.generations.session,
-                        event,
-                    );
-                    refresh_discovery_result(
-                        self.snapshot,
-                        self.generations.discovery,
-                        scan_finished,
-                    );
-                    None
-                }
-                RuntimeInput::Network(None) => Some(RecoveryAction::Failed),
-                RuntimeInput::Playback(Some(event)) => {
-                    apply_playback_event(self.snapshot, self.frames, event);
-                    None
-                }
-                RuntimeInput::Playback(None) => None,
-                RuntimeInput::Publication(event) => {
-                    apply_publication_event(self.snapshot, event);
-                    None
-                }
-                RuntimeInput::InitialScanFinished => {
-                    finish_initial_scan(
-                        self.snapshot,
-                        self.generations.discovery,
-                        &mut scan_finished,
-                    );
-                    None
-                }
-            };
-            if *self.snapshot != previous {
-                publish_snapshot(self.snapshot_tx, self.snapshot, self.wake);
-            }
-            if let Some(action) = action {
-                return action;
-            }
         }
     }
 }
@@ -1322,20 +1379,21 @@ async fn complete_network_turn_off<F, Fut>(
         "stopping LAN resources"
     );
     snapshot.nearby_stopping = true;
-    teardown_media(snapshot, playback, publication, frames).await;
-    tracing::debug!(
-        stage = "lan_shutdown",
-        step = "services",
-        "media owners stopped; stopping LAN services"
-    );
+    let relay_media = snapshot.relay_media();
     let mut errors = crate::cleanup::Errors::default();
-    if let Some(error) = snapshot.media_error.take() {
-        errors.result("media", Err(error));
+    if !relay_media {
+        teardown_media(snapshot, playback, publication, frames).await;
+        if let Some(error) = snapshot.media_error.take() {
+            errors.result("media", Err(error));
+        }
     }
     errors.result("services", shutdown_services().await);
     mark_network_stopped(snapshot);
-    snapshot.media_error = errors.finish().err();
-    if snapshot.media_error.is_some() {
+    if let Err(error) = errors.finish() {
+        if !relay_media {
+            snapshot.media_error = Some(error.clone());
+        }
+        tracing::error!(%error, "LAN shutdown failed");
         snapshot.session.begin(SessionPhase::Failed);
         snapshot.nearby_issue = Some(NearbyIssue::ShutdownFailed);
         return;
@@ -1349,6 +1407,9 @@ async fn complete_network_turn_off<F, Fut>(
 }
 
 enum RuntimeInput {
+    Started(Result<network::Services, NearbyIssue>),
+    Relay(relay::Event),
+    RelayBroadcast(Result<moq_tokio::moq_net::broadcast::Consumer, moq_tokio::moq_net::Error>),
     Command(Option<RuntimeCommand>),
     System(SystemEvent),
     Network(Option<NetworkEvent>),
@@ -1736,7 +1797,8 @@ fn stop_snapshot(
     snapshot.runtime.begin(RuntimePhase::Stopped);
     snapshot.discovery.begin(DiscoveryPhase::Stopped);
     snapshot.session.begin(SessionPhase::Stopped);
-    snapshot.clear_media(MediaPhase::Idle, None);
+    let error = snapshot.media_error.take();
+    snapshot.clear_media(MediaPhase::Idle, error);
     publish_snapshot(snapshot_tx, snapshot, wake);
     tracing::info!(stage = "shutdown", "macOS runtime owner stopped");
 }
@@ -3560,5 +3622,113 @@ mod initial_scan_tests {
         );
         refresh_discovery_result(&mut s, new, finished);
         assert_eq!(s.discovery.phase(), DiscoveryPhase::Ready);
+    }
+}
+
+#[cfg(test)]
+mod relay_lifecycle_tests {
+    use super::*;
+
+    fn watching_relay() -> AppSnapshot {
+        let mut snapshot = AppSnapshot::default();
+        snapshot.runtime.begin(RuntimePhase::Ready);
+        let generation = snapshot.relay.lifecycle.begin(relay::Phase::Connected);
+        snapshot.relay.entries.insert("test/screen".into(), 1);
+        let selection = relay::Selection {
+            generation,
+            path: "test/screen".into(),
+            revision: 1,
+        };
+        assert!(snapshot.can_watch_relay(&selection));
+        snapshot.begin_watch("", &selection.path).unwrap();
+        snapshot.media_peer = None;
+        snapshot.media_source = MediaSource::Relay(selection);
+        snapshot
+    }
+
+    #[tokio::test]
+    async fn lan_shutdown_preserves_relay_media_even_when_lan_cleanup_fails() {
+        for failed in [false, true] {
+            let mut snapshot = watching_relay();
+            let media = snapshot.media;
+            let relay = snapshot.relay.clone();
+            let (dropped, dropped_rx) = tokio::sync::oneshot::channel::<()>();
+            let mut playback = playback::Owner::with_task_for_test(tokio::spawn(async move {
+                let _guard = dropped;
+                std::future::pending::<()>().await;
+            }));
+            let mut publication = publication::Owner::default();
+            let (frames, _) = watch::channel(None);
+            complete_network_turn_off(
+                &mut snapshot,
+                &mut playback,
+                &mut publication,
+                &frames,
+                || async move {
+                    if failed {
+                        Err("listener failed".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+            assert_eq!(snapshot.media, media);
+            assert_eq!(snapshot.relay, relay);
+            assert!(snapshot.relay_media());
+            assert_eq!(
+                snapshot.nearby_issue,
+                failed.then_some(NearbyIssue::ShutdownFailed)
+            );
+            assert!(snapshot.media_error.is_none());
+            drop(playback);
+            assert!(dropped_rx.await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn withdrawn_relay_stops_only_its_media_and_keeps_failed_watch_recoverable() {
+        let mut snapshot = watching_relay();
+        snapshot.session.begin(SessionPhase::Listening);
+        let lan = snapshot.session;
+        let generation = snapshot.media.generation();
+        let mut playback = playback::Owner::default();
+        let (frames, _) = watch::channel(None);
+        end_relay_watch(&mut snapshot, &mut playback, &frames, "withdrawn").await;
+        assert_eq!(snapshot.session, lan);
+        assert_eq!(snapshot.media.phase(), MediaPhase::Failed);
+        assert_eq!(generation, snapshot.media.generation());
+        assert!(!snapshot.playback_started(generation, "late decoder".into(), 2, 2));
+        assert!(!snapshot.access().publish());
+        stop_watch(&mut snapshot, &mut playback, &frames).await;
+        assert_eq!(snapshot.media.phase(), MediaPhase::Idle);
+        assert!(snapshot.access().publish());
+        assert_eq!(snapshot.relay.lifecycle.phase(), relay::Phase::Connected);
+    }
+
+    #[test]
+    fn one_media_slot_includes_preparing_and_stopping_across_both_sources() {
+        let mut snapshot = watching_relay();
+        let MediaSource::Relay(selection) = snapshot.media_source.clone() else {
+            panic!()
+        };
+        snapshot.session.begin(SessionPhase::Listening);
+        for phase in [
+            MediaPhase::PreparingWatch,
+            MediaPhase::Watching,
+            MediaPhase::Stopping,
+            MediaPhase::Failed,
+        ] {
+            snapshot.media.begin(phase);
+            assert!(!snapshot.can_watch_relay(&selection));
+            assert!(!snapshot.access().publish());
+            assert!(snapshot.begin_watch("lan", "moqcast.screen/lan").is_none());
+        }
+        snapshot.clear_media(MediaPhase::Idle, None);
+        assert!(snapshot.can_watch_relay(&selection));
+        snapshot.media.begin(MediaPhase::PreparingShare);
+        snapshot.media_owner = Some(MediaOwner::Share);
+        snapshot.media_source = MediaSource::Nearby;
+        assert!(!snapshot.can_watch_relay(&selection));
     }
 }

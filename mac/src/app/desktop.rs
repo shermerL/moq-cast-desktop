@@ -19,7 +19,7 @@ impl MoqCastApp {
             )
             .show(root, |ui| {
                 let title = match self.page {
-                    Page::Nearby => None,
+                    Page::Nearby | Page::Relay => None,
                     Page::Watch => Some(self.player_device_name(snapshot)),
                     _ => Some(self.text("共享设置", "Sharing settings").to_owned()),
                 };
@@ -27,17 +27,27 @@ impl MoqCastApp {
                     ui,
                     moqcast_ui::v2::Header {
                         title: title.as_deref(),
-                        back: self.text("‹  附近设备", "‹  Nearby"),
+                        back: if self.page == Page::Watch
+                            && matches!(
+                                snapshot.media_source,
+                                crate::runtime::MediaSource::Relay(_)
+                            ) {
+                            "‹  Relay"
+                        } else {
+                            self.text("‹  附近设备", "‹  Nearby")
+                        },
                         settings: self.text("设置", "Settings"),
                     },
                 );
                 if response.back {
-                    self.page = Page::Nearby;
+                    self.page = self.watch_return_page(snapshot);
                 }
                 if response.settings {
                     self.settings_open = !self.settings_open;
                 }
             });
+
+        self.relay_navigation(root, snapshot, metrics);
 
         if self.page == Page::Nearby {
             egui::Panel::bottom("s2-footer")
@@ -81,7 +91,7 @@ impl MoqCastApp {
                             .clicked()
                             {
                                 if active {
-                                    if has_active_media(snapshot) {
+                                    if has_active_media(snapshot) && !snapshot.relay_media() {
                                         self.confirm_turn_off_nearby = true;
                                     } else {
                                         self.request_turn_off_nearby(snapshot);
@@ -160,6 +170,7 @@ impl MoqCastApp {
                         Page::Watch => {
                             self.s2_watch_empty(ui, snapshot);
                         }
+                        Page::Relay => self.relay_page(ui, snapshot),
                         Page::Nearby => {}
                     }
                 }
@@ -271,14 +282,12 @@ impl MoqCastApp {
             local_device_id_label(self.locale),
             snapshot.local_peer_id.as_deref().unwrap_or("—")
         );
-        let label = if watch {
-            self.text("返回播放", "Return to player")
-        } else if owned {
+        let label = if owned && !watch {
             self.text("管理共享", "Manage sharing")
         } else {
             self.text("开始共享…", "Share…")
         };
-        if moqcast_ui::v2::context_card(
+        if moqcast_ui::v2::context_card_with_action(
             ui,
             moqcast_ui::v2::ContextCard {
                 heading: self.text("本机", "This device"),
@@ -289,6 +298,10 @@ impl MoqCastApp {
                 action: label,
             },
             metrics,
+            !watch
+                && self.relay_ui.watch_pending.is_none()
+                && self.nearby_action_pending.is_none()
+                && !snapshot.nearby_stopping,
         )
         .on_hover_text(local_device_description(
             self.locale,
@@ -298,11 +311,7 @@ impl MoqCastApp {
         ))
         .clicked()
         {
-            self.page = if watch {
-                Page::Watch
-            } else {
-                Page::ScreenShare
-            };
+            self.page = Page::ScreenShare;
         }
         ui.add_space(metrics.gap);
         if let Some(issue) = snapshot.nearby_issue {
@@ -417,7 +426,6 @@ impl MoqCastApp {
                                 && snapshot.media_peer.as_deref() == Some(id.as_str());
                             let current = owned && snapshot.media.phase() == MediaPhase::Watching;
                             let (tone, status) = peer_status(
-                                PeerPresentation::from(peer),
                                 availability,
                                 owned.then_some(snapshot.media.phase()),
                                 self.locale,
@@ -444,6 +452,8 @@ impl MoqCastApp {
                                     },
                                     watch_enabled: owned
                                         || (self.nearby_action_pending.is_none()
+                                            && self.relay_ui.watch_pending.is_none()
+                                            && !self.picker_pending
                                             && snapshot.can_watch(id, &path)),
                                     details_label: self.text("设备详情", "Device details"),
                                     compact,
@@ -495,16 +505,20 @@ impl MoqCastApp {
                     });
                     let language = self.text("语言", "Language");
                     moqcast_ui::v2::settings_row(ui, language, |ui| {
-                        egui::ComboBox::from_id_salt("v2-language")
-                            .selected_text(if self.locale == Locale::Chinese {
-                                "简体中文"
-                            } else {
-                                "English"
-                            })
-                            .show_ui(ui, |ui| {
+                        moqcast_ui::v2::select(
+                            ui,
+                            egui::ComboBox::from_id_salt("v2-language").selected_text(
+                                if self.locale == Locale::Chinese {
+                                    "简体中文"
+                                } else {
+                                    "English"
+                                },
+                            ),
+                            |ui| {
                                 ui.selectable_value(&mut self.locale, Locale::Chinese, "简体中文");
                                 ui.selectable_value(&mut self.locale, Locale::English, "English");
-                            });
+                            },
+                        );
                     });
                     self.diagnostics.show_settings(ui, self.locale);
                     let developer = self.text("开发者模式", "Developer mode");
@@ -706,18 +720,27 @@ impl MoqCastApp {
     }
 
     fn s2_watch_empty(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
-        let failed = watch_projection(snapshot.media_owner, snapshot.media.phase())
-            == WatchProjection::Failed;
+        let relay_error = matches!(snapshot.media_source, crate::runtime::MediaSource::Relay(_))
+            .then_some(snapshot.relay.error.as_deref())
+            .flatten();
+        let failed = snapshot.media_owner == Some(MediaOwner::Watch);
         let detail = if self.command_error {
             self.text(
                 "操作未能发送，请稍后重试。",
                 "The action could not be sent. Try again.",
             )
+        } else if let Some(error) = relay_error {
+            error
         } else if failed {
             snapshot.media_error.as_deref().unwrap_or(self.text(
-                "停止当前任务后，可重新选择附近设备。",
-                "End the current task, then select a nearby device again.",
+                "停止当前观看后，可重新选择共享。",
+                "Stop this playback, then choose another broadcast.",
             ))
+        } else if matches!(snapshot.media_source, crate::runtime::MediaSource::Relay(_)) {
+            self.text(
+                "返回 Relay 选择共享。",
+                "Return to Relay to select a broadcast.",
+            )
         } else {
             self.text(
                 "返回附近设备，选择有可观看内容的设备。",
@@ -735,6 +758,8 @@ impl MoqCastApp {
                 detail,
                 action: if failed {
                     self.text("停止并返回", "Stop and return")
+                } else if matches!(snapshot.media_source, crate::runtime::MediaSource::Relay(_)) {
+                    self.text("返回 Relay", "Return to Relay")
                 } else {
                     self.text("返回附近设备", "Return to Nearby")
                 },
@@ -742,8 +767,8 @@ impl MoqCastApp {
         )
         .clicked()
         {
-            if !failed || self.runtime.stop_watching() {
-                self.page = Page::Nearby;
+            if !failed || self.runtime.stop_watching(snapshot.media.generation()) {
+                self.page = self.watch_return_page(snapshot);
                 self.command_error = false;
             } else {
                 self.command_error = true;
@@ -847,7 +872,6 @@ fn media_tone(phase: MediaPhase) -> StatusTone {
 }
 
 fn peer_status(
-    peer: PeerPresentation,
     availability: ScreenAvailability,
     owned: Option<MediaPhase>,
     locale: Locale,
@@ -864,18 +888,12 @@ fn peer_status(
             return (media_tone(phase), label);
         }
     }
-    // An mDNS loss must not hide a still-available route or healthy session.
-    use moqcast_lan_state::Status;
-    let tone = match peer
-        .facts(availability == ScreenAvailability::Available)
-        .status()
-    {
-        Status::Available | Status::Connected => StatusTone::Active,
-        Status::Connecting => StatusTone::Busy,
-        Status::Rejected | Status::Failed => StatusTone::Error,
-        _ => StatusTone::Neutral,
+    let tone = if availability == ScreenAvailability::Available {
+        StatusTone::Active
+    } else {
+        StatusTone::Neutral
     };
-    (tone, device_status(peer, availability, locale))
+    (tone, screen_label(availability, locale))
 }
 
 #[cfg(test)]
@@ -923,26 +941,18 @@ mod status_tests {
 
     #[test]
     fn available_route_survives_discovery_loss_but_is_not_playback() {
-        let peer = PeerPresentation {
-            presence: PresenceView::NotNearby,
-            connection: ConnectionView::Connected,
-        };
         assert_eq!(
-            peer_status(peer, ScreenAvailability::Available, None, Locale::English),
+            peer_status(ScreenAvailability::Available, None, Locale::English),
             (StatusTone::Active, "Available")
         );
         assert_eq!(
-            peer_status(peer, ScreenAvailability::Unavailable, None, Locale::English),
-            (StatusTone::Active, "Connected")
+            peer_status(ScreenAvailability::Unavailable, None, Locale::English),
+            (StatusTone::Neutral, "Not shared")
         );
     }
 
     #[test]
     fn watch_owner_reports_startup_and_failure_even_with_available_content() {
-        let peer = PeerPresentation {
-            presence: PresenceView::Nearby,
-            connection: ConnectionView::Connected,
-        };
         for (phase, tone, label) in [
             (
                 MediaPhase::PreparingWatch,
@@ -953,12 +963,7 @@ mod status_tests {
             (MediaPhase::Failed, StatusTone::Error, "Playback failed"),
         ] {
             assert_eq!(
-                peer_status(
-                    peer,
-                    ScreenAvailability::Available,
-                    Some(phase),
-                    Locale::English
-                ),
+                peer_status(ScreenAvailability::Available, Some(phase), Locale::English),
                 (tone, label)
             );
         }

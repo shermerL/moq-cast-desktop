@@ -19,6 +19,8 @@ mod network;
 mod playback;
 #[cfg(feature = "publish")]
 mod publication;
+#[cfg(feature = "watch")]
+mod relay;
 #[cfg(feature = "network")]
 mod remote;
 #[cfg(feature = "watch")]

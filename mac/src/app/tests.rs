@@ -295,4 +295,4 @@ fn system_audio_action_requires_an_idle_primary_display() {
     assert!(!system_audio_action_available(&snapshot));
 }
 
-mod layout;
+pub(super) mod layout;

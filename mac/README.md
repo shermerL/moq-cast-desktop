@@ -21,6 +21,7 @@
 - 固定 `_moq._udp.local.`、`/.cluster/<credential>` 与 `moqcast.screen/<peer-id>` 契约。
 - 一个本地 publish Origin 与独立 remote receive Origin。健康 session 不因 mDNS Lost 被拆除。
 - Nearby、Screen Share、播放器和 Settings；播放器支持音量、静音与播放信息。
+- Relay 独立页面支持手动连接、公告列表和单路观看，支持 `moqt://` 与 `https://`。连接使用系统信任，或在证书校验项中填写明确的 SHA-256 pin；不关闭 TLS 校验。
 - 固定 moq-dev main revision `f8215bc47199b48512d805ae9fc710cc6586de51`，Cargo manifest、锁文件与构建来源一致。
 - 结构化且不含内部身份的普通日志，以及仅供应用内部消费的 typed snapshot。
 - macOS 14.2 deployment target、bundle ID `dev.moq.moqcast.macos` 和 ad hoc 签名 Universal 2 `.app` 打包。
@@ -30,6 +31,24 @@ ScreenCaptureKit 系统选择器负责屏幕/窗口选择，VideoToolbox 与上�
 升级后的采集使用上游 `encode::Capture`，音视频共享 catalog 时钟；实时播放从最新缓存组开始，保留音视频 80ms、纯视频 0ms 的 freshness budget。该预算不是端到端延迟保证；新基线仍需真机验证。
 
 ## 本地验证
+
+### Relay 观看
+
+从顶部 Relay 入口填写服务器 URL 后连接。列表仅表示已收到的公告，点击观看才请求广播和媒体目录；暂无公告不代表目录同步完成或权限已获准。当前未发现共享时，后续公告会自动显示。指纹绑定协议、主机与有效端口（默认 443），更换路径或查询参数会保留。更换端点会清空旧指纹，请核对证书设置后再次点击连接。URL 和证书 pin 仅保留于当前进程，不写入设置或普通日志。
+
+Nearby 与 Relay 使用独立网络资源，共用一个媒体槽，准备和停止期间也不能启动另一条媒体。切换页面或返回列表继续播放；停止播放保留 Relay 连接；断开 Relay 会先停止其媒体，但不关闭 LAN。Nearby Off 只关闭 LAN，保留 Relay 连接和播放。休眠会关闭连接与媒体，醒来后 Relay 需手动连接。
+
+固定 SDK 的 Relay loopback 公告、数据、撤回、证书拒绝和 H.264 播放测试包含在默认库测试中。外部测试服务器仅允许匿名 `test/` 范围时，可显式运行以下检查，地址和 pin 必须对应测试服务器：
+
+```sh
+MOQCAST_TEST_RELAY_URL=moqt://127.0.0.1:4443/test/ \
+MOQCAST_TEST_RELAY_PIN=<sha256-hex> \
+cargo +1.95.0 test --locked --release --lib relay::integration_tests::docker_relay -- --ignored --nocapture
+```
+
+也应以 `https://127.0.0.1:4443/test/` 验证 WebTransport。此检查包含合成视频到生产播放 owner 的解码，不等于窗口呈现或音频验收。
+
+### 常规检查
 
 只运行必要检查，并关注 `mac/target` 占用：
 

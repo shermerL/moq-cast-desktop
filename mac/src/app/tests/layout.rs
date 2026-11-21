@@ -1,7 +1,7 @@
 //! Render the real macOS pages against disconnected snapshots, without network side effects.
 use super::*;
 
-fn app() -> (MoqCastApp, impl FnMut() -> bool) {
+pub(in crate::app) fn app() -> (MoqCastApp, impl FnMut() -> bool) {
     let (runtime, commands) = RuntimeOwner::isolated_for_ui_test();
     let diagnostics = moqcast_diagnostics::init(moqcast_diagnostics::Config::without_file(
         crate::build_info::diagnostics(),
@@ -9,6 +9,7 @@ fn app() -> (MoqCastApp, impl FnMut() -> bool) {
     ));
     let app = MoqCastApp {
         page: Page::Nearby,
+        relay_ui: relay::Ui::default(),
         locale: Locale::English,
         developer_mode: false,
         diagnostics: diagnostics::DiagnosticsUi::new(diagnostics.handle(), false),
@@ -91,6 +92,31 @@ fn painted(output: &egui::FullOutput, label: &str) -> egui::Rect {
             _ => None,
         })
         .unwrap_or_else(|| panic!("missing painted label {label}"))
+}
+
+#[test]
+fn relay_closed_after_media_cleanup_keeps_error_and_return_action_visible() {
+    let (mut app, _commands) = app();
+    app.page = Page::Watch;
+    let mut s = snapshot(0);
+    let generation = s.relay.lifecycle.begin(crate::relay::Phase::Failed);
+    s.media_source = crate::runtime::MediaSource::Relay(crate::relay::Selection {
+        generation,
+        path: "withdrawn".into(),
+        revision: 1,
+    });
+    s.relay.error = Some("Relay disconnected".into());
+    assert!(s.media_owner.is_none());
+    let ctx = egui::Context::default();
+    moqcast_ui::v2::install(&ctx);
+    let size = egui::vec2(1040.0, 700.0);
+    for _ in 0..3 {
+        render(&ctx, &mut app, &s, size, vec![]);
+    }
+    let output = render(&ctx, &mut app, &s, size, vec![]);
+    assert!(painted(&output, "Relay disconnected").is_positive());
+    assert!(painted(&output, "Return to Relay").is_positive());
+    assert_eq!(app.watch_return_page(&s), Page::Relay);
 }
 
 #[test]
@@ -268,7 +294,7 @@ fn details_errors_and_player_navigation_preserve_reachable_actions() {
         render(&ctx, &mut app, &s, size, vec![]);
     }
     let output = render(&ctx, &mut app, &s, size, vec![]);
-    assert!(painted(&output, "Return to player").is_positive());
+    assert!(painted(&output, "Share…").is_positive());
 }
 
 #[test]
@@ -681,7 +707,10 @@ fn nearby_off_acknowledgement_allows_reopening_without_clearing_early() {
 #[test]
 fn presentation_failure_reaches_its_session_when_commands_are_full() {
     let (mut failed_app, _commands) = app();
-    while failed_app.runtime.stop_watching() {}
+    while failed_app
+        .runtime
+        .stop_watching(AppSnapshot::default().media.generation())
+    {}
     let (failure, receiver) = tokio::sync::watch::channel(None::<String>);
     let mut frame = crate::playback::Frame::from_video(
         moq_video::Frame::new(
@@ -834,4 +863,159 @@ fn player_stop_rejection_with_closed_runtime_is_visible() {
     );
     assert_eq!(app.page, Page::Watch);
     assert_eq!(snapshot.media.phase(), MediaPhase::Watching);
+}
+
+#[test]
+fn relay_navigation_preserves_media_and_nearby_off_does_not_confirm_relay_stop() {
+    let ctx = egui::Context::default();
+    moqcast_ui::v2::install(&ctx);
+    let (mut app, mut commands) = app();
+    let mut s = snapshot(0);
+    let generation = s.relay.lifecycle.begin(crate::relay::Phase::Connected);
+    s.relay.server = "moqt://localhost:4443".into();
+    s.relay.entries.insert("test/screen".into(), 1);
+    s.media_source = crate::runtime::MediaSource::Relay(crate::relay::Selection {
+        generation,
+        path: "test/screen".into(),
+        revision: 1,
+    });
+    s.media_owner = Some(MediaOwner::Watch);
+    s.media_path = Some("test/screen".into());
+    s.media.begin(MediaPhase::Watching);
+    app.page = Page::Watch;
+    let size = egui::vec2(1040.0, 700.0);
+    for _ in 0..3 {
+        render(&ctx, &mut app, &s, size, vec![]);
+    }
+    let out = render(&ctx, &mut app, &s, size, vec![]);
+    let point = painted(&out, "‹  Relay").center();
+    for pressed in [true, false] {
+        render(
+            &ctx,
+            &mut app,
+            &s,
+            size,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+    }
+    assert_eq!(app.page, Page::Relay);
+    assert!(!commands());
+    app.page = Page::Nearby;
+    for _ in 0..3 {
+        render(&ctx, &mut app, &s, size, vec![]);
+    }
+    let out = render(&ctx, &mut app, &s, size, vec![]);
+    let point = painted(&out, "Turn off Nearby").center();
+    for pressed in [true, false] {
+        render(
+            &ctx,
+            &mut app,
+            &s,
+            size,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+    }
+    assert!(!app.confirm_turn_off_nearby);
+    assert!(commands());
+    assert!(!commands());
+}
+
+#[test]
+fn relay_empty_and_pending_states_do_not_claim_directory_completion() {
+    for dark in [false, true] {
+        let ctx = egui::Context::default();
+        moqcast_ui::v2::install(&ctx);
+        ctx.set_theme(if dark {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
+        let (mut app, mut commands) = app();
+        app.page = Page::Relay;
+        let mut s = snapshot(0);
+        s.relay.lifecycle.begin(crate::relay::Phase::Connected);
+        s.relay.server = "moqt://localhost:4443".into();
+        let size = egui::vec2(1040.0, 700.0);
+        for _ in 0..3 {
+            render(&ctx, &mut app, &s, size, vec![]);
+        }
+        let out = render(&ctx, &mut app, &s, size, vec![]);
+        assert!(painted(&out, "No broadcasts found at the moment").is_positive());
+        assert!(painted(&out, "Disconnect Relay").bottom() < size.y);
+        assert!(!commands());
+    }
+}
+
+#[test]
+fn relay_recovery_click_respects_owner_and_queue_refusal() {
+    for (owns_watch, full_queue) in [(true, true), (true, false), (false, false)] {
+        let (mut app, mut received) = app();
+        let mut s = snapshot(0);
+        let generation = s.relay.lifecycle.begin(crate::relay::Phase::Failed);
+        s.media_source = crate::runtime::MediaSource::Relay(crate::relay::Selection {
+            generation,
+            path: "ended".into(),
+            revision: 1,
+        });
+        s.relay.error = Some("Connection closed".into());
+        if owns_watch {
+            s.media_owner = Some(MediaOwner::Watch);
+            s.media.begin(MediaPhase::Failed);
+        }
+        if full_queue {
+            while app.runtime.stop_watching(s.media.generation()) {}
+        }
+        app.page = Page::Watch;
+        let ctx = egui::Context::default();
+        moqcast_ui::v2::install(&ctx);
+        let size = egui::vec2(680.0, 520.0);
+        let label = if owns_watch {
+            "Stop and return"
+        } else {
+            "Return to Relay"
+        };
+        for _ in 0..3 {
+            render(&ctx, &mut app, &s, size, vec![]);
+        }
+        let point = painted(&render(&ctx, &mut app, &s, size, vec![]), label).center();
+        for pressed in [true, false] {
+            render(
+                &ctx,
+                &mut app,
+                &s,
+                size,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+        }
+        assert_eq!(app.command_error, full_queue);
+        assert_eq!(app.page, if full_queue { Page::Watch } else { Page::Relay });
+        if !full_queue {
+            assert_eq!(received(), owns_watch);
+            assert!(!received());
+        }
+    }
 }
