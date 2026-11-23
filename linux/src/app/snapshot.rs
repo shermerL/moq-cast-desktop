@@ -227,6 +227,8 @@ pub struct AppSnapshot {
     pub sources: super::SourceCatalog,
     /// Generation of the current or most recently started remote playback.
     pub view_generation: u64,
+    /// Terminal error for the latest watch, retained until the next watch begins.
+    pub watch_error: Option<String>,
     /// Remote audio progress for the current viewer.
     pub remote_audio: RemoteAudioSnapshot,
     /// Remote video decoder metadata for the current viewer.
@@ -511,6 +513,7 @@ impl AppSnapshot {
             ..RemoteAudioSnapshot::default()
         };
         self.remote_video = RemoteVideoSnapshot::default();
+        self.watch_error = None;
         self.last_error = None;
         Ok(())
     }
@@ -561,7 +564,9 @@ impl AppSnapshot {
         self.media = MediaState::Idle;
         self.remote_audio = RemoteAudioSnapshot::default();
         self.remote_video = RemoteVideoSnapshot::default();
-        self.last_error = Some(error.into());
+        let error = error.into();
+        self.watch_error = Some(error.clone());
+        self.last_error = Some(error);
         Ok(())
     }
 

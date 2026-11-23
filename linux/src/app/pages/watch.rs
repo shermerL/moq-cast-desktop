@@ -54,7 +54,7 @@ pub(in crate::app) fn show(
             )
             .map(player_action),
         _ => {
-            let failed = snapshot.last_error.is_some();
+            let failed = snapshot.watch_error.is_some();
             v2::canvas_message(
                 ui,
                 v2::CanvasMessage {
@@ -64,7 +64,7 @@ pub(in crate::app) fn show(
                         locale.text("播放已结束", "Playback ended")
                     },
                     detail: if failed {
-                        locale.operation_failed()
+                        snapshot.watch_error.as_deref().unwrap_or_default()
                     } else {
                         ""
                     },
@@ -90,7 +90,11 @@ fn player_action(action: PlayerAction) -> WatchAction {
     })
 }
 
-fn device_name<'a>(snapshot: &'a AppSnapshot, path: &str, locale: Locale) -> &'a str {
+pub(in crate::app) fn device_name<'a>(
+    snapshot: &'a AppSnapshot,
+    path: &str,
+    locale: Locale,
+) -> &'a str {
     snapshot
         .peers
         .iter()

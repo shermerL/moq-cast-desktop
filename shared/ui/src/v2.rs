@@ -86,6 +86,15 @@ impl Palette {
             .corner_radius(12)
             .inner_margin(Margin::symmetric(24, 18))
     }
+
+    /// Returns the volume-slider fill color matched to this palette's brightness.
+    pub fn player_volume_fill(self) -> Color32 {
+        if self.canvas.r() < 128 {
+            Color32::from_rgb(0x56, 0xC2, 0xB9)
+        } else {
+            self.accent
+        }
+    }
 }
 
 /// Installs both palettes without changing the user's theme preference.
@@ -203,19 +212,21 @@ impl StatusTone {
         let color = self.color(Palette::for_ui(ui));
         if self == Self::Busy {
             ui.add(egui::Spinner::new().size(12.0).color(color));
+        } else if matches!(self, Self::Warning | Self::Error) {
+            let (_, rect) = ui.allocate_space(egui::vec2(16.0, 20.0));
+            let icon = if self == Self::Warning {
+                Icon::AlertTriangle
+            } else {
+                Icon::AlertCircle
+            };
+            icon.paint(
+                ui,
+                egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0)),
+                color,
+            );
         } else {
             let (_, rect) = ui.allocate_space(egui::vec2(12.0, 12.0));
-            if matches!(self, Self::Warning | Self::Error) {
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "!",
-                    egui::FontId::proportional(15.0),
-                    color,
-                );
-            } else {
-                ui.painter().circle_filled(rect.center(), 4.0, color);
-            }
+            ui.painter().circle_filled(rect.center(), 4.0, color);
         }
     }
 }
@@ -326,25 +337,11 @@ pub fn dialog_header(ui: &mut Ui, title: &str, close_label: &str) -> Response {
 
 /// Paints a neutral display identity glyph in an already allocated rectangle.
 pub fn monitor(ui: &Ui, rect: egui::Rect, color: Color32) {
-    let center = rect.center();
-    let screen =
-        egui::Rect::from_center_size(center - egui::vec2(0.0, 3.0), egui::vec2(28.0, 19.0));
-    let stroke = Stroke::new(1.8, color);
-    ui.painter()
-        .rect_stroke(screen, 3, stroke, egui::StrokeKind::Inside);
-    ui.painter().line_segment(
-        [
-            center + egui::vec2(0.0, 7.0),
-            center + egui::vec2(0.0, 12.0),
-        ],
-        stroke,
-    );
-    ui.painter().line_segment(
-        [
-            center + egui::vec2(-7.0, 12.0),
-            center + egui::vec2(7.0, 12.0),
-        ],
-        stroke,
+    let side = (rect.width().min(rect.height()) * 0.78).clamp(20.0, 36.0);
+    Icon::Monitor.paint(
+        ui,
+        egui::Rect::from_center_size(rect.center(), egui::vec2(side, side)),
+        color,
     );
 }
 
@@ -647,8 +644,9 @@ mod tests {
         let area = egui::Rect::from_min_size(egui::pos2(12.0, 34.0), egui::vec2(800.0, 600.0));
         let rects = player_rects(area, true);
         assert_eq!(rects.stage, area);
-        assert_eq!(rects.toolbar.height(), PLAYER_TOOLBAR_HEIGHT);
-        assert_eq!(rects.toolbar.right_bottom(), area.right_bottom());
+        assert_eq!(rects.toolbar.height(), 48.0);
+        assert_eq!(rects.toolbar.center().x, area.center().x);
+        assert_eq!(area.bottom() - rects.toolbar.bottom(), 16.0);
     }
 
     #[test]
@@ -982,7 +980,7 @@ pub fn context_card(ui: &mut Ui, content: ContextCard<'_>, metrics: Metrics) -> 
 }
 
 /// Small native line icons used by the desktop shell.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
     /// Dismisses the current dialog.
     Close,
@@ -992,6 +990,182 @@ pub enum Icon {
     Information,
     /// Changes the native window fullscreen state.
     Fullscreen,
+    /// Return from fullscreen playback.
+    ExitFullscreen,
+    /// Navigates back to the parent view.
+    ChevronLeft,
+    /// Collapsed disclosure chevron.
+    ChevronRight,
+    /// Expanded disclosure or dropdown chevron.
+    ChevronDown,
+    /// Audio active above fifty percent.
+    VolumeHigh,
+    /// Audio active from one through fifty percent.
+    VolumeLow,
+    /// Audio active but locally muted.
+    VolumeMuted,
+    /// No playable audio track available.
+    VolumeOff,
+    /// Warning indicator in status notices.
+    AlertTriangle,
+    /// Error indicator in status notices.
+    AlertCircle,
+    /// Display or desktop device identity.
+    Monitor,
+}
+
+impl Icon {
+    fn asset(self) -> (&'static str, &'static [u8]) {
+        match self {
+            Self::Close => ("v2-tabler-close", include_bytes!("../assets/icons/x.rgba")),
+            Self::Settings => (
+                "v2-icon-settings",
+                include_bytes!("../assets/icons/settings.rgba"),
+            ),
+            Self::Information => (
+                "v2-icon-info-circle",
+                include_bytes!("../assets/icons/info-circle.rgba"),
+            ),
+            Self::Fullscreen => (
+                "v2-icon-maximize",
+                include_bytes!("../assets/icons/maximize.rgba"),
+            ),
+            Self::ExitFullscreen => (
+                "v2-icon-minimize",
+                include_bytes!("../assets/icons/minimize.rgba"),
+            ),
+            Self::ChevronLeft => (
+                "v2-icon-chevron-left",
+                include_bytes!("../assets/icons/chevron-left.rgba"),
+            ),
+            Self::ChevronRight => (
+                "v2-icon-chevron-right",
+                include_bytes!("../assets/icons/chevron-right.rgba"),
+            ),
+            Self::ChevronDown => (
+                "v2-icon-chevron-down",
+                include_bytes!("../assets/icons/chevron-down.rgba"),
+            ),
+            Self::VolumeHigh => (
+                "v2-icon-volume-high",
+                include_bytes!("../assets/icons/volume-high.rgba"),
+            ),
+            Self::VolumeLow => (
+                "v2-icon-volume-low",
+                include_bytes!("../assets/icons/volume-low.rgba"),
+            ),
+            Self::VolumeMuted => (
+                "v2-icon-volume-muted",
+                include_bytes!("../assets/icons/volume-muted.rgba"),
+            ),
+            Self::VolumeOff => (
+                "v2-icon-volume-off",
+                include_bytes!("../assets/icons/volume-off.rgba"),
+            ),
+            Self::AlertTriangle => (
+                "v2-icon-alert-triangle",
+                include_bytes!("../assets/icons/alert-triangle.rgba"),
+            ),
+            Self::AlertCircle => (
+                "v2-icon-alert-circle",
+                include_bytes!("../assets/icons/alert-circle.rgba"),
+            ),
+            Self::Monitor => (
+                "v2-icon-device-desktop",
+                include_bytes!("../assets/icons/device-desktop.rgba"),
+            ),
+        }
+    }
+
+    /// Paints this 2px rounded outline icon tinted with the requested semantic color.
+    pub(crate) fn paint(self, ui: &Ui, rect: egui::Rect, tint: Color32) {
+        let (key, bytes) = self.asset();
+        let id = egui::Id::new(key);
+        let texture = ui
+            .ctx()
+            .data_mut(|data| data.get_temp::<egui::TextureHandle>(id))
+            .unwrap_or_else(|| {
+                let texture = ui.ctx().load_texture(
+                    key,
+                    egui::ColorImage::from_rgba_unmultiplied([72, 72], bytes),
+                    egui::TextureOptions::LINEAR,
+                );
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(id, texture.clone()));
+                texture
+            });
+        ui.painter().image(
+            texture.id(),
+            rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            tint,
+        );
+    }
+}
+
+/// Renders a frameless icon button for headers and toolbars using explicit palette colors.
+pub fn toolbar_icon_button(
+    ui: &mut Ui,
+    icon: Icon,
+    label: &str,
+    size: f32,
+    palette: Palette,
+    selected: bool,
+) -> Response {
+    let enabled = ui.is_enabled();
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), sense);
+    let interacting = enabled
+        && (response.hovered() || response.is_pointer_button_down_on() || response.has_focus());
+    if selected {
+        ui.painter().rect_filled(rect, 8, palette.soft);
+    } else if enabled && response.is_pointer_button_down_on() {
+        ui.painter()
+            .rect_filled(rect, 8, palette.surface.lerp_to_gamma(palette.accent, 0.22));
+    } else if enabled && response.hovered() {
+        ui.painter().rect_filled(rect, 8, palette.hover);
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect.shrink(1.0),
+            8,
+            Stroke::new(2.0, palette.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let ink = if !enabled {
+        palette.muted.gamma_multiply(0.6)
+    } else if selected {
+        palette.accent
+    } else if interacting {
+        palette.text
+    } else {
+        palette.muted
+    };
+    let glyph = if matches!(icon, Icon::Close) {
+        20.0
+    } else {
+        18.0
+    };
+    icon.paint(
+        ui,
+        egui::Rect::from_center_size(rect.center(), egui::vec2(glyph, glyph)),
+        ink,
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, selected, label)
+    });
+    if enabled {
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(label)
+    } else {
+        response.on_disabled_hover_text(label)
+    }
 }
 
 /// Renders a line icon with a forty-point target and a descriptive accessibility label.
@@ -1005,78 +1179,31 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str) -> Response {
     let center = response.rect.center();
     let interacting = response.enabled()
         && (response.hovered() || response.is_pointer_button_down_on() || response.has_focus());
-    let ink = if interacting { p.accent } else { p.muted };
-    let stroke = Stroke::new(if interacting { 2.0 } else { 1.7 }, ink);
-    match icon {
-        Icon::Close => {
-            let id = egui::Id::new("v2-tabler-close");
-            let texture = ui
-                .ctx()
-                .data_mut(|data| data.get_temp::<egui::TextureHandle>(id))
-                .unwrap_or_else(|| {
-                    let texture = ui.ctx().load_texture(
-                        "Tabler X",
-                        egui::ColorImage::from_rgba_unmultiplied(
-                            [72, 72],
-                            include_bytes!("../assets/icons/tabler-x.rgba"),
-                        ),
-                        Default::default(),
-                    );
-                    ui.ctx()
-                        .data_mut(|data| data.insert_temp(id, texture.clone()));
-                    texture
-                });
-            ui.painter().image(
-                texture.id(),
-                egui::Rect::from_center_size(center, egui::vec2(24.0, 24.0)),
-                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                if interacting { p.accent } else { p.text },
-            );
-        }
-        Icon::Information => {
-            ui.painter().circle_stroke(center, 9.0, stroke);
-            ui.painter()
-                .circle_filled(center - egui::vec2(0.0, 4.0), 1.1, ink);
-            ui.painter().line_segment(
-                [center - egui::vec2(0.0, 0.5), center + egui::vec2(0.0, 5.0)],
-                stroke,
-            );
-        }
-        Icon::Fullscreen => {
-            let r = egui::Rect::from_center_size(center, egui::vec2(18.0, 18.0));
-            for (corner, x, y) in [
-                (r.left_top(), 1.0, 1.0),
-                (r.right_top(), -1.0, 1.0),
-                (r.left_bottom(), 1.0, -1.0),
-                (r.right_bottom(), -1.0, -1.0),
-            ] {
-                ui.painter()
-                    .line_segment([corner + egui::vec2(x * 6.0, 0.0), corner], stroke);
-                ui.painter()
-                    .line_segment([corner, corner + egui::vec2(0.0, y * 6.0)], stroke);
-            }
-        }
-        Icon::Settings => {
-            ui.painter().circle_stroke(center, 7.0, stroke);
-            ui.painter().circle_stroke(center, 2.5, stroke);
-            for index in 0..8 {
-                let angle = index as f32 * std::f32::consts::TAU / 8.0;
-                let direction = egui::vec2(angle.cos(), angle.sin());
-                ui.painter().line_segment(
-                    [center + direction * 7.0, center + direction * 10.0],
-                    stroke,
-                );
-            }
-        }
-    }
+    let ink = if matches!(icon, Icon::Close) {
+        if interacting { p.accent } else { p.text }
+    } else if interacting {
+        p.accent
+    } else {
+        p.muted
+    };
+    let glyph = if matches!(icon, Icon::Close) {
+        20.0
+    } else {
+        18.0
+    };
+    icon.paint(
+        ui,
+        egui::Rect::from_center_size(center, egui::vec2(glyph, glyph)),
+        ink,
+    );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(label)
 }
 
-/// Height shared by the windowed and fullscreen player controls.
-pub const PLAYER_TOOLBAR_HEIGHT: f32 = 64.0;
+/// Height of the attached windowed player controls.
+pub const PLAYER_TOOLBAR_HEIGHT: f32 = 52.0;
 
 /// Divides the full video workspace into a stage and attached or overlaid controls.
 pub fn player_rects(available: egui::Rect, fullscreen: bool) -> crate::PlayerRects {
@@ -1084,13 +1211,22 @@ pub fn player_rects(available: egui::Rect, fullscreen: bool) -> crate::PlayerRec
     if !fullscreen {
         stage.max.y = (available.bottom() - PLAYER_TOOLBAR_HEIGHT).max(available.top());
     }
-    let top = if fullscreen {
-        (available.bottom() - PLAYER_TOOLBAR_HEIGHT).max(available.top())
+    let toolbar = if fullscreen {
+        let size = egui::vec2(
+            (available.width() - 32.0).clamp(0.0, 560.0),
+            48.0_f32.min(available.height()),
+        );
+        let bottom = (available.bottom() - 16.0).max(available.top() + size.y);
+        egui::Rect::from_center_size(
+            egui::pos2(available.center().x, bottom - size.y * 0.5),
+            size,
+        )
     } else {
-        stage.bottom()
+        egui::Rect::from_min_max(
+            egui::pos2(available.left(), stage.bottom()),
+            available.right_bottom(),
+        )
     };
-    let toolbar =
-        egui::Rect::from_min_max(egui::pos2(available.left(), top), available.right_bottom());
     crate::PlayerRects { stage, toolbar }
 }
 
@@ -1302,46 +1438,72 @@ pub struct CanvasMessage<'a> {
 /// Centers the whole state while keeping its recovery action outside the detail scroll area.
 pub fn canvas_message(ui: &mut Ui, message: CanvasMessage<'_>) -> Response {
     let available = ui.available_rect_before_wrap();
+    let p = Palette::for_ui(ui);
     ui.painter().rect_filled(available, 0, Color32::BLACK);
-    let rect = egui::Rect::from_center_size(
-        available.center(),
-        egui::vec2(
-            (available.width() - 48.0).min(480.0),
-            (available.height() - 32.0).min(260.0),
+    let size = egui::vec2(
+        (available.width() - 32.0).clamp(1.0, 480.0),
+        (available.height() - 24.0).clamp(
+            1.0,
+            if message.detail.is_empty() {
+                150.0
+            } else {
+                250.0
+            },
         ),
     );
+    let card = egui::Rect::from_center_size(available.center(), size);
+    ui.painter().rect(
+        card,
+        12,
+        p.surface,
+        Stroke::new(1.0, p.border),
+        egui::StrokeKind::Inside,
+    );
+    let inner = card.shrink(16.0);
     ui.scope_builder(
         egui::UiBuilder::new()
-            .max_rect(rect)
+            .max_rect(inner)
             .layout(egui::Layout::top_down(egui::Align::Center)),
         |ui| {
-            ui.visuals_mut().dark_mode = true;
-            let p = Palette::new(true);
             ui.label(
                 RichText::new(message.title)
                     .size(18.0)
                     .variation(b"wght", 600.0)
                     .color(p.text),
             );
-            ui.add_space(12.0);
-            egui::ScrollArea::vertical()
-                .id_salt("canvas-message-detail")
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .max_height((rect.height() - 110.0).max(24.0))
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::Label::new(RichText::new(message.detail).size(13.0).color(p.muted))
+            if !message.detail.is_empty() {
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("canvas-message-detail")
+                    .max_height((inner.bottom() - ui.cursor().top() - 58.0).max(1.0))
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(message.detail).size(13.0).color(p.muted),
+                            )
                             .wrap(),
-                    );
-                });
-            ui.add_space(18.0);
-            Action {
-                label: message.action,
-                size: egui::vec2(180.0, 44.0),
-                enabled: true,
-                tone: ActionTone::Neutral,
+                        );
+                    });
             }
-            .show(ui)
+            let footer = egui::Rect::from_min_max(
+                egui::pos2(inner.left(), inner.bottom() - 44.0),
+                inner.max,
+            );
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(footer)
+                    .layout(egui::Layout::top_down(egui::Align::Center)),
+                |ui| {
+                    Action {
+                        label: message.action,
+                        size: egui::vec2(180.0, 44.0),
+                        enabled: true,
+                        tone: ActionTone::Neutral,
+                    }
+                    .show(ui)
+                },
+            )
+            .inner
         },
     )
     .inner
@@ -1422,17 +1584,11 @@ pub fn header(ui: &mut Ui, spec: Header<'_>) -> HeaderResponse {
                     .color(p.text),
             );
         } else {
-            response.back = Action {
-                label: spec.back,
-                size: egui::vec2(112.0, 40.0),
-                enabled: true,
-                tone: ActionTone::Neutral,
-            }
-            .show(ui)
-            .clicked();
+            response.back = back_button(ui, spec.back, p).clicked();
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            response.settings = icon_button(ui, Icon::Settings, spec.settings).clicked();
+            response.settings =
+                toolbar_icon_button(ui, Icon::Settings, spec.settings, 40.0, p, false).clicked();
         });
     });
     if let Some(title) = spec.title {
@@ -1447,7 +1603,8 @@ pub fn header(ui: &mut Ui, spec: Header<'_>) -> HeaderResponse {
                     egui::Direction::LeftToRight,
                 )),
             |ui| {
-                ui.add(egui::Label::new(RichText::new(title).size(15.0).color(p.muted)).truncate());
+                ui.add(egui::Label::new(RichText::new(title).size(15.0).color(p.text)).truncate())
+                    .on_hover_text(title);
             },
         );
     }
@@ -1456,6 +1613,57 @@ pub fn header(ui: &mut Ui, spec: Header<'_>) -> HeaderResponse {
         Stroke::new(1.0, p.border),
     );
     response
+}
+
+fn back_button(ui: &mut Ui, label: &str, palette: Palette) -> Response {
+    let label = label.trim_start_matches(['‹', ' ']);
+    let galley = egui::WidgetText::from(action_text(label, palette.text)).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::FontSelection::Default,
+    );
+    let icon_size = 16.0;
+    let pad_left = 8.0;
+    let gap = 6.0;
+    let pad_right = 12.0;
+    let width = (pad_left + icon_size + gap + galley.size().x + pad_right).max(76.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 40.0), egui::Sense::click());
+    let visual_rect = rect.shrink2(egui::vec2(0.0, 2.0));
+    if response.is_pointer_button_down_on() {
+        ui.painter().rect_filled(
+            visual_rect,
+            8,
+            palette.surface.lerp_to_gamma(palette.accent, 0.16),
+        );
+    } else if response.hovered() {
+        ui.painter().rect_filled(visual_rect, 8, palette.hover);
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            visual_rect.shrink(1.0),
+            8,
+            Stroke::new(2.0, palette.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + pad_left + icon_size * 0.5, rect.center().y),
+        egui::vec2(icon_size, icon_size),
+    );
+    let icon_tint = if response.hovered() || response.is_pointer_button_down_on() {
+        palette.text
+    } else {
+        palette.muted
+    };
+    Icon::ChevronLeft.paint(ui, icon_rect, icon_tint);
+    let text_pos = egui::pos2(
+        icon_rect.right() + gap,
+        rect.center().y - galley.size().y * 0.5,
+    );
+    ui.painter().galley(text_pos, galley, palette.text);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Scrolls only source rows with an auto-fading, draggable scrollbar.
@@ -1670,6 +1878,98 @@ mod controls_contract_tests {
             );
         });
     }
+
+    #[test]
+    fn header_back_button_paints_vector_chevron_and_clean_label() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(680.0, 56.0),
+                )),
+                ..Default::default()
+            },
+            |root| {
+                egui::Panel::top("test-hdr")
+                    .exact_size(48.0)
+                    .show(root, |ui| {
+                        header(
+                            ui,
+                            Header {
+                                title: Some("Studio Mac"),
+                                back: "Nearby",
+                                settings: "Settings",
+                            },
+                        );
+                    });
+            },
+        );
+        let texts: Vec<_> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some((t.galley.job.text.as_str(), t.pos.x)),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().all(|(text, _)| !text.contains('‹')));
+        let nearby_x = texts
+            .iter()
+            .find_map(|(text, x)| (*text == "Nearby").then_some(*x))
+            .expect("back button should paint clean Nearby text");
+        assert!(
+            nearby_x > 20.0,
+            "chevron icon must sit left of back label, got x={nearby_x}"
+        );
+        let mesh_count = out
+            .shapes
+            .iter()
+            .filter(|s| matches!(s.shape, egui::Shape::Mesh(_)))
+            .count();
+        assert!(
+            mesh_count >= 2,
+            "header should paint chevron and settings icon textures, got {mesh_count}"
+        );
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn warning_and_error_notices_paint_vector_icons_instead_of_bang_text() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(480.0, 160.0),
+                )),
+                ..Default::default()
+            },
+            |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    notice(ui, StatusTone::Warning, "Check settings");
+                    notice(ui, StatusTone::Error, "Action failed");
+                });
+            },
+        );
+        let has_bang_text = out
+            .shapes
+            .iter()
+            .any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.job.text == "!"));
+        assert!(!has_bang_text, "status notice must not paint raw '!' text");
+        let mesh_count = out
+            .shapes
+            .iter()
+            .filter(|s| matches!(s.shape, egui::Shape::Mesh(_)))
+            .count();
+        assert!(
+            mesh_count >= 2,
+            "warning and error notices should paint icon textures, got {mesh_count}"
+        );
+        out.textures_delta.clear();
+    }
 }
 
 /// Show connection estimates without suggesting a speed test or free capacity.
@@ -1700,3 +2000,6 @@ pub fn connection_estimates(
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_secs(1));
 }
+
+mod watch;
+pub use watch::{WatchChrome, WatchCommand, WatchPhase};

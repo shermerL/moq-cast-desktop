@@ -151,6 +151,7 @@ impl eframe::App for MoqCastApp {
         let context = ui.ctx().clone();
         let snapshot = self.runtime.snapshot();
         if let Some(frame) = self.runtime.playback_frame()
+            && frame.identity.view_generation == snapshot.view_generation
             && Some(frame.identity) != self.playback_identity
         {
             let image =
@@ -169,13 +170,24 @@ impl eframe::App for MoqCastApp {
         if !matches!(
             snapshot.media,
             MediaState::Viewing { .. } | MediaState::PreparingView { .. }
-        ) {
+        ) || self
+            .playback_identity
+            .is_some_and(|id| id.view_generation != snapshot.view_generation)
+        {
             self.playback_texture = None;
             self.playback_identity = None;
         }
 
         let viewing = matches!(snapshot.media, MediaState::Viewing { .. });
-        let fullscreen = self.player.reconcile_fullscreen(&context, viewing);
+        let player_visible = self.page == Page::Watch
+            && matches!(
+                snapshot.media,
+                MediaState::Viewing { .. }
+                    | MediaState::PreparingView { .. }
+                    | MediaState::StoppingView { .. }
+            );
+        let fullscreen =
+            self.player.reconcile_fullscreen(&context, player_visible) && player_visible;
         if fullscreen {
             egui::CentralPanel::default()
                 .frame(Frame::new().fill(Color32::BLACK))

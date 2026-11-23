@@ -11,7 +11,11 @@ impl MoqCastApp {
         let p = Palette::for_ui(root);
         let metrics = moqcast_ui::v2::Metrics::for_width(root.ctx().content_rect().width());
         egui::Panel::top("s2-header")
-            .exact_size(metrics.header)
+            .exact_size(if self.page == Page::Watch {
+                48.0
+            } else {
+                metrics.header
+            })
             .frame(
                 Frame::new()
                     .fill(p.surface)
@@ -27,7 +31,12 @@ impl MoqCastApp {
                     ui,
                     moqcast_ui::v2::Header {
                         title: title.as_deref(),
-                        back: self.text("‹  附近设备", "‹  Nearby"),
+                        back: if self.page == Page::Watch && ui.ctx().content_rect().width() < 680.0
+                        {
+                            self.text("返回", "Back")
+                        } else {
+                            self.text("附近设备", "Nearby")
+                        },
                         settings: self.text("设置", "Settings"),
                     },
                 );
@@ -706,8 +715,7 @@ impl MoqCastApp {
     }
 
     fn s2_watch_empty(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
-        let failed = watch_projection(snapshot.media_owner, snapshot.media.phase())
-            == WatchProjection::Failed;
+        let failed = snapshot.media_owner == Some(MediaOwner::Watch);
         let detail = if self.command_error {
             self.text(
                 "操作未能发送，请稍后重试。",
@@ -751,7 +759,7 @@ impl MoqCastApp {
         }
     }
 
-    fn s2_command_notice(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn s2_command_notice(&mut self, ui: &mut egui::Ui) {
         if self.command_error {
             notice(
                 ui,

@@ -112,7 +112,7 @@ fn back_to_nearby_keeps_media_running() {
     theme::configure(&ctx);
     let size = egui::vec2(680.0, 640.0);
     let out = render(&ctx, &mut app, &s, size, vec![]);
-    let pos = painted(&out, "‹  Nearby").center();
+    let pos = painted(&out, "Nearby").center();
     for pressed in [true, false] {
         render(
             &ctx,

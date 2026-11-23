@@ -177,8 +177,8 @@ impl Locale {
 
     pub(super) fn open_nearby(self) -> &'static str {
         match self {
-            Self::Chinese => "打开附近设备",
-            Self::English => "Open Nearby",
+            Self::Chinese => "返回附近设备",
+            Self::English => "Return to Nearby",
         }
     }
 
