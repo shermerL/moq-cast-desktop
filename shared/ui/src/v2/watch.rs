@@ -17,6 +17,16 @@ pub enum WatchPhase {
     Stopping,
 }
 
+impl WatchPhase {
+    fn allows_audio_control(self, audio: crate::PlayerAudioState) -> bool {
+        self != Self::Stopping
+            && matches!(
+                audio,
+                crate::PlayerAudioState::Ready | crate::PlayerAudioState::Muted
+            )
+    }
+}
+
 /// Media commands are dispatched by the platform that owns the session.
 pub enum WatchCommand {
     /// Stop the watch session.
@@ -229,11 +239,7 @@ impl WatchChrome {
                         }
                         ui.label(badge_text);
                         divider(ui, palette);
-                        let playable = phase == WatchPhase::Live
-                            && matches!(
-                                snapshot.audio_state,
-                                crate::PlayerAudioState::Ready | crate::PlayerAudioState::Muted
-                            );
+                        let playable = phase.allows_audio_control(snapshot.audio_state);
                         let vol = player_volume_control(
                             ui,
                             &mut self.volume,
@@ -373,6 +379,18 @@ fn divider(ui: &mut Ui, palette: Palette) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn audio_controls_follow_audio_before_the_first_video_frame() {
+        use crate::PlayerAudioState::*;
+        for playable in [Ready, Muted] {
+            assert!(WatchPhase::Waiting.allows_audio_control(playable));
+            assert!(!WatchPhase::Stopping.allows_audio_control(playable));
+        }
+        for unavailable in [Pending, NoAudio, Failed] {
+            assert!(!WatchPhase::Waiting.allows_audio_control(unavailable));
+        }
+    }
+
     #[test]
     fn fullscreen_idle_pins_and_wakeup_use_a_fresh_deadline() {
         let mut timer = HideTimer::default();
