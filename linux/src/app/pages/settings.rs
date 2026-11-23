@@ -116,6 +116,7 @@ pub(in crate::app) fn show(
                     }
                 });
             }
+            v2::icon_licenses(ui, locale.text("图标许可", "Icon licenses"));
         });
     (selected != locale).then_some(selected)
 }

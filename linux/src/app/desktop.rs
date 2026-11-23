@@ -15,7 +15,11 @@ impl MoqCastApp {
         let p = Palette::for_ui(root);
         let metrics = Metrics::for_width(root.ctx().content_rect().width());
         egui::Panel::top("v2-header")
-            .exact_size(metrics.header)
+            .exact_size(if self.page == Page::Watch {
+                48.0
+            } else {
+                metrics.header
+            })
             .frame(
                 Frame::new()
                     .fill(p.surface)
@@ -25,19 +29,15 @@ impl MoqCastApp {
                 let title = match self.page {
                     Page::Nearby => None,
                     Page::Watch => Some(
-                        snapshot
-                            .peers
-                            .iter()
-                            .find(|(id, _)| match &snapshot.media {
-                                MediaState::PreparingView { path }
-                                | MediaState::Viewing { path }
-                                | MediaState::StoppingView { path } => {
-                                    crate::screen_path::for_peer(id) == *path
-                                }
-                                _ => false,
-                            })
-                            .map(|(_, p)| p.name.clone())
-                            .unwrap_or_else(|| self.text("播放器", "Player").to_owned()),
+                        match &snapshot.media {
+                            MediaState::PreparingView { path }
+                            | MediaState::Viewing { path }
+                            | MediaState::StoppingView { path } => {
+                                pages::watch::device_name(snapshot, path, self.locale)
+                            }
+                            _ => self.text("播放器", "Player"),
+                        }
+                        .to_owned(),
                     ),
                     _ => Some(self.text("共享设置", "Sharing settings").to_owned()),
                 };
@@ -45,7 +45,12 @@ impl MoqCastApp {
                     ui,
                     moqcast_ui::v2::Header {
                         title: title.as_deref(),
-                        back: self.text("‹  附近设备", "‹  Nearby"),
+                        back: if self.page == Page::Watch && ui.ctx().content_rect().width() < 680.0
+                        {
+                            self.text("返回", "Back")
+                        } else {
+                            self.text("附近设备", "Nearby")
+                        },
                         settings: self.text("设置", "Settings"),
                     },
                 );

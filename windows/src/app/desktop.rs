@@ -13,23 +13,33 @@ impl MoqCastApp {
         let p = Palette::for_ui(root);
         let metrics = Metrics::for_width(root.ctx().content_rect().width());
         egui::Panel::top("v2-header")
-            .exact_size(metrics.header)
+            .exact_size(if self.page == Page::Watch {
+                48.0
+            } else {
+                metrics.header
+            })
             .frame(
                 Frame::new()
                     .fill(p.surface)
                     .inner_margin(egui::Margin::symmetric(metrics.inset, 0)),
             )
             .show(root, |ui| {
+                let source = self.watch_source();
                 let title = match self.page {
                     Page::Nearby => None,
                     Page::ScreenShare => Some(self.text("共享设置", "Sharing settings")),
-                    Page::Watch => Some(self.text("播放器", "Player")),
+                    Page::Watch => Some(source.as_deref().unwrap_or(self.text("播放器", "Player"))),
                 };
                 let response = v2::header(
                     ui,
                     v2::Header {
                         title,
-                        back: self.text("‹  附近设备", "‹  Nearby"),
+                        back: if self.page == Page::Watch && ui.ctx().content_rect().width() < 680.0
+                        {
+                            self.text("返回", "Back")
+                        } else {
+                            self.text("附近设备", "Nearby")
+                        },
                         settings: self.locale.settings(),
                     },
                 );
@@ -538,10 +548,12 @@ impl MoqCastApp {
     }
     fn watch(&mut self, ui: &mut egui::Ui) {
         if watch_projection(self.snapshot.view.phase) == WatchProjection::Player {
+            let source = self.watch_source();
             let action = self.player.show(
                 ui,
                 self.locale,
                 &self.snapshot.view,
+                source.as_deref(),
                 self.playback_texture.as_ref(),
                 self.playback_identity,
             );
@@ -555,7 +567,9 @@ impl MoqCastApp {
                     self.text("播放已结束", "Playback ended")
                 },
                 detail: if self.snapshot.view.phase == ViewPhase::Failed {
-                    self.text("请返回附近设备后重试。", "Return to Nearby and retry.")
+                    self.snapshot.view.last_error.as_deref().unwrap_or(
+                        self.text("请返回附近设备后重试。", "Return to Nearby and retry."),
+                    )
                 } else {
                     ""
                 },
@@ -635,6 +649,7 @@ impl MoqCastApp {
                             } else {
                                 self.diagnostics.hide_window();
                             }
+                            v2::icon_licenses(ui, self.text("图标许可", "Icon licenses"));
                         });
                     close || self.diagnostics.visible()
                 });
@@ -1037,7 +1052,7 @@ mod tests {
         app.snapshot.view.phase = ViewPhase::Preparing;
         let size = vec2(680.0, 640.0);
         let out = render(&ctx, &mut app, size, vec![]);
-        click(&ctx, &mut app, size, painted(&out, "‹  Nearby").center());
+        click(&ctx, &mut app, size, painted(&out, "Nearby").center());
         assert_eq!(app.page, Page::Nearby);
         assert!(commands.try_recv().is_err());
     }

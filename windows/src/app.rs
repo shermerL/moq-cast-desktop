@@ -181,6 +181,15 @@ impl MoqCastApp {
         }
     }
 
+    fn watch_source(&self) -> Option<String> {
+        let path = self.snapshot.view.path.as_deref()?;
+        self.snapshot
+            .peers
+            .values()
+            .position(|p| crate::screen_path::for_peer(&p.id) == path)
+            .map(|index| peer_display_name(self.locale, index + 1))
+    }
+
     fn handle_player_action(&mut self, action: Option<PlayerAction>) {
         match action {
             Some(PlayerAction::Stop) => {
@@ -293,7 +302,10 @@ impl MoqCastApp {
         if matches!(
             self.snapshot.view.phase,
             ViewPhase::Idle | ViewPhase::Failed
-        ) {
+        ) || self
+            .playback_identity
+            .is_some_and(|id| id.view_generation != self.snapshot.view.generation)
+        {
             self.playback_texture = None;
             self.playback_identity = None;
             self.playback_timestamp_us = None;
@@ -338,7 +350,7 @@ impl eframe::App for MoqCastApp {
         );
         let viewport_fullscreen = self
             .player
-            .reconcile_fullscreen(&context, self.snapshot.view.phase == ViewPhase::Viewing);
+            .reconcile_fullscreen(&context, viewing && self.page == Page::Watch);
         if viewport_fullscreen != self.viewport_fullscreen {
             tracing::info!(
                 fullscreen = viewport_fullscreen,
@@ -351,16 +363,18 @@ impl eframe::App for MoqCastApp {
             );
             self.viewport_fullscreen = viewport_fullscreen;
         }
-        let fullscreen = self.snapshot.view.phase == ViewPhase::Viewing && viewport_fullscreen;
+        let fullscreen = viewing && self.page == Page::Watch && viewport_fullscreen;
 
         if fullscreen {
             egui::CentralPanel::default()
                 .frame(Frame::new().fill(Color32::BLACK))
                 .show(ui, |ui| {
+                    let source = self.watch_source();
                     let action = self.player.show(
                         ui,
                         self.locale,
                         &self.snapshot.view,
+                        source.as_deref(),
                         self.playback_texture.as_ref(),
                         self.playback_identity,
                     );

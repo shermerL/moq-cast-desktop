@@ -269,6 +269,7 @@ impl MoqCastApp {
     }
 
     fn watch_player(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
+        self.s2_command_notice(ui);
         let device_name = self.player_device_name(snapshot);
         let texture = self.video.as_ref().and_then(video::Presenter::texture);
         match self.player.show(
@@ -294,7 +295,7 @@ impl MoqCastApp {
             },
         ) {
             Some(player::PlayerAction::Stop) => {
-                self.runtime.stop_watching();
+                self.command_error = !self.runtime.stop_watching();
             }
             Some(player::PlayerAction::SetVolume {
                 generation,
@@ -365,7 +366,7 @@ impl eframe::App for MoqCastApp {
             self.confirm_turn_off_nearby = false;
         }
         self.update_playback_texture(&snapshot);
-        let player_active = Self::player_active(&snapshot);
+        let player_active = self.page == Page::Watch && Self::player_active(&snapshot);
         let fullscreen = self.player.reconcile_fullscreen(ui.ctx(), player_active);
         if fullscreen {
             egui::CentralPanel::default()

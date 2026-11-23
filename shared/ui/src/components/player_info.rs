@@ -276,6 +276,8 @@ fn show_player_info(
     snapshot: PlayerInfoSnapshot<'_>,
     updates_per_second: Option<f64>,
 ) {
+    ui.spacing_mut().interact_size.y = 20.0;
+    ui.spacing_mut().item_spacing.y = 3.0;
     ui.label(typography(
         panel_title(locale),
         TypographyRole::Section,
@@ -358,28 +360,49 @@ fn info_section(ui: &mut Ui, label: &str) {
 }
 
 fn info_row(ui: &mut Ui, label: &str, value: String) {
-    let response = ui
-        .horizontal(|ui| {
-            let label_width = (ui.available_width() * 0.38).min(104.0);
-            ui.add_sized(
-                vec2(label_width, 0.0),
+    let (row, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), 22.0), egui::Sense::hover());
+    let label_width = (row.width() * 0.38).min(104.0);
+    let label_rect = egui::Rect::from_min_max(
+        row.min,
+        egui::pos2((row.left() + label_width).min(row.right()), row.bottom()),
+    );
+    let value_rect = egui::Rect::from_min_max(
+        egui::pos2((label_rect.right() + 8.0).min(row.right()), row.top()),
+        row.max,
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(label_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.add(
                 Label::new(typography(
                     label,
                     TypographyRole::Meta,
                     ui.visuals().weak_text_color(),
-                )),
-            );
-            ui.add_sized(
-                ui.available_size(),
-                Label::new(typography(
-                    value.as_str(),
-                    TypographyRole::Meta,
-                    ui.visuals().text_color(),
                 ))
+                .halign(egui::Align::Min)
                 .truncate(),
             );
-        })
-        .response;
+        },
+    );
+    let mut text = typography(
+        value.as_str(),
+        TypographyRole::Meta,
+        ui.visuals().text_color(),
+    );
+    if matches!(value.as_bytes().first(), Some(b'0'..=b'9')) {
+        text = text.monospace();
+    }
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(value_rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        |ui| {
+            ui.add(Label::new(text).halign(egui::Align::Max).truncate());
+        },
+    );
     response.on_hover_text(value);
 }
 
@@ -737,5 +760,56 @@ mod tests {
     fn playback_source_label_is_localized() {
         assert_eq!(source_label(PlayerInfoLocale::Chinese), "来源");
         assert_eq!(source_label(PlayerInfoLocale::English), "Source");
+    }
+
+    #[test]
+    fn playback_info_rows_align_labels_left_and_values_right() {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    vec2(300.0, 400.0),
+                )),
+                ..Default::default()
+            },
+            |root| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(root, |ui| {
+                        ui.set_width(300.0);
+                        show_player_info(
+                            ui,
+                            PlayerInfoLocale::English,
+                            snapshot(None, Some("videotoolbox")),
+                            Some(30.0),
+                        );
+                    });
+            },
+        );
+        let find = |text: &str| {
+            out.shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.job.text == text => {
+                        Some(t.galley.rect.translate(t.pos.to_vec2()))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing {text}"))
+        };
+        let label = find("Resolution");
+        let value = find("1920 × 1080");
+        assert!(
+            label.left() < 2.0,
+            "label should align to left edge, got {}",
+            label.left()
+        );
+        assert!(
+            (300.0 - value.right()).abs() < 4.0,
+            "value should align to right edge, got right={}",
+            value.right()
+        );
+        out.textures_delta.clear();
     }
 }
