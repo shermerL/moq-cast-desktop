@@ -69,6 +69,16 @@ pub struct PlayerInfoSnapshot<'a> {
     pub video_codec: Option<&'a str>,
     /// Backend that decoded the current video frame.
     pub decoder: Option<&'a str>,
+    /// Requested strategy latched when this watch started.
+    pub requested_policy: Option<&'a str>,
+    /// Execution class established by the opened backend.
+    pub execution: Option<&'a str>,
+    /// The active watch has not opened a decoder yet.
+    pub awaiting_backend: bool,
+    /// Texture path observed after this viewer accepted a frame.
+    pub presentation: Option<&'static str>,
+    /// Hardware candidates explicitly refused this decoder open.
+    pub hardware_refused: bool,
     /// Current remote-audio availability.
     pub audio_state: PlayerAudioState,
     /// Codec of the currently selected audio track.
@@ -257,7 +267,11 @@ pub(crate) fn player_info_from_button(
                 Some(palette.map_or(COLORS.player_text.into(), |p| p.text));
             ui.visuals_mut().weak_text_color =
                 Some(palette.map_or(COLORS.player_muted.into(), |p| p.muted));
-            show_player_info(ui, locale, snapshot, state.meter.updates_per_second);
+            egui::ScrollArea::vertical()
+                .max_height((ui.ctx().content_rect().height() - 100.0).max(80.0))
+                .show(ui, |ui| {
+                    show_player_info(ui, locale, snapshot, state.meter.updates_per_second);
+                });
         });
     if was_open && !state.open {
         state.meter.reset();
@@ -307,14 +321,54 @@ fn show_player_info(
             .unwrap_or_else(|| unavailable_label(locale))
             .to_owned(),
     );
+    let chinese = locale == PlayerInfoLocale::Chinese;
+    let text = |zh, en| if chinese { zh } else { en };
+    let missing = if snapshot.awaiting_backend {
+        text("等待中", "Waiting")
+    } else {
+        text("未提供", "Unavailable")
+    };
+    info_row(ui, text("角色", "Role"), text("观看", "Viewer").to_owned());
+    info_row(
+        ui,
+        text("请求策略", "Requested policy"),
+        match snapshot.requested_policy {
+            Some("auto") => text("自动", "Auto"),
+            Some("software") => text("仅软件", "Software only"),
+            _ => text("未提供", "Unavailable"),
+        }
+        .to_owned(),
+    );
+    info_row(
+        ui,
+        text("执行方式", "Decode execution"),
+        match snapshot.execution {
+            Some("hardware") => text("硬件解码", "Hardware decoding"),
+            Some("software") => text("软件解码", "Software decoding"),
+            _ => missing,
+        }
+        .to_owned(),
+    );
     info_row(
         ui,
         decoder_label(locale),
+        snapshot.decoder.unwrap_or(missing).to_owned(),
+    );
+    info_row(
+        ui,
+        text("呈现路径", "Presentation"),
         snapshot
-            .decoder
-            .unwrap_or_else(|| unavailable_label(locale))
+            .presentation
+            .unwrap_or(text("未提供", "Unavailable"))
             .to_owned(),
     );
+    if snapshot.hardware_refused {
+        info_row(
+            ui,
+            text("回退原因", "Fallback reason"),
+            text("硬件候选不可用", "Hardware candidates refused").to_owned(),
+        );
+    }
     let update_rate = updates_per_second
         .map(|rate| frame_rate_value(locale, rate))
         .unwrap_or_else(|| {
@@ -597,6 +651,11 @@ mod tests {
             resolution: Some((1920, 1080)),
             video_codec: Some("avc1.640028"),
             decoder,
+            requested_policy: None,
+            execution: None,
+            awaiting_backend: false,
+            presentation: None,
+            hardware_refused: false,
             audio_state: PlayerAudioState::Ready,
             audio_codec: Some("opus"),
             audio_sample_rate: Some(48_000),

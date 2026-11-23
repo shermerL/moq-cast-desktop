@@ -42,7 +42,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_contract_is_unchanged() {
+    fn media_features_include_their_runtime_dependencies() {
         let manifest = include_str!("../Cargo.toml")
             .parse::<DocumentMut>()
             .expect("valid macOS Cargo.toml");
@@ -71,6 +71,7 @@ mod tests {
                 .as_array()
                 .expect("watch feature array"),
             &[
+                "dep:moqcast-diagnostics",
                 "network",
                 "dep:hang",
                 "dep:moq-audio",

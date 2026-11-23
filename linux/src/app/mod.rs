@@ -4,6 +4,8 @@ mod desktop;
 mod device;
 mod diagnostics;
 mod locale;
+#[path = "../../../shared/diagnostics/native_ui.rs"]
+mod media_diagnostics;
 mod pages;
 mod player;
 mod snapshot;

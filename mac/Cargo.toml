@@ -17,7 +17,6 @@ app = [
     "dep:block2",
     "dep:eframe",
     "moq-video/render",
-    "dep:moqcast-diagnostics",
     "dep:moqcast-ui",
     "dep:objc2-app-kit",
     "dep:rfd",
@@ -25,6 +24,7 @@ app = [
 ]
 network = ["dep:moq-tokio", "dep:url"]
 watch = [
+    "dep:moqcast-diagnostics",
     "network",
     "dep:hang",
     "dep:moq-audio",

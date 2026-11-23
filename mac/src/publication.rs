@@ -118,6 +118,7 @@ enum Stage {
 #[derive(Default)]
 pub(crate) struct Owner {
     stage: Stage,
+    observation: Option<moqcast_diagnostics::media::Session>,
 }
 
 impl Owner {
@@ -130,6 +131,12 @@ impl Owner {
         system_audio: bool,
     ) {
         self.stop();
+        use moqcast_diagnostics::media::{Session, Source};
+        let source = match selection.kind() {
+            SourceKind::Display => Source::Display,
+            SourceKind::Window => Source::Window,
+        };
+        self.observation = Some(Session::publish(generation, source, false));
         self.stage = Stage::Preparing {
             generation,
             operation: Box::pin(prepare(origin, local_peer_id, selection, system_audio)),
@@ -138,6 +145,9 @@ impl Owner {
 
     pub(crate) fn stop(&mut self) {
         self.stage = Stage::Idle;
+        if let Some(session) = self.observation.take() {
+            session.stopped();
+        }
     }
 
     pub(crate) async fn recv(&mut self) -> Event {
@@ -153,11 +163,22 @@ impl Owner {
                         Ok(publication) => {
                             let path = publication.path.clone();
                             let audio = publication.audio_status();
+                            if let Some(session) = &self.observation {
+                                session.format("H.264", Some(publication.source_size));
+                            }
                             let (audio_events_tx, audio_events) =
                                 tokio::sync::mpsc::unbounded_channel();
+                            use tracing::Instrument;
+                            let span = self
+                                .observation
+                                .as_ref()
+                                .expect("active publication owns a session")
+                                .capture_span();
                             self.stage = Stage::Running {
                                 generation,
-                                operation: Box::pin(publication.run(audio_events_tx)),
+                                operation: Box::pin(
+                                    publication.run(audio_events_tx).instrument(span),
+                                ),
                                 audio_events: Some(audio_events),
                             };
                             return Event::Announced {
@@ -167,6 +188,9 @@ impl Owner {
                             };
                         }
                         Err(error) => {
+                            if let Some(session) = self.observation.take() {
+                                session.finish(true);
+                            }
                             self.stage = Stage::Idle;
                             return Event::Ended {
                                 generation,
@@ -184,6 +208,7 @@ impl Owner {
                     if let Some(events) = audio_events.as_mut() {
                         tokio::select! {
                             result = operation.as_mut() => {
+                                if let Some(session) = self.observation.take() {session.finish(result.is_err());}
                                 self.stage = Stage::Idle;
                                 return Event::Ended { generation, result };
                             }
@@ -194,6 +219,9 @@ impl Owner {
                         }
                     } else {
                         let result = operation.as_mut().await;
+                        if let Some(session) = self.observation.take() {
+                            session.finish(result.is_err());
+                        }
                         self.stage = Stage::Idle;
                         return Event::Ended { generation, result };
                     }
@@ -208,6 +236,7 @@ struct Publication {
     broadcast: moq_net::broadcast::Producer,
     catalog: moq_mux::catalog::Producer,
     source: moq_video::capture::Source,
+    source_size: (u32, u32),
     audio: AudioPlan,
 }
 
@@ -323,7 +352,7 @@ async fn prepare(
 ) -> Result<Publication, Failure> {
     let source_kind = selection.kind();
     let supports_system_audio = selection.supports_system_audio();
-    let source = resolve(selection).await?;
+    let (source, source_size) = resolve(selection).await?;
     let audio = audio_plan(system_audio, supports_system_audio, &source);
     let path = canonical_path(&local_peer_id)?;
     let mut broadcast = origin.create_broadcast(&path).map_err(|error| {
@@ -351,6 +380,7 @@ async fn prepare(
         broadcast,
         catalog,
         source,
+        source_size,
         audio,
     })
 }
@@ -373,7 +403,9 @@ fn audio_plan(
     }
 }
 
-async fn resolve(selection: Selection) -> Result<moq_video::capture::Source, Failure> {
+async fn resolve(
+    selection: Selection,
+) -> Result<(moq_video::capture::Source, (u32, u32)), Failure> {
     match selection {
         Selection::Display { display_id, .. } => {
             let displays = moq_video::capture::displays().await.map_err(|error| {
@@ -390,7 +422,7 @@ async fn resolve(selection: Selection) -> Result<moq_video::capture::Source, Fai
             windows
                 .into_iter()
                 .find(|window| window.id == window_id.to_string())
-                .map(|window| window.source())
+                .map(|window| (window.source(), (window.width, window.height)))
                 .ok_or_else(Failure::source_unavailable)
         }
     }
@@ -399,12 +431,12 @@ async fn resolve(selection: Selection) -> Result<moq_video::capture::Source, Fai
 fn resolve_display(
     display_id: u32,
     displays: &[moq_video::capture::Display],
-) -> Option<moq_video::capture::Source> {
+) -> Option<(moq_video::capture::Source, (u32, u32))> {
     let name = format!("Display {display_id}");
     displays
         .iter()
         .find(|display| display.name == name)
-        .map(moq_video::capture::Display::source)
+        .map(|display| (display.source(), (display.width, display.height)))
 }
 
 fn canonical_path(local_peer_id: &str) -> Result<String, Failure> {
@@ -417,6 +449,111 @@ fn canonical_path(local_peer_id: &str) -> Result<String, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "app")]
+    #[tokio::test]
+    #[ignore = "requires a designated macOS test window and Screen Recording access"]
+    async fn native_window_publication_observes_open_encoder() -> anyhow::Result<()> {
+        use moq_mux::catalog::Stream;
+        use moqcast_diagnostics::{Config, ExportRequest, Paths, Platform};
+        use std::time::Duration;
+
+        // Only accept the explicitly designated synthetic window. Never fall back to the display.
+        let window_id = std::env::var("MOQCAST_TEST_WINDOW_ID")?.parse()?;
+        let directory = std::path::PathBuf::from(
+            std::env::var_os("MOQCAST_TEST_EXPORT_DIR").expect("test export directory"),
+        );
+        // Keep this test's logs and exports outside the user's application log directory.
+        let state_root = std::path::PathBuf::from(
+            std::env::var_os("XDG_STATE_HOME").expect("isolated test log directory"),
+        );
+        anyhow::ensure!(state_root.is_absolute() && state_root.starts_with(&directory));
+        let diagnostics = moqcast_diagnostics::init(
+            Config::new(
+                Paths::for_platform(Platform::Linux)?,
+                crate::build_info::diagnostics(),
+            )
+            .with_minimal_export_metadata()
+            .with_private_location_redaction()
+            .with_stderr(false),
+        );
+        let (origin, driver) = moq_net::origin::Producer::new(Default::default());
+        let _driver = tokio::spawn(moq_net::time::run(driver));
+        let consumer = origin.consume();
+        let mut owner = Owner::default();
+        owner.start(
+            1,
+            origin,
+            "native-fixture".into(),
+            Selection::Window {
+                window_id,
+                label: "designated test window".into(),
+            },
+            false,
+        );
+        let exchange = async {
+            let path = match owner.recv().await {
+                Event::Announced { path, .. } => path,
+                Event::Ended { result: Err(e), .. } => anyhow::bail!("{}", e.message()),
+                _ => anyhow::bail!("test window did not announce"),
+            };
+            let receive = async {
+                let broadcast = consumer.routed_broadcast(&path).await?;
+                let mut catalog = moq_mux::catalog::Consumer::<()>::new(
+                    &broadcast,
+                    moq_mux::catalog::CatalogFormat::Hang,
+                )
+                .await?;
+                loop {
+                    let entry = catalog
+                        .next()
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("catalog ended"))?;
+                    if let Some((name, config)) = entry.video.renditions.into_iter().next() {
+                        let mut decoder = moq_video::decode::Consumer::new(
+                            &broadcast,
+                            &config,
+                            name,
+                            Default::default(),
+                        )
+                        .await?;
+                        let frame = decoder
+                            .read()
+                            .await?
+                            .ok_or_else(|| anyhow::anyhow!("video ended"))?;
+                        let record = moqcast_diagnostics::media::publication()
+                            .expect("active local publisher");
+                        anyhow::ensure!(record.backend.is_some(), "no scoped encoder observation");
+                        println!(
+                            "publisher={:?} execution={:?} decoded={}x{} receiver={}",
+                            record.backend,
+                            record.execution(),
+                            frame.size().width,
+                            frame.size().height,
+                            decoder.name()
+                        );
+                        diagnostics
+                            .handle()
+                            .export(ExportRequest::new(directory.join("running.zip")))?;
+                        return Ok::<_, anyhow::Error>(());
+                    }
+                }
+            };
+            tokio::select! {
+                result = receive => result,
+                event = owner.recv() => match event {
+                    Event::Ended {result:Err(e),..}=>Err(anyhow::anyhow!("{}",e.message())),
+                    _ => Err(anyhow::anyhow!("publisher ended prematurely")),
+                },
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(25), exchange).await??;
+        owner.stop();
+        diagnostics
+            .handle()
+            .export(ExportRequest::new(directory.join("stopped.zip")))?;
+        Ok(())
+    }
 
     #[test]
     fn local_publication_path_is_canonical() {
@@ -446,7 +583,10 @@ mod tests {
 
         assert_eq!(
             resolve_display(84, &displays),
-            Some(moq_video::capture::Source::Display(Some("1".to_owned())))
+            Some((
+                moq_video::capture::Source::Display(Some("1".to_owned())),
+                (1920, 1080)
+            ))
         );
         assert_eq!(resolve_display(7, &displays), None);
     }

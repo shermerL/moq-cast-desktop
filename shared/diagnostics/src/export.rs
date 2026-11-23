@@ -28,6 +28,7 @@ impl Losses {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExportRequest {
     destination: PathBuf,
+    media: serde_json::Value,
 }
 
 impl ExportRequest {
@@ -35,6 +36,7 @@ impl ExportRequest {
     pub fn new(destination: impl Into<PathBuf>) -> Self {
         Self {
             destination: destination.into(),
+            media: crate::media::snapshot(),
         }
     }
 
@@ -130,6 +132,10 @@ pub(crate) fn export(
     archive.write_all(
         environment(build, minimal_export_metadata, active_filter, losses, now).as_bytes(),
     )?;
+    archive.start_file("media-session.json", options)?;
+    let mut summary = request.media;
+    crate::media::attach_build(&mut summary, build);
+    serde_json::to_writer_pretty(&mut archive, &summary).map_err(io::Error::other)?;
     archive.finish()?;
 
     Ok(ExportResult {

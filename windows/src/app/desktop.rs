@@ -451,6 +451,7 @@ impl MoqCastApp {
                     .max_height((content.bottom() - ui.cursor().top()).max(0.0))
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
+                        crate::app::media_diagnostics::sharing(ui, self.locale == Locale::Chinese);
                         v2::settings_row(ui, self.text("视频编码", "Video encoding"), |ui| {
                             let mut policy = self.snapshot.media.video_encoding;
                             ui.add_enabled_ui(editable, |ui| {
@@ -567,9 +568,12 @@ impl MoqCastApp {
                     self.text("播放已结束", "Playback ended")
                 },
                 detail: if self.snapshot.view.phase == ViewPhase::Failed {
-                    self.snapshot.view.last_error.as_deref().unwrap_or(
-                        self.text("请返回附近设备后重试。", "Return to Nearby and retry."),
+                    super::media_diagnostics::software_failure(
+                        self.snapshot.view.generation,
+                        self.locale == Locale::Chinese,
                     )
+                    .or(self.snapshot.view.last_error.as_deref())
+                    .unwrap_or(self.text("请返回附近设备后重试。", "Return to Nearby and retry."))
                 } else {
                     ""
                 },
@@ -598,7 +602,7 @@ impl MoqCastApp {
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .max_height(
                             (ctx.content_rect().height() - 160.0)
-                                .clamp(120.0, if self.developer_mode { 368.0 } else { 256.0 }),
+                                .clamp(120.0, if self.developer_mode { 456.0 } else { 344.0 }),
                         )
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -636,6 +640,7 @@ impl MoqCastApp {
                                         );
                                     });
                             });
+
                             self.diagnostics.show_settings(ui, self.locale);
                             v2::settings_row(
                                 ui,
@@ -643,6 +648,10 @@ impl MoqCastApp {
                                 |ui| {
                                     ui.checkbox(&mut self.developer_mode, "");
                                 },
+                            );
+                            crate::app::media_diagnostics::settings(
+                                ui,
+                                self.locale == Locale::Chinese,
                             );
                             if self.developer_mode {
                                 self.diagnostics.show_developer_settings(ui, self.locale);

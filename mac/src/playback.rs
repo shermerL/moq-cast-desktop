@@ -143,16 +143,19 @@ impl Owner {
         let (volume, volume_rx) = watch::channel(DEFAULT_PLAYER_VOLUME_PERCENT);
         self.cancel = Some(cancel);
         self.volume = Some(volume);
-        self.task = Some(tokio::spawn(run(PlaybackRun {
-            generation,
-            path,
-            broadcast,
-            cancel: cancelled,
-            events,
-            frames,
-            wake,
-            volume: volume_rx,
-        })));
+        self.task = Some(tokio::spawn(run(
+            PlaybackRun {
+                generation,
+                path,
+                broadcast,
+                cancel: cancelled,
+                events,
+                frames,
+                wake,
+                volume: volume_rx,
+            },
+            moqcast_diagnostics::media::Session::watch(generation),
+        )));
     }
 
     pub(crate) fn set_volume(&self, generation: u64, percent: u8) -> bool {
@@ -266,15 +269,32 @@ impl VideoSelection {
 
     async fn decoder(
         &self,
+        session: &moqcast_diagnostics::media::Session,
         broadcast: &moq_tokio::moq_net::broadcast::Consumer,
         max_age: Duration,
     ) -> anyhow::Result<moq_video::decode::Consumer> {
+        use tracing::Instrument;
         let mut options = moq_video::decode::Options::new();
         options.start = moq_video::decode::Start::Latest;
         options.max_delay = max_age;
-        moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), options)
-            .await
-            .map_err(Into::into)
+        if session.software() {
+            options.decoder.kind = moq_video::decode::Kind::Software;
+        }
+        session.format(
+            &self.config.codec.to_string(),
+            self.config.coded_width.zip(self.config.coded_height),
+        );
+        let decoder =
+            moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), options)
+                .instrument(session.decoder_span())
+                .await
+                .inspect_err(|error| {
+                    if matches!(error, moq_video::Error::NoDecoder(_)) {
+                        session.no_decoder();
+                    }
+                })?;
+        session.decoder(decoder.name());
+        Ok(decoder)
     }
 }
 
@@ -461,11 +481,18 @@ async fn wait_for_deadline(deadline: Option<Instant>) {
     }
 }
 
-async fn run(playback: PlaybackRun) {
+async fn run(playback: PlaybackRun, session: moqcast_diagnostics::media::Session) {
     let mut stopped = playback.cancel.clone();
     let generation = playback.generation;
     let events = playback.events.clone();
-    let result = run_inner(playback).await.map_err(|error| error.to_string());
+    let result = run_inner(playback, &session)
+        .await
+        .map_err(|error| error.to_string());
+    if *stopped.borrow() {
+        session.stopped();
+    } else {
+        session.finish(result.is_err());
+    }
     let event = Event::Ended { generation, result };
     let _ = send_event(&mut stopped, &events, event).await;
 }
@@ -486,7 +513,10 @@ async fn send_event(
     }
 }
 
-async fn run_inner(playback: PlaybackRun) -> anyhow::Result<()> {
+async fn run_inner(
+    playback: PlaybackRun,
+    session: &moqcast_diagnostics::media::Session,
+) -> anyhow::Result<()> {
     let PlaybackRun {
         generation,
         path,
@@ -533,7 +563,7 @@ async fn run_inner(playback: PlaybackRun) -> anyhow::Result<()> {
         let decoder = tokio::select! {
             biased;
             _ = wait_for_cancel(&mut cancel) => return Ok(()),
-            result = video.decoder(&broadcast, video_max_age) => result?,
+            result = video.decoder(session, &broadcast, video_max_age) => result?,
         };
         decoder_name = Some(decoder.name().to_owned());
         tracing::info!(
@@ -605,6 +635,10 @@ async fn run_inner(playback: PlaybackRun) -> anyhow::Result<()> {
                 let width = frame.display_width;
                 let height = frame.display_height;
                 let decoder_generation = frame.identity.decoder_generation;
+                if reported_decoder_generation != Some(decoder_generation) {
+                    let size = frame.video.size();
+                    session.frame_size(size.width, size.height);
+                }
                 frames.send_replace(Some(Arc::new(frame)));
                 wake();
                 if reported_decoder_generation != Some(decoder_generation) {
@@ -697,6 +731,7 @@ async fn run_inner(playback: PlaybackRun) -> anyhow::Result<()> {
                         });
                     }
                     if changes.video {
+                        session.format("", None);
                         if let Some(mut task) = video_task.take() {
                             tracing::info!(
                                 broadcast = path,
@@ -726,7 +761,7 @@ async fn run_inner(playback: PlaybackRun) -> anyhow::Result<()> {
                                     let error = error.expect("playback owns the presentation sender").clone().expect("nonempty presentation error");
                                     break Err(anyhow::anyhow!("video presentation failed: {error}"));
                                 }
-                                result = video.decoder(&broadcast, video_max_age) => result?,
+                                result = video.decoder(session, &broadcast, video_max_age) => result?,
                             };
                             decoder_name = Some(decoder.name().to_owned());
                             tracing::info!(
@@ -1077,16 +1112,19 @@ mod tests {
         let (cancel, cancelled) = watch::channel(false);
         let (frames, _) = watch::channel(None);
         let (_, volume) = watch::channel(DEFAULT_PLAYER_VOLUME_PERCENT);
-        let mut playback = std::pin::pin!(run(PlaybackRun {
-            generation: 1,
-            path: "moqcast.screen/test".into(),
-            broadcast,
-            cancel: cancelled,
-            events,
-            frames,
-            wake: Arc::new(|| {}),
-            volume,
-        }));
+        let mut playback = std::pin::pin!(run(
+            PlaybackRun {
+                generation: 1,
+                path: "moqcast.screen/test".into(),
+                broadcast,
+                cancel: cancelled,
+                events,
+                frames,
+                wake: Arc::new(|| {}),
+                volume,
+            },
+            moqcast_diagnostics::media::Session::watch(1)
+        ));
         let first = std::future::poll_fn(|cx| Poll::Ready(playback.as_mut().poll(cx))).await;
         assert!(
             first.is_pending(),
@@ -1107,6 +1145,45 @@ mod tests {
             constraints: 0xc0,
             level: 0x1f,
         })
+    }
+
+    #[tokio::test]
+    async fn strict_decoder_failure_allows_a_fresh_automatic_watch() {
+        use moqcast_diagnostics::media::{Session, set_next_software};
+        let producer = moq_tokio::moq_net::broadcast::Producer::new(Default::default());
+        let track = producer.create_track("screen", None).unwrap();
+        let broadcast = producer.consume();
+        let mut video = hang::catalog::Video::default();
+        video.renditions.insert("screen".into(), h264());
+        let mut selection = VideoSelection::from_catalog(video, None).unwrap().unwrap();
+        set_next_software(true);
+        let strict = Session::watch(701);
+        set_next_software(false);
+        let opened = selection
+            .decoder(&strict, &broadcast, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(opened.name(), "openh264");
+        drop(opened);
+        // No software AV1 implementation is compiled into this target. Exercise the
+        // actual decoder-open failure below the H.264 product catalog filter.
+        *selection.config = hang::catalog::VideoConfig::new(hang::catalog::AV1::default());
+        assert!(
+            selection
+                .decoder(&strict, &broadcast, Duration::ZERO)
+                .await
+                .is_err()
+        );
+        strict.finish(true);
+        let automatic = Session::watch(702);
+        assert!(!automatic.software());
+        *selection.config = h264();
+        let reopened = selection
+            .decoder(&automatic, &broadcast, Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(!reopened.name().is_empty());
+        drop(track);
     }
 
     #[test]

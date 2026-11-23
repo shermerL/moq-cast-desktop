@@ -3337,6 +3337,8 @@ dependencies = [
  "moqcast-ui",
  "rfd",
  "rubato",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "toml_edit",
@@ -3344,6 +3346,7 @@ dependencies = [
  "url",
  "windows",
  "winresource",
+ "zip",
 ]
 
 [[package]]

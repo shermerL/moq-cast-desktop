@@ -979,7 +979,20 @@ impl Supervisor {
             self.state.last_error = Some(error.to_string());
             return LoopAction::Changed;
         }
+        use moqcast_diagnostics::media::{Session, Source};
+        use tracing::Instrument;
+        let generation = self.publish.advance();
+        let category = if matches!(source, CaptureSource::PortalWindow) {
+            Source::Window
+        } else {
+            Source::Display
+        };
+        let session = Session::publish(generation, category, false);
+        if let CaptureSource::Display { width, height, .. } = &source {
+            session.format("avc1", Some((*width, *height)));
+        }
         let Some(local_peer_id) = self.state.local_peer_id.clone() else {
+            session.finish(true);
             self.state
                 .fail_publish("LAN services are not ready.")
                 .expect("publication preparation was active");
@@ -1000,6 +1013,7 @@ impl Supervisor {
         ) {
             Ok(publication) => publication,
             Err(error) => {
+                session.finish(true);
                 self.state
                     .fail_publish(error.to_string())
                     .expect("publication preparation was active");
@@ -1007,15 +1021,20 @@ impl Supervisor {
             }
         };
 
-        let generation = self.publish.advance();
         let events = self.operation_tx.clone();
         let (cancel, cancelled) = watch::channel(false);
         self.publish.cancel = Some(cancel);
         self.publish.task = Some(tokio::spawn(async move {
             let result = publication
                 .run(cancelled.clone())
+                .instrument(session.capture_span())
                 .await
                 .map_err(PublishFailure::from);
+            if *cancelled.borrow() {
+                session.stopped();
+            } else {
+                session.finish(result.is_err());
+            }
             PublishCompletion {
                 generation,
                 events,
@@ -1058,14 +1077,16 @@ impl Supervisor {
             self.state.last_error = Some(error.to_string());
             return LoopAction::Changed;
         }
+        let generation = self.view.advance();
+        let session = moqcast_diagnostics::media::Session::watch(generation);
         let Some(broadcast) = self.remote_screens.get(&path).cloned() else {
+            session.finish(true);
             self.state
                 .fail_view("The selected screen is no longer available.")
                 .expect("remote playback preparation was active");
             return LoopAction::Changed;
         };
 
-        let generation = self.view.advance();
         self.state.view_generation = generation;
         let events = self.operation_tx.clone();
         let frames = self.playback_tx.clone();
@@ -1074,7 +1095,7 @@ impl Supervisor {
         self.view.cancel = Some(cancel);
         self.view.volume = Some(volume);
         self.view.task = Some(tokio::spawn(run_view(
-            generation, path, broadcast, cancelled, events, frames, volume_rx,
+            session, path, broadcast, cancelled, events, frames, volume_rx,
         )));
         LoopAction::Changed
     }
@@ -1765,7 +1786,7 @@ fn watch_announcements(
 
 #[cfg(target_os = "linux")]
 async fn run_view(
-    generation: u64,
+    session: moqcast_diagnostics::media::Session,
     path: String,
     broadcast: moq_net::broadcast::Consumer,
     mut cancelled: watch::Receiver<bool>,
@@ -1773,9 +1794,10 @@ async fn run_view(
     frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
     volume: watch::Receiver<u8>,
 ) {
+    let generation = session.generation();
     let (playback_tx, mut playback_rx) = mpsc::channel(8);
     let playback = super::playback::run(
-        generation,
+        &session,
         path.clone(),
         broadcast,
         cancelled.clone(),
@@ -1872,7 +1894,10 @@ async fn run_view(
     }
     .map_err(|error| error.to_string());
 
-    if !cancelling && !*cancelled.borrow() {
+    if cancelling || *cancelled.borrow() {
+        session.stopped();
+    } else {
+        session.finish(result.is_err());
         tokio::select! {
             _ = events.send(OperationEvent::ViewEnded { generation, result }) => {}
             _ = cancelled.changed() => {}
@@ -1882,7 +1907,7 @@ async fn run_view(
 
 #[cfg(not(target_os = "linux"))]
 async fn run_view(
-    generation: u64,
+    session: moqcast_diagnostics::media::Session,
     _path: String,
     _broadcast: moq_net::broadcast::Consumer,
     _cancelled: watch::Receiver<bool>,
@@ -1890,6 +1915,8 @@ async fn run_view(
     _frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
     _volume: watch::Receiver<u8>,
 ) {
+    let generation = session.generation();
+    session.finish(true);
     let _ = events
         .send(OperationEvent::ViewEnded {
             generation,

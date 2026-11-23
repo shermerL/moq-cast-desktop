@@ -87,16 +87,33 @@ impl VideoSelection {
 
     async fn decoder(
         &self,
+        session: &moqcast_diagnostics::media::Session,
         broadcast: &moq_net::broadcast::Consumer,
         max_age: Duration,
     ) -> anyhow::Result<moq_video::decode::Consumer> {
+        use tracing::Instrument;
         let mut options = moq_video::decode::Options::new();
         options.max_delay = max_age;
         options.decoder.output = moq_video::Output::Cpu;
         options.start = moq_video::decode::Start::Latest;
-        moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), options)
-            .await
-            .map_err(Into::into)
+        if session.software() {
+            options.decoder.kind = moq_video::decode::Kind::Software;
+        }
+        session.format(
+            &self.config.codec.to_string(),
+            self.config.coded_width.zip(self.config.coded_height),
+        );
+        let decoder =
+            moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), options)
+                .instrument(session.decoder_span())
+                .await
+                .inspect_err(|error| {
+                    if matches!(error, moq_video::Error::NoDecoder(_)) {
+                        session.no_decoder();
+                    }
+                })?;
+        session.decoder(decoder.name());
+        Ok(decoder)
     }
 }
 
@@ -290,7 +307,7 @@ async fn wait_for_deadline(deadline: Option<Instant>) {
 
 /// Consume one screen broadcast until its catalog or video track ends.
 pub(super) async fn run(
-    view_generation: u64,
+    session: &moqcast_diagnostics::media::Session,
     path: String,
     broadcast: moq_net::broadcast::Consumer,
     mut cancel: watch::Receiver<bool>,
@@ -298,6 +315,7 @@ pub(super) async fn run(
     frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
     volume: watch::Receiver<u8>,
 ) -> anyhow::Result<()> {
+    let view_generation = session.generation();
     let mut catalog = tokio::select! {
         biased;
         _ = wait_for_cancel(&mut cancel) => return Ok(()),
@@ -315,7 +333,7 @@ pub(super) async fn run(
     let mut selection = Selection::from_catalog(first, None);
     let video_max_age = selection.video_max_age();
     let mut frames_sequence = FrameSequence::new(view_generation);
-    let mut video_scheduler = sync::VideoScheduler::default();
+    let mut video_scheduler = sync::VideoScheduler::<moq_video::Frame>::default();
     let (video_updates_tx, mut video_updates_rx) = mpsc::channel(VIDEO_EVENT_CAPACITY);
     let mut video_task = None;
     if let Some(video) = &selection.video {
@@ -323,7 +341,7 @@ pub(super) async fn run(
         let decoder = tokio::select! {
             biased;
             _ = wait_for_cancel(&mut cancel) => return Ok(()),
-            result = video.decoder(&broadcast, video_max_age) => result?,
+            result = video.decoder(session, &broadcast, video_max_age) => result?,
         };
         tracing::info!(
             view_generation,
@@ -370,6 +388,10 @@ pub(super) async fn run(
             let advance = video_scheduler.advance(media_clock.audio_anchor(), Instant::now());
             if let Some(decoded) = advance.due {
                 let (identity, first_view_frame) = frames_sequence.next();
+                if identity.sequence == 1 {
+                    let size = decoded.size();
+                    session.frame_size(size.width, size.height);
+                }
                 let frame = tokio::task::spawn_blocking(move || {
                     PlaybackFrame::from_video(decoded, identity)
                 })
@@ -442,6 +464,7 @@ pub(super) async fn run(
                         );
                     }
                     if changes.video {
+                        session.format("", None);
                         // The reader owns the non-cancel-safe read future and its
                         // decoder. Await its teardown before opening a replacement.
                         if let Some(mut task) = video_task.take() {
@@ -453,7 +476,7 @@ pub(super) async fn run(
                             let decoder = tokio::select! {
                                 biased;
                                 _ = wait_for_cancel(&mut cancel) => break Ok(()),
-                                result = video.decoder(&broadcast, video_max_age) => result?,
+                                result = video.decoder(session, &broadcast, video_max_age) => result?,
                             };
                             tracing::info!(
                                 view_generation,

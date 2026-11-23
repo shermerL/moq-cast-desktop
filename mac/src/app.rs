@@ -3,6 +3,8 @@
 mod capture_picker;
 mod desktop;
 mod diagnostics;
+#[path = "../../shared/diagnostics/native_ui.rs"]
+mod media_diagnostics;
 mod player;
 mod system_lifecycle;
 mod video;
