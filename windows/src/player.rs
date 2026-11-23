@@ -82,20 +82,11 @@ impl FullscreenState {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct LivePlayer {
     fullscreen: FullscreenState,
     layout_signature: Option<PlayerLayoutSignature>,
     chrome: v2::WatchChrome,
-}
-
-impl Default for LivePlayer {
-    fn default() -> Self {
-        Self {
-            fullscreen: FullscreenState::default(),
-            layout_signature: None,
-            chrome: Default::default(),
-        }
-    }
 }
 
 impl LivePlayer {

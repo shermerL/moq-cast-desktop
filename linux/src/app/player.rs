@@ -110,18 +110,10 @@ pub(super) enum PlayerAction {
     SetVolume { generation: u64, percent: u8 },
 }
 
+#[derive(Default)]
 pub(super) struct LivePlayer {
     fullscreen: FullscreenState,
     chrome: v2::WatchChrome,
-}
-
-impl Default for LivePlayer {
-    fn default() -> Self {
-        Self {
-            fullscreen: FullscreenState::default(),
-            chrome: Default::default(),
-        }
-    }
 }
 
 impl LivePlayer {
