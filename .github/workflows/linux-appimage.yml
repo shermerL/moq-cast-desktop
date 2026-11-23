@@ -6,6 +6,7 @@ on:
       - main
       - dev
     paths:
+      - ".github/scripts/prepare-ci-moq-source.py"
       - "linux/**"
       - "shared/build-provenance/**"
       - "shared/diagnostics/**"
@@ -16,6 +17,7 @@ on:
       - ".github/workflows/linux-appimage.yml"
   pull_request:
     paths:
+      - ".github/scripts/prepare-ci-moq-source.py"
       - "linux/**"
       - "shared/build-provenance/**"
       - "shared/diagnostics/**"
@@ -108,7 +110,8 @@ jobs:
             libxrandr-dev \
             nasm \
             patchelf \
-            pkg-config
+            pkg-config \
+            python3
 
       - name: Install Rust toolchain
         run: |
@@ -127,6 +130,10 @@ jobs:
           key: linux-cargo-${{ matrix.variant }}-rust1.95.0-${{ hashFiles('linux/Cargo.lock', 'shared/build-provenance/Cargo.lock', 'shared/diagnostics/Cargo.lock', 'shared/ui/Cargo.lock') }}
           restore-keys: |
             linux-cargo-${{ matrix.variant }}-rust1.95.0-
+
+      - name: Prepare locked MoQ sources
+        working-directory: .
+        run: python3 .github/scripts/prepare-ci-moq-source.py linux/Cargo.lock
 
       - name: Download AppImage tooling
         run: |
