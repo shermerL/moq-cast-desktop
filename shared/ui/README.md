@@ -57,7 +57,7 @@ Mac 页面组合的离线验收在 `mac/src/app/tests/layout.rs`，通过现有 
 
 `Action` / `ActionTone` 区分 Accent、Neutral 和 Danger；旧 `action` 保持 Accent 便捷入口。`dialog_header` 绘制标题并返回右侧关闭按钮的响应，调用者决定只关闭哪一个弹层。组件不直接停止媒体或网络。
 
-`assets/icons/tabler-x.svg` 来自 Frog S2 交付中的 Tabler Icons 3.49.0（MIT）；版权见同目录 `LICENSE.txt`。保留原始 SVG；运行时使用 `tabler-x.rgba` 的72×72白色RGBA像素，再按语义色着色，不引入 SVG 渲染依赖。重新生成时用 librsvg `rsvg-convert --stylesheet <含 svg { color: white; } 的 CSS> -w 72 -h 72 tabler-x.svg -o /tmp/tabler-x.png`，然后用 Pillow `Image.open(...).convert("RGBA").tobytes()` 写入RGBA文件。产物应为20736字节。
+桌面 v2 使用 Lucide 图标。原始 SVG 和 72×72 白色 RGBA 像素保存在 [assets/icons](assets/icons/README.md)，运行时按语义色着色。三端「设置 → 图标许可」可离线阅读 Lucide ISC 及 Feather 衍生图标的 MIT 声明。
 
 Mac 页面测试另外覆盖长播放错误时“停止并返回”可见，以及设置/详情/附近设备关闭确认中的 `×` 只关闭界面、不发送网络或媒体命令。实际网络、媒体与导出保存对话框仍需分别验证。
 

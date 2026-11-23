@@ -649,6 +649,7 @@ impl MoqCastApp {
                             } else {
                                 self.diagnostics.hide_window();
                             }
+                            v2::icon_licenses(ui, self.text("图标许可", "Icon licenses"));
                         });
                     close || self.diagnostics.visible()
                 });

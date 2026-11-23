@@ -1383,6 +1383,15 @@ pub fn player_info_control(
     )
 }
 
+/// Shows the notices for the bundled Lucide and Feather icons in desktop settings.
+pub fn icon_licenses(ui: &mut Ui, label: &str) {
+    egui::CollapsingHeader::new(label)
+        .id_salt("v2-icon-licenses")
+        .show(ui, |ui| {
+            ui.add(egui::Label::new(include_str!("../assets/icons/LICENSE.txt")).wrap());
+        });
+}
+
 /// A compact settings row with a stable label column and trailing controls.
 pub fn settings_row<R>(ui: &mut Ui, label: &str, contents: impl FnOnce(&mut Ui) -> R) -> R {
     let p = Palette::for_ui(ui);
