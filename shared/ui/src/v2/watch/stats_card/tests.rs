@@ -64,7 +64,7 @@ impl Player {
             pos2(0.0, if self.fullscreen { 0.0 } else { 62.0 }),
             self.screen.max,
         );
-        self.ctx.run_ui(
+        let mut output = self.ctx.run_ui(
             RawInput {
                 screen_rect: Some(self.screen),
                 time: Some(self.time),
@@ -95,7 +95,10 @@ impl Player {
                         });
                 }
             },
-        )
+        );
+        // The headless player has no renderer to apply texture updates.
+        output.textures_delta.clear();
+        output
     }
     fn click(&mut self, pos: Pos2) -> FullOutput {
         self.frame(vec![Event::PointerMoved(pos), press(pos, true)]);
