@@ -120,6 +120,7 @@ pub(in crate::app) fn show(
                 egui::ScrollArea::vertical().id_salt("sharing-options")
                     .max_height((content.bottom() - ui.cursor().top()).max(0.0))
                     .auto_shrink([false,true]).show(ui, |ui| {
+                crate::app::media_diagnostics::sharing(ui, locale == Locale::Chinese);
                 v2::settings_row(ui,locale.system_audio(),|ui| {ui.add_enabled(editable,egui::Checkbox::new(audio,"")).on_hover_text(locale.system_audio_hint());});
                 ui.label(egui::RichText::new(locale.text("系统声音包含设备输出，不限于所选窗口。","System sound includes device output, not only the selected window.")).small().color(p.muted));
                 if editable&&!snapshot.access().ready{v2::notice(ui,StatusTone::Neutral,locale.enable_nearby_before_sharing());}

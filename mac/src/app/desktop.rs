@@ -474,7 +474,7 @@ impl MoqCastApp {
     }
 
     fn s2_settings(&mut self, ui: &mut egui::Ui) {
-        let preferred_height = if self.developer_mode { 312.0 } else { 256.0 };
+        let preferred_height = if self.developer_mode { 410.0 } else { 346.0 };
         let body_height = (ui.ctx().content_rect().height() - 160.0).clamp(120.0, preferred_height);
         egui::ScrollArea::vertical()
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
@@ -515,6 +515,7 @@ impl MoqCastApp {
                                 ui.selectable_value(&mut self.locale, Locale::English, "English");
                             });
                     });
+
                     self.diagnostics.show_settings(ui, self.locale);
                     let developer = self.text("开发者模式", "Developer mode");
                     let previous = self.developer_mode;
@@ -528,6 +529,7 @@ impl MoqCastApp {
                             self.diagnostics.hide_window();
                         }
                     }
+                    crate::app::media_diagnostics::settings(ui, self.locale == Locale::Chinese);
                     if self.developer_mode
                         && self.diagnostics.show_developer_settings(ui, self.locale)
                     {
@@ -557,6 +559,7 @@ impl MoqCastApp {
             egui::ScrollArea::vertical().id_salt("v2-share-content")
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .max_height(body.height()).show(ui, |ui| {
+                crate::app::media_diagnostics::sharing(ui, self.locale == Locale::Chinese);
                 p.card().show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.label(RichText::new(self.text("共享来源", "Sharing source")).size(15.0).variation(b"wght", 600.0));
@@ -723,7 +726,12 @@ impl MoqCastApp {
                 "The action could not be sent. Try again.",
             )
         } else if failed {
-            snapshot.media_error.as_deref().unwrap_or(self.text(
+            super::media_diagnostics::software_failure(
+                snapshot.media.generation().value(),
+                self.locale == Locale::Chinese,
+            )
+            .or(snapshot.media_error.as_deref())
+            .unwrap_or(self.text(
                 "停止当前任务后，可重新选择附近设备。",
                 "End the current task, then select a nearby device again.",
             ))

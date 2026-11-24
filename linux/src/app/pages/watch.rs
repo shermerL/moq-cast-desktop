@@ -64,7 +64,12 @@ pub(in crate::app) fn show(
                         locale.text("播放已结束", "Playback ended")
                     },
                     detail: if failed {
-                        snapshot.watch_error.as_deref().unwrap_or_default()
+                        crate::app::media_diagnostics::software_failure(
+                            snapshot.view_generation,
+                            locale == Locale::Chinese,
+                        )
+                        .or(snapshot.watch_error.as_deref())
+                        .unwrap_or(locale.operation_failed())
                     } else {
                         ""
                     },

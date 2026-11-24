@@ -474,15 +474,32 @@ impl Selection {
 
     async fn decoder(
         &self,
+        session: &moqcast_diagnostics::media::Session,
         broadcast: &moq_tokio::moq_net::broadcast::Consumer,
         max_age: std::time::Duration,
     ) -> anyhow::Result<moq_video::decode::Consumer> {
+        use tracing::Instrument;
         let mut options = moq_video::decode::Options::new();
         options.start = moq_video::decode::Start::Latest;
         options.max_delay = max_age;
-        moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), options)
-            .await
-            .map_err(Into::into)
+        if session.software() {
+            options.decoder.kind = moq_video::decode::Kind::Software;
+        }
+        session.format(
+            &self.config.codec.to_string(),
+            self.config.coded_width.zip(self.config.coded_height),
+        );
+        let decoder =
+            moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), options)
+                .instrument(session.decoder_span())
+                .await
+                .inspect_err(|error| {
+                    if matches!(error, moq_video::Error::NoDecoder(_)) {
+                        session.no_decoder();
+                    }
+                })?;
+        session.decoder(decoder.name());
+        Ok(decoder)
     }
 }
 
@@ -518,7 +535,7 @@ async fn send_unless_cancelled<T: Send>(
 
 #[cfg(target_os = "windows")]
 pub(crate) async fn run(
-    generation: u64,
+    session: moqcast_diagnostics::media::Session,
     path: String,
     broadcast: moq_tokio::moq_net::broadcast::Consumer,
     events: mpsc::Sender<ViewEvent>,
@@ -527,7 +544,7 @@ pub(crate) async fn run(
     volume: watch::Receiver<u8>,
 ) {
     use moq_mux::catalog::Stream;
-
+    let generation = session.generation();
     let result = async {
         let mut catalog = tokio::select! {
             biased;
@@ -549,7 +566,7 @@ pub(crate) async fn run(
         let decoder = tokio::select! {
             biased;
             _ = wait_for_cancel(&mut cancel) => return Ok(()),
-            decoder = selection.decoder(&broadcast, video_max_age) => decoder?,
+            decoder = selection.decoder(&session, &broadcast, video_max_age) => decoder?,
         };
         let mut decoder_name = decoder.name().to_owned();
         let (video_updates_tx, mut video_updates_rx) = mpsc::channel(VIDEO_EVENT_CAPACITY);
@@ -603,6 +620,10 @@ pub(crate) async fn run(
             }
             if let Some(pending) = advance.frame {
                 last_delta_us = advance.delta_us;
+                if !decoder_ready {
+                    let size = pending.decoded.size();
+                    session.frame_size(size.width, size.height);
+                }
                 let frame = tokio::task::spawn_blocking(move || {
                     PlaybackFrame::from_video(
                         pending.decoded,
@@ -717,7 +738,7 @@ pub(crate) async fn run(
                     let next_decoder = tokio::select! {
                         biased;
                         _ = wait_for_cancel(&mut cancel) => None,
-                        decoder = next.decoder(&broadcast, video_max_age) => Some(decoder?),
+                        decoder = next.decoder(&session, &broadcast, video_max_age) => Some(decoder?),
                     };
                     let Some(next_decoder) = next_decoder else {
                         break Ok(());
@@ -833,6 +854,11 @@ pub(crate) async fn run(
     .await
     .map_err(|error: anyhow::Error| error.to_string());
 
+    if *cancel.borrow() {
+        session.stopped();
+    } else {
+        session.finish(result.is_err());
+    }
     let _ = send_unless_cancelled(
         &mut cancel,
         &events,
@@ -843,7 +869,7 @@ pub(crate) async fn run(
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) async fn run(
-    generation: u64,
+    session: moqcast_diagnostics::media::Session,
     _path: String,
     _broadcast: moq_tokio::moq_net::broadcast::Consumer,
     events: mpsc::Sender<ViewEvent>,
@@ -851,6 +877,8 @@ pub(crate) async fn run(
     _cancel: watch::Receiver<bool>,
     _volume: watch::Receiver<u8>,
 ) {
+    let generation = session.generation();
+    session.finish(true);
     let _ = events
         .send(ViewEvent::Ended {
             generation,

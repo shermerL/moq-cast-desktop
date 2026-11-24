@@ -5,7 +5,7 @@ use std::process::Command;
 use std::sync::mpsc;
 
 use eframe::egui::{self, RichText};
-use moqcast_diagnostics::{Entry, ExportRequest, FileStatus, Handle, LogLevel, Snapshot};
+use moqcast_diagnostics::{Entry, FileStatus, Handle, LogLevel, Snapshot};
 
 use super::Locale;
 
@@ -111,15 +111,14 @@ impl DiagnosticsUi {
             return;
         };
 
-        let handle = self.handle.clone();
+        let write_archive = self.handle.prepare_export(destination);
         let (tx, rx) = mpsc::channel();
         self.export_rx = Some(rx);
         self.status = None;
         if let Err(error) = std::thread::Builder::new()
             .name("moqcast-log-export".to_owned())
             .spawn(move || {
-                let result = handle
-                    .export(ExportRequest::new(destination))
+                let result = write_archive()
                     .map(|result| result.path().to_owned())
                     .map_err(|error| error.to_string());
                 let _ = tx.send(result);

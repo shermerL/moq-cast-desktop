@@ -353,21 +353,34 @@ struct PublishResources {
 }
 
 struct PublishCompletion {
-    generation: u64,
+    session: moqcast_diagnostics::media::Session,
     events: mpsc::Sender<OperationEvent>,
     cancelled: watch::Receiver<bool>,
 }
 
 impl PublishCompletion {
-    async fn report(mut self, result: Result<(), PublishFailure>) -> Result<(), String> {
-        // Stop joins this task while the operation queue is not being drained.
+    async fn run(
+        mut self,
+        publication: impl Future<Output = anyhow::Result<()>>,
+    ) -> Result<(), String> {
+        use tracing::Instrument;
+        let result = publication
+            .instrument(self.session.capture_span())
+            .await
+            .map_err(PublishFailure::from);
         let stopping = *self.cancelled.borrow();
+        if stopping && result.is_ok() {
+            self.session.stopped();
+        } else {
+            self.session.finish(result.is_err());
+        }
+        // Stop joins this task while the operation queue is not being drained.
         if !stopping {
             tokio::select! {
                 biased;
                 _ = self.cancelled.changed() => {},
                 _ = self.events.send(OperationEvent::PublishEnded {
-                    generation: self.generation,
+                    generation: self.session.generation(),
                     result: result.clone(),
                 }) => {},
             }
@@ -979,7 +992,19 @@ impl Supervisor {
             self.state.last_error = Some(error.to_string());
             return LoopAction::Changed;
         }
+        use moqcast_diagnostics::media::{Session, Source};
+        let generation = self.publish.advance();
+        let category = if matches!(source, CaptureSource::PortalWindow) {
+            Source::Window
+        } else {
+            Source::Display
+        };
+        let session = Session::publish(generation, category, false);
+        if let CaptureSource::Display { width, height, .. } = &source {
+            session.format("avc1", Some((*width, *height)));
+        }
         let Some(local_peer_id) = self.state.local_peer_id.clone() else {
+            session.finish(true);
             self.state
                 .fail_publish("LAN services are not ready.")
                 .expect("publication preparation was active");
@@ -1000,6 +1025,7 @@ impl Supervisor {
         ) {
             Ok(publication) => publication,
             Err(error) => {
+                session.finish(true);
                 self.state
                     .fail_publish(error.to_string())
                     .expect("publication preparation was active");
@@ -1007,23 +1033,15 @@ impl Supervisor {
             }
         };
 
-        let generation = self.publish.advance();
-        let events = self.operation_tx.clone();
         let (cancel, cancelled) = watch::channel(false);
+        let capture = publication.run(cancelled.clone());
+        let completion = PublishCompletion {
+            session,
+            events: self.operation_tx.clone(),
+            cancelled,
+        };
         self.publish.cancel = Some(cancel);
-        self.publish.task = Some(tokio::spawn(async move {
-            let result = publication
-                .run(cancelled.clone())
-                .await
-                .map_err(PublishFailure::from);
-            PublishCompletion {
-                generation,
-                events,
-                cancelled,
-            }
-            .report(result)
-            .await
-        }));
+        self.publish.task = Some(tokio::spawn(completion.run(capture)));
         self.state
             .finish_publish()
             .expect("publication preparation was active");
@@ -1058,14 +1076,16 @@ impl Supervisor {
             self.state.last_error = Some(error.to_string());
             return LoopAction::Changed;
         }
+        let generation = self.view.advance();
+        let session = moqcast_diagnostics::media::Session::watch(generation);
         let Some(broadcast) = self.remote_screens.get(&path).cloned() else {
+            session.finish(true);
             self.state
                 .fail_view("The selected screen is no longer available.")
                 .expect("remote playback preparation was active");
             return LoopAction::Changed;
         };
 
-        let generation = self.view.advance();
         self.state.view_generation = generation;
         let events = self.operation_tx.clone();
         let frames = self.playback_tx.clone();
@@ -1074,7 +1094,7 @@ impl Supervisor {
         self.view.cancel = Some(cancel);
         self.view.volume = Some(volume);
         self.view.task = Some(tokio::spawn(run_view(
-            generation, path, broadcast, cancelled, events, frames, volume_rx,
+            session, path, broadcast, cancelled, events, frames, volume_rx,
         )));
         LoopAction::Changed
     }
@@ -1765,7 +1785,7 @@ fn watch_announcements(
 
 #[cfg(target_os = "linux")]
 async fn run_view(
-    generation: u64,
+    session: moqcast_diagnostics::media::Session,
     path: String,
     broadcast: moq_net::broadcast::Consumer,
     mut cancelled: watch::Receiver<bool>,
@@ -1773,9 +1793,10 @@ async fn run_view(
     frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
     volume: watch::Receiver<u8>,
 ) {
+    let generation = session.generation();
     let (playback_tx, mut playback_rx) = mpsc::channel(8);
     let playback = super::playback::run(
-        generation,
+        &session,
         path.clone(),
         broadcast,
         cancelled.clone(),
@@ -1872,7 +1893,10 @@ async fn run_view(
     }
     .map_err(|error| error.to_string());
 
-    if !cancelling && !*cancelled.borrow() {
+    if cancelling || *cancelled.borrow() {
+        session.stopped();
+    } else {
+        session.finish(result.is_err());
         tokio::select! {
             _ = events.send(OperationEvent::ViewEnded { generation, result }) => {}
             _ = cancelled.changed() => {}
@@ -1882,7 +1906,7 @@ async fn run_view(
 
 #[cfg(not(target_os = "linux"))]
 async fn run_view(
-    generation: u64,
+    session: moqcast_diagnostics::media::Session,
     _path: String,
     _broadcast: moq_net::broadcast::Consumer,
     _cancelled: watch::Receiver<bool>,
@@ -1890,6 +1914,8 @@ async fn run_view(
     _frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
     _volume: watch::Receiver<u8>,
 ) {
+    let generation = session.generation();
+    session.finish(true);
     let _ = events
         .send(OperationEvent::ViewEnded {
             generation,
@@ -1910,8 +1936,12 @@ async fn reap_retired(tasks: &mut Vec<JoinHandle<()>>, errors: &mut crate::clean
 }
 
 #[cfg(test)]
+mod publication_diagnostics_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{PeerResources, PeerSession};
+    use moqcast_diagnostics::media::{Session, Source};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -2326,11 +2356,11 @@ mod tests {
                 .unwrap();
         }
         let completion = PublishCompletion {
-            generation,
+            session: Session::publish(generation, Source::Display, false),
             events: supervisor.operation_tx.clone(),
             cancelled,
         };
-        supervisor.publish.task = Some(tokio::spawn(completion.report(Ok(()))));
+        supervisor.publish.task = Some(tokio::spawn(completion.run(std::future::ready(Ok(())))));
         // Virtual-time deadline detects a deadlock without sleeping or relaxing production timeouts.
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
@@ -2528,11 +2558,11 @@ mod tests {
         let (cancel, cancelled) = watch::channel(false);
         let task = tokio::spawn(
             PublishCompletion {
-                generation: 2,
+                session: Session::publish(2, Source::Display, false),
                 events,
                 cancelled,
             }
-            .report(Err(PublishFailure::Other("close failed".to_owned()))),
+            .run(std::future::ready(Err(anyhow::anyhow!("close failed")))),
         );
         tokio::task::yield_now().await;
         assert!(!task.is_finished());

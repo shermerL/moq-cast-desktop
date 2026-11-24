@@ -220,7 +220,13 @@ fn player_info_snapshot(
     frame_identity: Option<PlaybackFrameIdentity>,
     muted: bool,
 ) -> PlayerInfoSnapshot<'_> {
+    let observed = moqcast_diagnostics::media::watch_record(view.generation);
     PlayerInfoSnapshot {
+        presentation: (frame_identity.is_some()).then_some("egui texture"),
+        requested_policy: observed.as_ref().map(|r| r.policy),
+        execution: observed.as_ref().and_then(|r| r.execution()),
+        hardware_refused: observed.as_ref().is_some_and(|r| r.hardware_refused),
+        awaiting_backend: observed.as_ref().is_some_and(|r| r.awaiting_backend()),
         generation: view.generation,
         source: None,
         frame: frame_identity.map(|identity| PlayerFrameSample {
@@ -228,9 +234,17 @@ fn player_info_snapshot(
             decoder_generation: identity.decoder_generation,
             sequence: identity.sequence,
         }),
-        resolution: view.width.zip(view.height),
-        video_codec: view.video_codec.as_deref(),
-        decoder: view.decoder.as_deref(),
+        resolution: view
+            .width
+            .zip(view.height)
+            .or_else(|| observed.as_ref().and_then(|r| r.dimensions)),
+        video_codec: view
+            .video_codec
+            .as_deref()
+            .or_else(|| observed.as_ref().and_then(|r| r.codec)),
+        decoder: observed
+            .as_ref()
+            .map_or(view.decoder.as_deref(), |r| r.backend),
         audio_state: player_audio_state(view.audio.phase, muted),
         audio_codec: view.audio.codec.as_deref(),
         audio_sample_rate: view.audio.sample_rate,

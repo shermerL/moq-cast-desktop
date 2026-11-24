@@ -193,13 +193,24 @@ fn paint_status(ui: &mut egui::Ui, surface: Rect, locale: Locale, phase: MediaPh
 }
 
 fn player_info_snapshot<'a>(view: &'a PlayerView<'a>, muted: bool) -> PlayerInfoSnapshot<'a> {
+    let observed = moqcast_diagnostics::media::watch_record(view.generation);
     PlayerInfoSnapshot {
+        presentation: (view.texture.is_some()).then_some("wgpu"),
+        requested_policy: observed.as_ref().map(|r| r.policy),
+        execution: observed.as_ref().and_then(|r| r.execution()),
+        hardware_refused: observed.as_ref().is_some_and(|r| r.hardware_refused),
+        awaiting_backend: observed.as_ref().is_some_and(|r| r.awaiting_backend()),
         generation: view.generation,
         source: Some(view.device_name),
         frame: view.frame,
-        resolution: view.texture.map(|texture| texture.display),
-        video_codec: view.video_codec,
-        decoder: view.decoder,
+        resolution: view
+            .texture
+            .map(|texture| texture.display)
+            .or_else(|| observed.as_ref().and_then(|r| r.dimensions)),
+        video_codec: view
+            .video_codec
+            .or_else(|| observed.as_ref().and_then(|r| r.codec)),
+        decoder: observed.as_ref().map_or(view.decoder, |r| r.backend),
         audio_state: player_audio_state(view.audio.phase, muted),
         audio_codec: view.audio.codec.as_deref(),
         audio_sample_rate: view.audio.sample_rate,

@@ -213,16 +213,30 @@ fn player_info_snapshot<'a>(
     texture: Option<&TextureHandle>,
     muted: bool,
 ) -> PlayerInfoSnapshot<'a> {
+    let observed = moqcast_diagnostics::media::watch_record(playback.generation);
     PlayerInfoSnapshot {
+        presentation: (texture.is_some()).then_some("egui texture"),
+        requested_policy: observed.as_ref().map(|r| r.policy),
+        execution: observed.as_ref().and_then(|r| r.execution()),
+        hardware_refused: observed.as_ref().is_some_and(|r| r.hardware_refused),
+        awaiting_backend: observed.as_ref().is_some_and(|r| r.awaiting_backend()),
         generation: playback.generation,
         source: Some(mode.device()),
         frame: playback.frame,
-        resolution: texture.map(|texture| {
-            let [width, height] = texture.size();
-            (width as u32, height as u32)
-        }),
-        video_codec: playback.video.codec.as_deref(),
-        decoder: playback.video.decoder.as_deref(),
+        resolution: texture
+            .map(|texture| {
+                let [width, height] = texture.size();
+                (width as u32, height as u32)
+            })
+            .or_else(|| observed.as_ref().and_then(|r| r.dimensions)),
+        video_codec: playback
+            .video
+            .codec
+            .as_deref()
+            .or_else(|| observed.as_ref().and_then(|r| r.codec)),
+        decoder: observed
+            .as_ref()
+            .map_or(playback.video.decoder.as_deref(), |r| r.backend),
         audio_state: player_audio_state(mode.audio().phase, muted),
         audio_codec: mode.audio().codec.as_deref(),
         audio_sample_rate: mode.audio().sample_rate,

@@ -12,7 +12,7 @@ pub(in crate::app) fn show(
 ) -> Option<Locale> {
     let mut selected = locale;
     let height = (ui.ctx().content_rect().height() - 160.0)
-        .clamp(120.0, if *developer { 368.0 } else { 256.0 });
+        .clamp(120.0, if *developer { 456.0 } else { 344.0 });
     egui::ScrollArea::vertical()
         .id_salt("v2-settings-content")
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
@@ -42,6 +42,7 @@ pub(in crate::app) fn show(
                         ui.selectable_value(&mut selected, Locale::English, "English");
                     });
             });
+
             let available = matches!(diagnostics.file_status(), FileStatus::Available(_));
             v2::settings_row(ui, locale.text("日志", "Logs"), |ui| {
                 if (Action {
@@ -85,6 +86,7 @@ pub(in crate::app) fn show(
             if previous && !*developer {
                 diagnostics.hide_window();
             }
+            crate::app::media_diagnostics::settings(ui, locale == Locale::Chinese);
             if *developer {
                 if diagnostics.dropped_count() > 0 {
                     v2::notice(

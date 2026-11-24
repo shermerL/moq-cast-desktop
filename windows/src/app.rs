@@ -1,4 +1,6 @@
 mod desktop;
+#[path = "../../shared/diagnostics/native_ui.rs"]
+mod media_diagnostics;
 // Native state and platform commands; visual composition lives in desktop.
 
 #[cfg(test)]

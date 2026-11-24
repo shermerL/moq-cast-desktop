@@ -5,6 +5,7 @@
 mod config;
 mod export;
 mod filter;
+pub mod media;
 mod output;
 mod quic_context;
 mod ring;
@@ -14,7 +15,7 @@ use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -109,6 +110,16 @@ impl Handle {
     /// Return the recommended timestamped ZIP filename for a local export.
     pub fn recommended_export_name(&self) -> String {
         export::recommended_name(OffsetDateTime::now_utc())
+    }
+
+    /// Capture the media summary at destination confirmation and return the work for the export thread.
+    pub fn prepare_export(
+        &self,
+        destination: PathBuf,
+    ) -> impl FnOnce() -> Result<ExportResult, ExportError> + Send + 'static {
+        let handle = self.clone();
+        let request = ExportRequest::new(destination);
+        move || handle.export(request)
     }
 
     /// Flush logs and write them with environment metadata to a local ZIP.
@@ -267,6 +278,13 @@ where
         id: &tracing::span::Id,
         context: Context<'_, S>,
     ) {
+        if attributes.metadata().target() == "moqcast_diagnostics::media"
+            && let Some(span) = context.span(id)
+        {
+            let mut media_id = media::MediaId::default();
+            attributes.record(&mut media_id);
+            span.extensions_mut().insert(media_id);
+        }
         if self.filter.detailed()
             && filter::quic_detail_target(attributes.metadata().target())
             && let Some(span) = context.span(id)
@@ -291,6 +309,36 @@ where
     }
 
     fn on_event(&self, event: &Event<'_>, context: Context<'_, S>) {
+        // The locked capture driver reports the opened Sink name as a typed field
+        // after demand opens the encoder. Do not collect the device label or probe events.
+        let metadata = event.metadata();
+        let fields = metadata.fields();
+        let opened = metadata.target() == "moq_video::encode::producer"
+            && fields.field("device").is_some()
+            && fields.field("encoder").is_some();
+        let fallback = metadata.target() == "moq_video::decode::backend"
+            && fields.field("decoder").is_some()
+            && fields.field("refused").is_some();
+        if (opened || fallback)
+            && let Some(scope) = context.event_scope(event)
+            && let Some(id) = scope
+                .filter(|span| {
+                    span.name()
+                        == if opened {
+                            "publication"
+                        } else {
+                            "decoder_open"
+                        }
+                })
+                .filter_map(|s| s.extensions().get::<media::MediaId>().map(|id| id.0))
+                .next()
+        {
+            if opened {
+                event.record(&mut media::MediaEncoder(id));
+            } else {
+                media::decoder_fallback(id);
+            }
+        }
         // The log bridge stores the original target in fields; static metadata
         // only says "log". Apply the same policy to the recovered source target.
         let normalized = event.normalized_metadata();
