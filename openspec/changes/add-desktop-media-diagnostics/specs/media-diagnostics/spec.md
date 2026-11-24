@@ -55,3 +55,9 @@
 - **WHEN** 正常停止正在进行的共享并马上再次共享
 - **THEN** 第一轮保留 `stopped`，第二轮使用独立标识，旧完成事件不能终止第二轮
 - **AND** 非主动中断保留 `cancelled`，捕获错误保留 `failed`；已确定的结果不因迟来的停止请求而改变
+
+#### Scenario: Linux 发布结束后导出
+
+- **WHEN** Linux 发布结束，用户导出包含该会话的诊断 ZIP
+- **THEN** 发布或清理返回错误时，`media-session.json` 的 `last_ended.status` 为 `failed`，包括用户已请求停止的情况
+- **AND** 发布和清理均成功时，主动停止记录为 `stopped`，自然结束记录为 `ended`

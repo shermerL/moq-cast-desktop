@@ -353,21 +353,34 @@ struct PublishResources {
 }
 
 struct PublishCompletion {
-    generation: u64,
+    session: moqcast_diagnostics::media::Session,
     events: mpsc::Sender<OperationEvent>,
     cancelled: watch::Receiver<bool>,
 }
 
 impl PublishCompletion {
-    async fn report(mut self, result: Result<(), PublishFailure>) -> Result<(), String> {
-        // Stop joins this task while the operation queue is not being drained.
+    async fn run(
+        mut self,
+        publication: impl Future<Output = anyhow::Result<()>>,
+    ) -> Result<(), String> {
+        use tracing::Instrument;
+        let result = publication
+            .instrument(self.session.capture_span())
+            .await
+            .map_err(PublishFailure::from);
         let stopping = *self.cancelled.borrow();
+        if stopping && result.is_ok() {
+            self.session.stopped();
+        } else {
+            self.session.finish(result.is_err());
+        }
+        // Stop joins this task while the operation queue is not being drained.
         if !stopping {
             tokio::select! {
                 biased;
                 _ = self.cancelled.changed() => {},
                 _ = self.events.send(OperationEvent::PublishEnded {
-                    generation: self.generation,
+                    generation: self.session.generation(),
                     result: result.clone(),
                 }) => {},
             }
@@ -980,7 +993,6 @@ impl Supervisor {
             return LoopAction::Changed;
         }
         use moqcast_diagnostics::media::{Session, Source};
-        use tracing::Instrument;
         let generation = self.publish.advance();
         let category = if matches!(source, CaptureSource::PortalWindow) {
             Source::Window
@@ -1021,28 +1033,15 @@ impl Supervisor {
             }
         };
 
-        let events = self.operation_tx.clone();
         let (cancel, cancelled) = watch::channel(false);
+        let capture = publication.run(cancelled.clone());
+        let completion = PublishCompletion {
+            session,
+            events: self.operation_tx.clone(),
+            cancelled,
+        };
         self.publish.cancel = Some(cancel);
-        self.publish.task = Some(tokio::spawn(async move {
-            let result = publication
-                .run(cancelled.clone())
-                .instrument(session.capture_span())
-                .await
-                .map_err(PublishFailure::from);
-            if *cancelled.borrow() {
-                session.stopped();
-            } else {
-                session.finish(result.is_err());
-            }
-            PublishCompletion {
-                generation,
-                events,
-                cancelled,
-            }
-            .report(result)
-            .await
-        }));
+        self.publish.task = Some(tokio::spawn(completion.run(capture)));
         self.state
             .finish_publish()
             .expect("publication preparation was active");
@@ -1937,8 +1936,12 @@ async fn reap_retired(tasks: &mut Vec<JoinHandle<()>>, errors: &mut crate::clean
 }
 
 #[cfg(test)]
+mod publication_diagnostics_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{PeerResources, PeerSession};
+    use moqcast_diagnostics::media::{Session, Source};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -2353,11 +2356,11 @@ mod tests {
                 .unwrap();
         }
         let completion = PublishCompletion {
-            generation,
+            session: Session::publish(generation, Source::Display, false),
             events: supervisor.operation_tx.clone(),
             cancelled,
         };
-        supervisor.publish.task = Some(tokio::spawn(completion.report(Ok(()))));
+        supervisor.publish.task = Some(tokio::spawn(completion.run(std::future::ready(Ok(())))));
         // Virtual-time deadline detects a deadlock without sleeping or relaxing production timeouts.
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
@@ -2555,11 +2558,11 @@ mod tests {
         let (cancel, cancelled) = watch::channel(false);
         let task = tokio::spawn(
             PublishCompletion {
-                generation: 2,
+                session: Session::publish(2, Source::Display, false),
                 events,
                 cancelled,
             }
-            .report(Err(PublishFailure::Other("close failed".to_owned()))),
+            .run(std::future::ready(Err(anyhow::anyhow!("close failed")))),
         );
         tokio::task::yield_now().await;
         assert!(!task.is_finished());
