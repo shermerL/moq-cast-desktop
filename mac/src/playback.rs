@@ -100,6 +100,7 @@ impl AudioSnapshot {
 
 #[derive(Default)]
 pub(crate) struct Owner {
+    stats: moqcast_playback_stats::PlaybackStats,
     task: Option<JoinHandle<()>>,
     cancel: Option<watch::Sender<bool>>,
     volume: Option<watch::Sender<u8>>,
@@ -107,7 +108,6 @@ pub(crate) struct Owner {
 }
 
 struct PlaybackRun {
-    generation: u64,
     path: String,
     broadcast: moq_tokio::moq_net::broadcast::Consumer,
     cancel: watch::Receiver<bool>,
@@ -118,10 +118,21 @@ struct PlaybackRun {
 }
 
 impl Owner {
+    pub(crate) fn with_stats(stats: moqcast_playback_stats::PlaybackStats) -> Self {
+        Self {
+            stats,
+            task: None,
+            cancel: None,
+            volume: None,
+            generation: 0,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn with_task_for_test(task: JoinHandle<()>) -> Self {
         Self {
             task: Some(task),
+            stats: Default::default(),
             cancel: None,
             volume: None,
             generation: 0,
@@ -145,7 +156,6 @@ impl Owner {
         self.volume = Some(volume);
         self.task = Some(tokio::spawn(run(
             PlaybackRun {
-                generation,
                 path,
                 broadcast,
                 cancel: cancelled,
@@ -154,7 +164,7 @@ impl Owner {
                 wake,
                 volume: volume_rx,
             },
-            moqcast_diagnostics::media::Session::watch(generation),
+            crate::watch_session::WatchSession::new(generation, &self.stats),
         )));
     }
 
@@ -423,13 +433,17 @@ impl VideoTask {
     fn spawn(
         generation: u64,
         mut decoder: moq_video::decode::Consumer,
+        counter: moqcast_playback_stats::DecoderCounter,
         updates: &mpsc::Sender<VideoUpdate>,
     ) -> Self {
         let updates = updates.clone();
         let task = tokio::spawn(async move {
             loop {
                 let event = match decoder.read().await {
-                    Ok(Some(frame)) => VideoEvent::Frame(frame),
+                    Ok(Some(frame)) => {
+                        counter.decoded();
+                        VideoEvent::Frame(frame)
+                    }
                     Ok(None) => VideoEvent::Ended,
                     Err(error) => VideoEvent::Failed(error.to_string()),
                 };
@@ -481,18 +495,14 @@ async fn wait_for_deadline(deadline: Option<Instant>) {
     }
 }
 
-async fn run(playback: PlaybackRun, session: moqcast_diagnostics::media::Session) {
+async fn run(playback: PlaybackRun, session: crate::watch_session::WatchSession) {
     let mut stopped = playback.cancel.clone();
-    let generation = playback.generation;
+    let generation = session.media.generation();
     let events = playback.events.clone();
     let result = run_inner(playback, &session)
         .await
         .map_err(|error| error.to_string());
-    if *stopped.borrow() {
-        session.stopped();
-    } else {
-        session.finish(result.is_err());
-    }
+    session.finish(&result, *stopped.borrow());
     let event = Event::Ended { generation, result };
     let _ = send_event(&mut stopped, &events, event).await;
 }
@@ -515,10 +525,12 @@ async fn send_event(
 
 async fn run_inner(
     playback: PlaybackRun,
-    session: &moqcast_diagnostics::media::Session,
+    watch: &crate::watch_session::WatchSession,
 ) -> anyhow::Result<()> {
+    let stats = &watch.stats;
+    let session = &watch.media;
+    let generation = session.generation();
     let PlaybackRun {
-        generation,
         path,
         broadcast,
         mut cancel,
@@ -577,6 +589,7 @@ async fn run_inner(
         video_task = Some(VideoTask::spawn(
             sequence.decoder_generation,
             decoder,
+            stats.decoder(sequence.decoder_generation),
             &video_tx,
         ));
     } else {
@@ -732,6 +745,7 @@ async fn run_inner(
                     }
                     if changes.video {
                         session.format("", None);
+                        stats.clear_decoder();
                         if let Some(mut task) = video_task.take() {
                             tracing::info!(
                                 broadcast = path,
@@ -775,6 +789,7 @@ async fn run_inner(
                             video_task = Some(VideoTask::spawn(
                                 sequence.decoder_generation,
                                 decoder,
+                                stats.decoder(sequence.decoder_generation),
                                 &video_tx,
                             ));
                         } else {
@@ -864,6 +879,7 @@ async fn run_inner(
                             }
                         }
                         VideoEventDisposition::WaitForCatalog => {
+                            stats.clear_decoder();
                             if let Some(mut task) = video_task.take() {
                                 task.stop().await;
                             }
@@ -890,6 +906,7 @@ async fn run_inner(
     }
     .await;
 
+    stats.clear_decoder();
     if let Some(mut task) = video_task {
         tracing::info!(
             broadcast = path,
@@ -1114,7 +1131,6 @@ mod tests {
         let (_, volume) = watch::channel(DEFAULT_PLAYER_VOLUME_PERCENT);
         let mut playback = std::pin::pin!(run(
             PlaybackRun {
-                generation: 1,
                 path: "moqcast.screen/test".into(),
                 broadcast,
                 cancel: cancelled,
@@ -1123,7 +1139,7 @@ mod tests {
                 wake: Arc::new(|| {}),
                 volume,
             },
-            moqcast_diagnostics::media::Session::watch(1)
+            crate::watch_session::WatchSession::new(1, &Default::default())
         ));
         let first = std::future::poll_fn(|cx| Poll::Ready(playback.as_mut().poll(cx))).await;
         assert!(
@@ -1206,6 +1222,7 @@ mod tests {
     fn stale_view_generation_cannot_change_current_playback_volume() {
         let (volume, mut current) = watch::channel(DEFAULT_PLAYER_VOLUME_PERCENT);
         let owner = Owner {
+            stats: Default::default(),
             task: None,
             cancel: None,
             volume: Some(volume),

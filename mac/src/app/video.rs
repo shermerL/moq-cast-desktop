@@ -67,14 +67,14 @@ impl Presenter {
         &mut self,
         generation: Option<u64>,
         frame: Option<&Frame>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<FrameIdentity>> {
         if self.generation != generation {
             self.clear();
             self.generation = generation;
             self.failed = false;
         }
         let (Some(generation), Some(frame)) = (generation, frame) else {
-            return Ok(());
+            return Ok(None);
         };
         if self.failed
             || frame.identity.view_generation != generation
@@ -82,7 +82,7 @@ impl Presenter {
                 .identity
                 .is_some_and(|identity| identity >= frame.identity)
         {
-            return Ok(());
+            return Ok(None);
         }
         if self.identity.is_some_and(|identity| {
             identity.decoder_generation != frame.identity.decoder_generation
@@ -95,7 +95,7 @@ impl Presenter {
             return Err(error);
         }
         self.identity = Some(frame.identity);
-        Ok(())
+        Ok(self.identity)
     }
 
     fn present(&mut self, frame: &Frame) -> anyhow::Result<()> {

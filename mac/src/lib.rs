@@ -8,6 +8,10 @@ mod cleanup;
 #[path = "../../shared/connection-bandwidth.rs"]
 mod bandwidth;
 
+#[cfg(feature = "watch")]
+#[path = "../../shared/watch-session.rs"]
+mod watch_session;
+
 #[cfg(feature = "app")]
 mod app;
 #[cfg(any(feature = "app", test))]

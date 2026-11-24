@@ -57,7 +57,13 @@ async fn publish_lan_watch_test_card() -> anyhow::Result<()> {
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut index = 0u64;
     let stop_file = std::env::var_os("MOQCAST_WATCH_FIXTURE_STOP");
-    let deadline = tokio::time::sleep(Duration::from_secs(600));
+    // Extended runs use the same continuously changing source for every comparison.
+    let lifetime = std::env::var("MOQCAST_WATCH_FIXTURE_SECS")
+        .ok()
+        .map(|s| s.parse::<u64>())
+        .transpose()?
+        .unwrap_or(600);
+    let deadline = tokio::time::sleep(Duration::from_secs(lifetime));
     tokio::pin!(deadline);
     eprintln!(
         "Nearby test card ready: 960x540 H.264, audio track = {}",

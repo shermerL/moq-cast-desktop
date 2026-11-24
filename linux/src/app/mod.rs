@@ -140,6 +140,7 @@ impl MoqCastApp {
             snapshot,
             playback_frame_sample(self.playback_identity),
             self.playback_texture.as_ref(),
+            &self.runtime.stats,
             &mut self.player,
         ) {
             Some(pages::watch::WatchAction::Command(command)) => self.send(command),
@@ -152,9 +153,15 @@ impl eframe::App for MoqCastApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
         let snapshot = self.runtime.snapshot();
-        if let Some(frame) = self.runtime.playback_frame()
-            && frame.identity.view_generation == snapshot.view_generation
-            && Some(frame.identity) != self.playback_identity
+        let accepts_frames = matches!(
+            snapshot.media,
+            MediaState::Viewing { .. } | MediaState::PreparingView { .. }
+        );
+        if accepts_frames
+            && let Some(frame) = self.runtime.playback_frame()
+            && frame
+                .identity
+                .is_new_for(snapshot.view_generation, self.playback_identity)
         {
             let image =
                 egui::ColorImage::from_rgba_unmultiplied([frame.width, frame.height], &frame.rgba);
@@ -168,13 +175,16 @@ impl eframe::App for MoqCastApp {
                 ));
             }
             self.playback_identity = Some(frame.identity);
+            self.runtime.stats.accepted(
+                frame.identity.view_generation,
+                frame.identity.decoder_generation,
+                frame.identity.sequence,
+            );
         }
-        if !matches!(
-            snapshot.media,
-            MediaState::Viewing { .. } | MediaState::PreparingView { .. }
-        ) || self
-            .playback_identity
-            .is_some_and(|id| id.view_generation != snapshot.view_generation)
+        if !accepts_frames
+            || self
+                .playback_identity
+                .is_some_and(|id| id.view_generation != snapshot.view_generation)
         {
             self.playback_texture = None;
             self.playback_identity = None;

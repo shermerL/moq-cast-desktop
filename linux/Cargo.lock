@@ -3211,6 +3211,7 @@ dependencies = [
  "moqcast-build-provenance",
  "moqcast-diagnostics",
  "moqcast-lan-state",
+ "moqcast-playback-stats",
  "moqcast-ui",
  "pipewire",
  "rfd",
@@ -3570,10 +3571,18 @@ name = "moqcast-lan-state"
 version = "0.1.0"
 
 [[package]]
+name = "moqcast-playback-stats"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "moqcast-ui"
 version = "0.2.0"
 dependencies = [
  "egui",
+ "moqcast-playback-stats",
 ]
 
 [[package]]

@@ -29,6 +29,7 @@ watch = [
     "dep:hang",
     "dep:moq-audio",
     "dep:moq-mux",
+    "dep:moqcast-playback-stats",
     "dep:moq-video",
     "moq-audio/playback",
 ]
@@ -46,6 +47,7 @@ foundation = [
 ]
 
 [dependencies]
+moqcast-playback-stats = { path = "../shared/playback-stats", optional = true }
 moqcast-lan-state = { path = "../shared/lan-state" }
 anyhow = "1"
 eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wgpu"], optional = true }

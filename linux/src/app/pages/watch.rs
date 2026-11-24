@@ -17,6 +17,7 @@ pub(in crate::app) fn show(
     snapshot: &AppSnapshot,
     frame: Option<PlayerFrameSample>,
     playback: Option<&egui::TextureHandle>,
+    stats: &moqcast_playback_stats::PlaybackStats,
     player: &mut LivePlayer,
 ) -> Option<WatchAction> {
     match &snapshot.media {
@@ -27,6 +28,7 @@ pub(in crate::app) fn show(
                 PlayerPlayback {
                     generation: snapshot.view_generation,
                     frame,
+                    stats,
                     video: &snapshot.remote_video,
                 },
                 PlayerMode::Preparing {
@@ -43,6 +45,7 @@ pub(in crate::app) fn show(
                 PlayerPlayback {
                     generation: snapshot.view_generation,
                     frame,
+                    stats,
                     video: &snapshot.remote_video,
                 },
                 PlayerMode::Viewing {

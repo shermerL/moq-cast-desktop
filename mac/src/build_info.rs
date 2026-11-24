@@ -76,6 +76,7 @@ mod tests {
                 "dep:hang",
                 "dep:moq-audio",
                 "dep:moq-mux",
+                "dep:moqcast-playback-stats",
                 "dep:moq-video",
                 "moq-audio/playback",
             ],

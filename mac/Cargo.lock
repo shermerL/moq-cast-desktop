@@ -3233,6 +3233,7 @@ dependencies = [
  "moqcast-build-provenance",
  "moqcast-diagnostics",
  "moqcast-lan-state",
+ "moqcast-playback-stats",
  "moqcast-ui",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -3248,10 +3249,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "moqcast-playback-stats"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "moqcast-ui"
 version = "0.2.0"
 dependencies = [
  "egui",
+ "moqcast-playback-stats",
 ]
 
 [[package]]

@@ -54,6 +54,7 @@ pub(super) enum PlayerAction {
 }
 
 pub(super) struct PlayerView<'a> {
+    pub(super) stats: &'a moqcast_playback_stats::PlaybackStats,
     pub(super) locale: Locale,
     pub(super) generation: u64,
     pub(super) phase: MediaPhase,
@@ -200,6 +201,7 @@ fn player_info_snapshot<'a>(view: &'a PlayerView<'a>, muted: bool) -> PlayerInfo
         execution: observed.as_ref().and_then(|r| r.execution()),
         hardware_refused: observed.as_ref().is_some_and(|r| r.hardware_refused),
         awaiting_backend: observed.as_ref().is_some_and(|r| r.awaiting_backend()),
+        stats: Some(view.stats),
         generation: view.generation,
         source: Some(view.device_name),
         frame: view.frame,

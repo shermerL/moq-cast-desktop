@@ -1234,11 +1234,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "moqcast-playback-stats"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "moqcast-ui"
 version = "0.2.0"
 dependencies = [
  "eframe",
  "egui",
+ "moqcast-playback-stats",
  "sha2",
  "toml_edit",
 ]

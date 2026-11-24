@@ -549,16 +549,7 @@ impl MoqCastApp {
     }
     fn watch(&mut self, ui: &mut egui::Ui) {
         if watch_projection(self.snapshot.view.phase) == WatchProjection::Player {
-            let source = self.watch_source();
-            let action = self.player.show(
-                ui,
-                self.locale,
-                &self.snapshot.view,
-                source.as_deref(),
-                self.playback_texture.as_ref(),
-                self.playback_identity,
-            );
-            self.handle_player_action(action);
+            self.show_player(ui);
         } else if v2::canvas_message(
             ui,
             v2::CanvasMessage {
@@ -807,6 +798,7 @@ mod tests {
     fn fixture() -> (MoqCastApp, tokio::sync::mpsc::Receiver<RuntimeCommand>) {
         let (runtime, commands) = RuntimeOwner::isolated_for_ui_test(
             tokio::sync::watch::channel(RuntimeSnapshot::default()).1,
+            tokio::sync::watch::channel(None).1,
         );
         let diagnostics = moqcast_diagnostics::init(moqcast_diagnostics::Config::without_file(
             moqcast_diagnostics::BuildInfo::new("test"),
@@ -841,6 +833,70 @@ mod tests {
             commands,
         )
     }
+    #[test]
+    fn texture_updates_count_only_first_acceptance_of_each_visible_slot_identity() {
+        use crate::playback::PlaybackFrame;
+        use std::{
+            sync::Arc,
+            time::{Duration, Instant},
+        };
+
+        let (mut app, _) = fixture();
+        let (slots, playback) = tokio::sync::watch::channel(None);
+        let (runtime, _) = RuntimeOwner::isolated_for_ui_test(
+            tokio::sync::watch::channel(RuntimeSnapshot::default()).1,
+            playback,
+        );
+        app.runtime = runtime;
+        app.snapshot.view.generation = 3;
+        app.snapshot.view.phase = ViewPhase::Viewing;
+        let stats = app.runtime.playback_stats.clone();
+        let session = stats.begin(3);
+        let _decoder = session.decoder(1);
+        stats.set_sampling(3, true);
+        let ctx = egui::Context::default();
+        let frame = |view_generation, sequence| {
+            Arc::new(PlaybackFrame {
+                identity: PlaybackFrameIdentity {
+                    view_generation,
+                    decoder_generation: 1,
+                    sequence,
+                },
+                timestamp_us: u128::from(sequence),
+                width: 1,
+                height: 1,
+                display_width: 1,
+                display_height: 1,
+                rgba: vec![0, 0, 0, 255],
+            })
+        };
+        slots.send_replace(Some(frame(3, 1)));
+        slots.send_replace(Some(frame(3, 2))); // Replaced the first frame before the UI read it.
+        app.update_playback_texture(&ctx);
+        app.update_playback_texture(&ctx);
+        slots.send_replace(Some(frame(2, 20)));
+        app.update_playback_texture(&ctx);
+        slots.send_replace(Some(frame(3, 3)));
+        app.update_playback_texture(&ctx);
+        assert_eq!(app.playback_identity, Some(frame(3, 3).identity));
+        assert!(app.playback_texture.is_some());
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let samples = stats.snapshot(3).unwrap().samples;
+            let accepted: f64 = samples
+                .iter()
+                .filter_map(|s| Some(s.ui_fps? * (s.at - s.start)))
+                .sum();
+            if accepted.round() >= 2.0 {
+                assert_eq!(accepted.round(), 2.0);
+                break;
+            }
+            assert!(Instant::now() < deadline, "missing UI acceptance samples");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn render(
         ctx: &egui::Context,
         app: &mut MoqCastApp,
@@ -1259,7 +1315,8 @@ mod tests {
     fn snapshot_channel_updates_render_rows_without_inbound_attribution() {
         let (mut app, _) = fixture();
         let (updates, receiver) = tokio::sync::watch::channel(RuntimeSnapshot::default());
-        let (runtime, _commands) = RuntimeOwner::isolated_for_ui_test(receiver);
+        let (runtime, _commands) =
+            RuntimeOwner::isolated_for_ui_test(receiver, tokio::sync::watch::channel(None).1);
         app.runtime = runtime;
         let ctx = egui::Context::default();
         v2::install(&ctx);

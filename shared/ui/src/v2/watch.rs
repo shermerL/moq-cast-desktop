@@ -1,4 +1,7 @@
 //! Controls shared by the three native LAN watch surfaces.
+mod stats_card;
+use stats_card::StatsCard;
+
 use super::{Icon, Palette, toolbar_icon_button};
 use crate::{
     PlayerInfoLocale, PlayerInfoSnapshot, PlayerInfoState, PlayerVolumeState, player_volume_control,
@@ -65,6 +68,7 @@ pub struct WatchChrome {
     info: PlayerInfoState,
     volume: PlayerVolumeState,
     controls_active: bool,
+    stats: StatsCard,
 }
 
 impl WatchChrome {
@@ -86,6 +90,7 @@ impl WatchChrome {
     ) -> Option<WatchCommand> {
         if self.volume.sync_generation(snapshot.generation) {
             self.leave_fullscreen();
+            self.stats = StatsCard::default();
         }
         self.info.sync_generation(snapshot.generation);
         let zh = matches!(locale, PlayerInfoLocale::Chinese);
@@ -103,11 +108,33 @@ impl WatchChrome {
                             | egui::Event::Touch { .. }
                     )
                 }),
-                i.key_pressed(egui::Key::Escape),
+                i.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::Escape,
+                            pressed: true,
+                            repeat: false,
+                            ..
+                        }
+                    )
+                }),
                 i.pointer.hover_pos(),
             )
         });
-        let bar = super::player_rects(available, fullscreen).toolbar;
+        let rects = super::player_rects(available, fullscreen);
+        let bar = rects.toolbar;
+        if escape && (self.info.open() || self.stats.open || fullscreen) {
+            ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+            if self.info.open() {
+                self.info.close();
+            } else if self.stats.open {
+                self.stats.close();
+            } else if fullscreen {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            }
+        }
         let title = format!(
             "{} · {}",
             snapshot
@@ -130,11 +157,8 @@ impl WatchChrome {
             vec2(title_width.min((available.width() - 24.0).max(0.0)), 32.0),
         );
         if fullscreen {
-            if escape {
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-            }
             let pinned = phase != WatchPhase::Live
+                || self.stats.open
                 || self.info.open()
                 || self.controls_active
                 || pointer.is_some_and(|p| bar.contains(p) || top.contains(p));
@@ -320,11 +344,39 @@ impl WatchChrome {
                                 Some(palette),
                             )
                             .active();
+                            if snapshot.stats.is_some() {
+                                let label = text("播放统计", "Playback statistics");
+                                let response = stats_card::toolbar_button(
+                                    ui,
+                                    label,
+                                    btn_size,
+                                    palette,
+                                    self.stats.open,
+                                    fullscreen,
+                                );
+                                active |= response.has_focus();
+                                if response.clicked() {
+                                    if response.clicked_by(egui::PointerButton::Primary) {
+                                        response.surrender_focus();
+                                    }
+                                    if self.stats.open {
+                                        self.stats.close();
+                                    } else {
+                                        self.stats.open = true;
+                                    }
+                                    ui.ctx().request_repaint();
+                                }
+                            }
                         });
                     },
                 );
             },
         );
+        if self.stats.open {
+            let mut stage = rects.stage;
+            stage.max.y = stage.bottom().min(bar.top());
+            self.stats.show(ui, stage, snapshot, locale, fullscreen);
+        }
         if fullscreen && active != self.controls_active {
             ui.ctx().request_repaint();
         }
@@ -410,6 +462,7 @@ mod tests {
         super::super::install(&ctx);
         let mut chrome = WatchChrome::default();
         let snapshot = PlayerInfoSnapshot {
+            stats: None,
             generation: 1,
             source: Some("Studio Mac"),
             frame: None,

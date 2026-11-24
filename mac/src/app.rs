@@ -198,11 +198,17 @@ impl MoqCastApp {
         let Some(video) = self.video.as_mut() else {
             return;
         };
-        if let Err(error) = video.update(generation, frame.as_deref()) {
-            self.fail_video(
+        match video.update(generation, frame.as_deref()) {
+            Ok(Some(id)) => {
+                self.runtime
+                    .stats
+                    .accepted(id.view_generation, id.decoder_generation, id.sequence)
+            }
+            Ok(None) => {}
+            Err(error) => self.fail_video(
                 frame.as_deref().expect("presentation needs a frame"),
                 &error,
-            );
+            ),
         }
     }
 
@@ -277,6 +283,7 @@ impl MoqCastApp {
         match self.player.show(
             ui,
             player::PlayerView {
+                stats: &self.runtime.stats,
                 locale: self.locale,
                 generation: snapshot.media.generation().value(),
                 phase: snapshot.media.phase(),

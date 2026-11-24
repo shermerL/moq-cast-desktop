@@ -13,6 +13,7 @@ mod supervisor;
 use std::sync::Arc;
 use std::thread;
 
+use moqcast_playback_stats::PlaybackStats;
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 
@@ -44,6 +45,17 @@ pub(crate) struct PlaybackFrameIdentity {
     pub(crate) view_generation: u64,
     pub(crate) decoder_generation: u64,
     pub(crate) sequence: u64,
+}
+
+impl PlaybackFrameIdentity {
+    pub(crate) fn is_new_for(self, view: u64, previous: Option<Self>) -> bool {
+        self.view_generation == view
+            && previous.is_none_or(|prior| {
+                prior.view_generation != view
+                    || (self.decoder_generation, self.sequence)
+                        > (prior.decoder_generation, prior.sequence)
+            })
+    }
 }
 
 impl PlaybackFrame {
@@ -91,6 +103,7 @@ pub struct RuntimeHandle {
     commands: mpsc::Sender<UserCommand>,
     snapshot: watch::Receiver<Arc<AppSnapshot>>,
     playback: watch::Receiver<Option<Arc<PlaybackFrame>>>,
+    pub(crate) stats: PlaybackStats,
     owner: Option<thread::JoinHandle<()>>,
 }
 
@@ -105,6 +118,7 @@ impl RuntimeHandle {
                 commands,
                 snapshot,
                 playback,
+                stats: PlaybackStats::default(),
                 owner: None,
             },
             receiver,
@@ -122,15 +136,25 @@ impl RuntimeHandle {
         let (commands, command_rx) = startup_commands();
         let (snapshot_tx, snapshot) = watch::channel(Arc::new(AppSnapshot::default()));
         let (playback_tx, playback) = watch::channel(None);
+        let stats = PlaybackStats::default();
+        let owner_stats = stats.clone();
         let owner = thread::Builder::new()
             .name("moqcast-runtime".into())
-            .spawn(move || runtime.block_on(supervisor::run(command_rx, snapshot_tx, playback_tx)))
+            .spawn(move || {
+                runtime.block_on(supervisor::run(
+                    command_rx,
+                    snapshot_tx,
+                    playback_tx,
+                    owner_stats,
+                ))
+            })
             .map_err(RuntimeStartError::OwnerThread)?;
 
         Ok(Self {
             commands,
             snapshot,
             playback,
+            stats,
             owner: Some(owner),
         })
     }
@@ -222,18 +246,20 @@ mod tests {
     }
 
     #[test]
-    fn equal_sequences_from_different_view_generations_are_different_frames() {
-        let previous = PlaybackFrameIdentity {
-            view_generation: 1,
-            decoder_generation: 1,
-            sequence: 1,
+    fn ui_accepts_only_new_frame_identities_for_its_view() {
+        let frame = |view_generation, decoder_generation, sequence| PlaybackFrameIdentity {
+            view_generation,
+            decoder_generation,
+            sequence,
         };
-        let next = PlaybackFrameIdentity {
-            view_generation: 2,
-            decoder_generation: 1,
-            sequence: 1,
-        };
-
-        assert_ne!(previous, next);
+        let last = frame(3, 2, 11);
+        assert!(last.is_new_for(3, None));
+        assert!(!last.is_new_for(4, None));
+        assert!(!last.is_new_for(3, Some(last)));
+        assert!(!frame(3, 2, 10).is_new_for(3, Some(last)));
+        assert!(!frame(3, 1, 99).is_new_for(3, Some(last)));
+        assert!(frame(3, 2, 12).is_new_for(3, Some(last)));
+        assert!(frame(3, 3, 1).is_new_for(3, Some(last)));
+        assert!(frame(4, 1, 1).is_new_for(4, Some(last)));
     }
 }

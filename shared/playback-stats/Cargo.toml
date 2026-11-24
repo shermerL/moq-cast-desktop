@@ -1,0 +1,10 @@
+[package]
+name = "moqcast-playback-stats"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
