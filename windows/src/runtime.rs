@@ -428,6 +428,7 @@ struct PublicationOwner {
 
 #[derive(Default)]
 struct ViewOwner {
+    stats: moqcast_playback_stats::PlaybackStats,
     generation: u64,
     task: Option<tokio::task::JoinHandle<()>>,
     cancel: Option<watch::Sender<bool>>,
@@ -449,7 +450,7 @@ impl ViewOwner {
         self.cancel = Some(cancel);
         self.volume = Some(volume);
         self.task = Some(tokio::spawn(crate::playback::run(
-            moqcast_diagnostics::media::Session::watch(generation),
+            crate::watch_session::WatchSession::new(generation, &self.stats),
             path,
             broadcast,
             events,
@@ -568,6 +569,7 @@ pub(crate) enum CommandError {
 }
 
 pub(crate) struct RuntimeOwner {
+    pub(crate) playback_stats: moqcast_playback_stats::PlaybackStats,
     commands: mpsc::Sender<RuntimeCommand>,
     snapshots: watch::Receiver<RuntimeSnapshot>,
     playback: watch::Receiver<Option<Arc<PlaybackFrame>>>,
@@ -578,14 +580,15 @@ impl RuntimeOwner {
     #[cfg(test)]
     pub(crate) fn isolated_for_ui_test(
         snapshots: watch::Receiver<RuntimeSnapshot>,
+        playback: watch::Receiver<Option<Arc<PlaybackFrame>>>,
     ) -> (Self, mpsc::Receiver<RuntimeCommand>) {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
-        let (_, playback) = watch::channel(None);
         (
             Self {
                 commands,
                 snapshots,
                 playback,
+                playback_stats: Default::default(),
                 thread: None,
             },
             receiver,
@@ -596,6 +599,8 @@ impl RuntimeOwner {
         let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (snapshot_tx, snapshots) = watch::channel(RuntimeSnapshot::default());
         let (playback_tx, playback) = watch::channel(None);
+        let playback_stats = moqcast_playback_stats::PlaybackStats::default();
+        let runtime_stats = playback_stats.clone();
         let thread = thread::Builder::new()
             .name("moqcast-windows-runtime".to_owned())
             .spawn(move || {
@@ -603,9 +608,13 @@ impl RuntimeOwner {
                     .enable_all()
                     .build();
                 match runtime {
-                    Ok(runtime) => {
-                        runtime.block_on(run(config, command_rx, snapshot_tx, playback_tx))
-                    }
+                    Ok(runtime) => runtime.block_on(run(
+                        config,
+                        command_rx,
+                        snapshot_tx,
+                        playback_tx,
+                        runtime_stats,
+                    )),
                     Err(_) => {
                         let failed = RuntimeSnapshot {
                             discovery: DiscoveryState::Failed,
@@ -620,6 +629,7 @@ impl RuntimeOwner {
             commands,
             snapshots,
             playback,
+            playback_stats,
             thread: Some(thread),
         })
     }
@@ -860,13 +870,17 @@ async fn run(
     mut commands: mpsc::Receiver<RuntimeCommand>,
     snapshots: watch::Sender<RuntimeSnapshot>,
     playback: watch::Sender<Option<Arc<PlaybackFrame>>>,
+    stats: moqcast_playback_stats::PlaybackStats,
 ) {
     let mut snapshot = RuntimeSnapshot::default();
     let (media_events, mut media_recv) = mpsc::channel(MEDIA_EVENT_CAPACITY);
     let (audio_updates, mut audio_recv) = watch::channel(None::<AudioStatusUpdate>);
     let (view_events, mut view_recv) = mpsc::channel(VIEW_EVENT_CAPACITY);
     let mut publication = PublicationOwner::default();
-    let mut view = ViewOwner::default();
+    let mut view = ViewOwner {
+        stats,
+        ..Default::default()
+    };
     let mut service_owner = ServiceOwner::default();
     service_owner.start(&config, &mut snapshot, &snapshots);
 
@@ -2070,7 +2084,7 @@ mod tests {
         let (snapshots, state) = watch::channel(RuntimeSnapshot::default());
         let (playback, _) = watch::channel(None);
         commands.try_send(RuntimeCommand::StopScan).unwrap();
-        let mut runtime = Box::pin(run(config, recv, snapshots, playback));
+        let mut runtime = Box::pin(run(config, recv, snapshots, playback, Default::default()));
         let first = std::future::poll_fn(|cx| Poll::Ready(runtime.as_mut().poll(cx))).await;
         assert!(first.is_pending());
         assert_eq!(state.borrow().discovery, DiscoveryState::Stopped);
@@ -2090,7 +2104,7 @@ mod tests {
         let (snapshots, state) = watch::channel(RuntimeSnapshot::default());
         let (playback, _) = watch::channel(None);
         commands.try_send(RuntimeCommand::Shutdown).unwrap();
-        let mut runtime = Box::pin(run(config, recv, snapshots, playback));
+        let mut runtime = Box::pin(run(config, recv, snapshots, playback, Default::default()));
         let first = std::future::poll_fn(|cx| Poll::Ready(runtime.as_mut().poll(cx))).await;
         assert!(
             first.is_ready(),
@@ -2480,6 +2494,7 @@ mod tests {
             task: None,
             cancel: None,
             volume: Some(volume),
+            ..Default::default()
         };
 
         assert!(!owner.set_volume(6, 25));
@@ -2504,7 +2519,7 @@ mod tests {
             generation: 7,
             task: Some(task),
             cancel: Some(cancel),
-            volume: None,
+            ..Default::default()
         };
 
         owner.stop().await.unwrap();
@@ -2527,6 +2542,7 @@ mod tests {
             }
         });
         let owner = RuntimeOwner {
+            playback_stats: Default::default(),
             commands,
             snapshots,
             playback,

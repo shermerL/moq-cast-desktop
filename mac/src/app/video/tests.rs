@@ -173,14 +173,18 @@ async fn gpu_presentation_preserves_orientation_color_resize_and_restart() {
                 draw(&state, p.texture().unwrap(), &output);
                 let rgba = readback(&state.device, &state.queue, &output).await;
                 assert_pixels(&rgba, &f.rgba_reference());
-                p.update(Some(1), None).unwrap();
+                assert_eq!(p.update(Some(1), None).unwrap(), None);
+                assert_eq!(p.update(Some(1), Some(&f)).unwrap(), None);
                 assert_eq!(
                     p.texture().unwrap().id,
                     id,
                     "no new frame retains the current picture"
                 );
-                p.update(Some(1), Some(&frame(4, 4, 1, 1, seq - 1)))
-                    .unwrap();
+                assert_eq!(
+                    p.update(Some(1), Some(&frame(4, 4, 1, 1, seq - 1)))
+                        .unwrap(),
+                    None
+                );
                 assert_eq!(
                     p.identity(),
                     Some(f.identity),
@@ -218,7 +222,7 @@ async fn gpu_presentation_preserves_orientation_color_resize_and_restart() {
             false,
         )
         .unwrap();
-        p.update(Some(1), Some(&f)).unwrap();
+        assert_eq!(p.update(Some(1), Some(&f)).unwrap(), Some(f.identity));
         let output = target(&state, 4, 2);
         draw(&state, p.texture().unwrap(), &output);
         assert_pixels(

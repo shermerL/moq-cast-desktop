@@ -116,9 +116,8 @@ impl LivePlayer {
         ui: &mut egui::Ui,
         locale: Locale,
         view: &ViewSnapshot,
-        source_label: Option<&str>,
         texture: Option<&TextureHandle>,
-        frame_identity: Option<PlaybackFrameIdentity>,
+        snapshot: PlayerInfoSnapshot<'_>,
     ) -> Option<PlayerAction> {
         let fullscreen = self.fullscreen.active();
         let available = ui.available_size();
@@ -173,8 +172,6 @@ impl LivePlayer {
             );
         }
         let phase = presentation(view.phase, texture.is_some());
-        let mut snapshot = player_info_snapshot(view, frame_identity, false);
-        snapshot.source = source_label;
         self.chrome
             .show(
                 ui,
@@ -215,11 +212,12 @@ fn paint_surface(
     );
 }
 
-fn player_info_snapshot(
-    view: &ViewSnapshot,
+pub(crate) fn player_info_snapshot<'a>(
+    view: &'a ViewSnapshot,
     frame_identity: Option<PlaybackFrameIdentity>,
-    muted: bool,
-) -> PlayerInfoSnapshot<'_> {
+    source: Option<&'a str>,
+    stats: &'a moqcast_playback_stats::PlaybackStats,
+) -> PlayerInfoSnapshot<'a> {
     let observed = moqcast_diagnostics::media::watch_record(view.generation);
     PlayerInfoSnapshot {
         presentation: (frame_identity.is_some()).then_some("egui texture"),
@@ -228,7 +226,8 @@ fn player_info_snapshot(
         hardware_refused: observed.as_ref().is_some_and(|r| r.hardware_refused),
         awaiting_backend: observed.as_ref().is_some_and(|r| r.awaiting_backend()),
         generation: view.generation,
-        source: None,
+        source,
+        stats: Some(stats),
         frame: frame_identity.map(|identity| PlayerFrameSample {
             view_generation: identity.view_generation,
             decoder_generation: identity.decoder_generation,
@@ -245,7 +244,7 @@ fn player_info_snapshot(
         decoder: observed
             .as_ref()
             .map_or(view.decoder.as_deref(), |r| r.backend),
-        audio_state: player_audio_state(view.audio.phase, muted),
+        audio_state: player_audio_state(view.audio.phase, false),
         audio_codec: view.audio.codec.as_deref(),
         audio_sample_rate: view.audio.sample_rate,
         audio_channels: view.audio.channels,
@@ -473,6 +472,7 @@ mod tests {
             ..Default::default()
         };
 
+        let stats = moqcast_playback_stats::PlaybackStats::default();
         let mut frame = |time, ready: bool, events| {
             let mut input = egui::RawInput {
                 time: Some(time),
@@ -492,9 +492,8 @@ mod tests {
                             ui,
                             Locale::English,
                             &view,
-                            Some("Source"),
                             ready.then_some(&texture),
-                            None
+                            player_info_snapshot(&view, None, Some("Source"), &stats)
                         )
                         .is_none()
                 );

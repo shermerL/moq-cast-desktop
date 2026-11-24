@@ -57,6 +57,8 @@ impl PlayerFrameSample {
 /// Truthful playback fields available to the shared information panel.
 #[derive(Clone, Copy, Debug)]
 pub struct PlayerInfoSnapshot<'a> {
+    /// Statistics owned by the current playback session.
+    pub stats: Option<&'a moqcast_playback_stats::PlaybackStats>,
     /// Playback generation used to reset panel-local state.
     pub generation: u64,
     /// User-facing name of the selected playback source, when available.
@@ -177,7 +179,7 @@ impl PlayerInfoState {
         }
     }
 
-    fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         self.open = false;
         self.meter.reset();
     }
@@ -579,7 +581,7 @@ fn measuring_label(locale: PlayerInfoLocale) -> &'static str {
     }
 }
 
-fn audio_state_label(locale: PlayerInfoLocale, state: PlayerAudioState) -> &'static str {
+pub(crate) fn audio_state_label(locale: PlayerInfoLocale, state: PlayerAudioState) -> &'static str {
     match (locale, state) {
         (PlayerInfoLocale::Chinese, PlayerAudioState::Pending) => "正在准备",
         (PlayerInfoLocale::Chinese, PlayerAudioState::NoAudio) => "无音轨",
@@ -645,6 +647,7 @@ mod tests {
         decoder: Option<&'a str>,
     ) -> PlayerInfoSnapshot<'a> {
         PlayerInfoSnapshot {
+            stats: None,
             generation: 1,
             source: Some("Studio Mac"),
             frame,

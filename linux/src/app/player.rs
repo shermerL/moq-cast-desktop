@@ -80,6 +80,7 @@ pub(super) enum PlayerMode<'a> {
 pub(super) struct PlayerPlayback<'a> {
     pub(super) generation: u64,
     pub(super) frame: Option<PlayerFrameSample>,
+    pub(super) stats: &'a moqcast_playback_stats::PlaybackStats,
     pub(super) video: &'a RemoteVideoSnapshot,
 }
 
@@ -221,6 +222,7 @@ fn player_info_snapshot<'a>(
         hardware_refused: observed.as_ref().is_some_and(|r| r.hardware_refused),
         awaiting_backend: observed.as_ref().is_some_and(|r| r.awaiting_backend()),
         generation: playback.generation,
+        stats: Some(playback.stats),
         source: Some(mode.device()),
         frame: playback.frame,
         resolution: texture
@@ -442,7 +444,9 @@ mod tests {
         let mut player = LivePlayer::default();
         let audio = RemoteAudioSnapshot::default();
         let video = RemoteVideoSnapshot::default();
+        let stats = Default::default();
         let playback = PlayerPlayback {
+            stats: &stats,
             generation: 1,
             frame: None,
             video: &video,

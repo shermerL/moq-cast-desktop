@@ -18,6 +18,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wgpu"] }
 moqcast-diagnostics = { path = "../shared/diagnostics" }
+moqcast-playback-stats = { path = "../shared/playback-stats" }
 moqcast-ui = { path = "../shared/ui" }
 moq-tokio = { git = "https://github.com/moq-dev/moq", rev = "f8215bc47199b48512d805ae9fc710cc6586de51", default-features = false, features = ["aws-lc-rs", "mdns", "noq"] }
 rfd = "0.17.2"

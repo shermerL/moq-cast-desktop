@@ -315,7 +315,7 @@ fn shared_font_covers_chinese_and_english_in_both_families() {
 }
 
 #[test]
-fn production_dependencies_are_business_neutral() {
+fn ui_dependencies_are_limited_to_egui_and_the_session_observation_model() {
     let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .expect("read shared UI manifest");
     let document = manifest
@@ -327,7 +327,14 @@ fn production_dependencies_are_business_neutral() {
         .iter()
         .map(|(name, _)| name)
         .collect::<BTreeSet<_>>();
-    assert_eq!(dependencies, BTreeSet::from(["egui"]));
+    assert_eq!(
+        dependencies,
+        BTreeSet::from(["egui", "moqcast-playback-stats"])
+    );
+    assert_eq!(
+        document["dependencies"]["moqcast-playback-stats"]["path"].as_str(),
+        Some("../playback-stats")
+    );
 }
 
 #[test]
