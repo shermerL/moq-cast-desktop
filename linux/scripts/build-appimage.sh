@@ -14,7 +14,7 @@ if [[ $(uname -s) != Linux ]]; then
     exit 1
 fi
 
-for tool in cargo file git pkg-config ldd install sha256sum "$LINUXDEPLOY"; do
+for tool in cargo python3 file git pkg-config ldd install sha256sum "$LINUXDEPLOY"; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "Required build tool is missing: $tool" >&2
         exit 1
@@ -39,10 +39,16 @@ fi
 mkdir -p "$OUTPUT_ROOT"
 OUTPUT_ROOT=$(CDPATH= cd -- "$OUTPUT_ROOT" && pwd)
 cd "$LINUX_DIR"
-GENERATED_INFO="$LINUX_DIR/target/release/moqcast-build-info.txt"
+TARGET_DIR="$LINUX_DIR/target"
+artifact_paths=$(mktemp)
+trap 'rm -f -- "$artifact_paths"' EXIT
 MOQCAST_BUILD_IDENTITY="$PACKAGE_VARIANT" \
-MOQCAST_PROVENANCE_OUTPUT="$GENERATED_INFO" \
-cargo build --locked --release
+cargo build --locked --release --bin moq-cast-desktop --target-dir "$TARGET_DIR" \
+    --message-format=json-render-diagnostics | python3 "$SCRIPT_DIR/appimage-artifacts.py" >"$artifact_paths"
+{
+    IFS= read -r -d '' EXECUTABLE
+    IFS= read -r -d '' GENERATED_INFO
+} <"$artifact_paths"
 VERSION=$(sed -n 's/^app_version=//p' "$GENERATED_INFO")
 if [[ -z $VERSION ]]; then
     echo "Generated provenance is missing app_version." >&2
@@ -68,7 +74,7 @@ mkdir "$APPDIR"
 mkdir -p "$(dirname -- "$BUILD_INFO_FILE")"
 write_build_info "$BUILD_INFO_FILE" "$GENERATED_INFO"
 
-install -Dm755 target/release/moq-cast-desktop "$APPDIR/usr/bin/moq-cast-desktop"
+install -Dm755 "$EXECUTABLE" "$APPDIR/usr/bin/moq-cast-desktop"
 install -Dm755 packaging/appimage/AppRun "$APPDIR/AppRun"
 install -Dm644 packaging/appimage/dev.moq.moqcast.desktop.desktop "$APPDIR/dev.moq.moqcast.desktop.desktop"
 install -Dm644 assets/icons/hicolor/512x512/apps/moqcast.png "$APPDIR/moqcast.png"

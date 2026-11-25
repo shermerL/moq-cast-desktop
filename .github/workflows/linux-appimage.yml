@@ -58,6 +58,8 @@ jobs:
         run: cargo clippy --locked --manifest-path shared/diagnostics/Cargo.toml --all-targets -- -D warnings
       - name: Lint build provenance generator
         run: cargo clippy --locked --manifest-path shared/build-provenance/Cargo.toml --all-targets -- -D warnings
+      - name: Test AppImage build output selection
+        run: python3 linux/scripts/check-appimage-build.py
       - name: Test Linux build provenance
         run: ./linux/scripts/check-build-provenance.sh
 
