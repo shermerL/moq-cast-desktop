@@ -611,24 +611,53 @@ fn location_field(name: &str) -> bool {
     )
 }
 
+// Authorization may have a scheme between the key and its credential.
+#[derive(Clone, Copy)]
+enum PendingSecret {
+    Value,
+    Authorization,
+}
+
+impl PendingSecret {
+    fn for_key(key: &str) -> Self {
+        if key == "authorization" {
+            Self::Authorization
+        } else {
+            Self::Value
+        }
+    }
+
+    fn skips(self, token: &str) -> bool {
+        matches!(token, "=" | ":")
+            || sensitive_value_qualifier(token)
+            || matches!(self, Self::Authorization)
+                && authorization_scheme(token.strip_prefix(['=', ':']).unwrap_or(token))
+    }
+}
+
+fn authorization_scheme(token: &str) -> bool {
+    let token = token.trim_matches(['\'', '"', ',', ';']);
+    token.eq_ignore_ascii_case("bearer") || token.eq_ignore_ascii_case("basic")
+}
+
 fn sanitize_free_text(value: &str) -> String {
     let mut sanitized = Vec::new();
-    let mut redact_sensitive_value = false;
+    let mut pending: Option<PendingSecret> = None;
     for token in value.split_whitespace() {
-        if redact_sensitive_value {
-            if sensitive_value_qualifier(token) {
+        // A new field (with or without a delimiter) owns the next value.
+        if let Some((replacement, next)) = redact_assignment(token) {
+            sanitized.push(replacement);
+            pending = next;
+        } else if let Some(key) = bare_sensitive_key(token) {
+            sanitized.push(format!("{key}=[REDACTED]"));
+            pending = Some(PendingSecret::for_key(&key));
+        } else if let Some(secret) = pending {
+            if secret.skips(token) {
                 sanitized.push(token.to_owned());
             } else {
                 sanitized.push("[REDACTED]".to_owned());
-                redact_sensitive_value = false;
+                pending = None;
             }
-            continue;
-        }
-        if let Some(replacement) = redact_assignment(token) {
-            sanitized.push(replacement);
-        } else if let Some(key) = bare_sensitive_key(token) {
-            sanitized.push(format!("{key}=[REDACTED]"));
-            redact_sensitive_value = true;
         } else if contains_location(token) {
             sanitized.push("[LOCATION OMITTED]".to_owned());
         } else {
@@ -638,15 +667,20 @@ fn sanitize_free_text(value: &str) -> String {
     sanitized.join(" ")
 }
 
-fn redact_assignment(token: &str) -> Option<String> {
+fn redact_assignment(token: &str) -> Option<(String, Option<PendingSecret>)> {
     let delimiter = token.find(['=', ':'])?;
     let key = token[..delimiter]
         .trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '_')
         .to_ascii_lowercase();
     if sensitive_field(&key) || private_key_field(&key) {
-        return Some(format!("{key}=[REDACTED]"));
+        let value = &token[delimiter + 1..];
+        let pending = (value.is_empty()
+            || matches!(value, "\"" | "'")
+            || key == "authorization" && authorization_scheme(value))
+        .then(|| PendingSecret::for_key(&key));
+        return Some((format!("{key}=[REDACTED]"), pending));
     }
-    location_field(&key).then(|| format!("{key}=[LOCATION OMITTED]"))
+    location_field(&key).then(|| (format!("{key}=[LOCATION OMITTED]"), None))
 }
 
 fn bare_sensitive_key(token: &str) -> Option<String> {
@@ -1387,3 +1421,114 @@ mod quic_tests;
 
 #[cfg(test)]
 mod retention_tests;
+
+#[cfg(test)]
+mod spaced_secret_tests {
+    use super::*;
+
+    use std::io::Read as _;
+    #[test]
+    fn regression_free_text_secret_is_absent_from_ring_disk_and_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, worker, layer) = build(
+            Config::new(Paths::for_test(dir.path()), BuildInfo::new("test"))
+                .with_stderr(false)
+                .with_private_location_redaction(),
+        );
+        let inputs = [
+            "authorization: Bearer SAFE_FAKE_TOKEN",
+            "authorization =Bearer SAFE_FAKE_SCHEME",
+            "Authorization :bAsIc SAFE_FAKE_BASIC",
+            "token= password SAFE_FAKE_PASSWORD",
+            "token= authorization :Bearer SAFE_FAKE_CHAIN",
+        ];
+        tracing::subscriber::with_default(Registry::default().with(layer), || {
+            for input in inputs {
+                let error = format!("{input} after retry");
+                tracing::warn!(target: "moqcast_macos::network", error, "handshake failed");
+            }
+            tracing::warn!(target: "moqcast_macos::network", error = "connection reset by peer", "connection ended");
+        });
+        let memory = handle
+            .snapshot()
+            .entries()
+            .iter()
+            .map(|e| e.event().to_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let zip = dir.path().join("export.zip");
+        handle.export(ExportRequest::new(&zip)).unwrap();
+        let disk = fs::read_to_string(dir.path().join("moqcast.log")).unwrap();
+        let mut archive = zip::ZipArchive::new(fs::File::open(zip).unwrap()).unwrap();
+        let mut exported = String::new();
+        archive
+            .by_name("moqcast.log")
+            .unwrap()
+            .read_to_string(&mut exported)
+            .unwrap();
+        drop(worker);
+        let leaks = [("ring", memory), ("disk", disk), ("export", exported)]
+            .into_iter()
+            .filter_map(|(name, text)| {
+                assert_eq!(
+                    text.matches("handshake failed").count(),
+                    inputs.len(),
+                    "{name}"
+                );
+                assert_eq!(text.matches("after retry").count(), inputs.len(), "{name}");
+                assert!(
+                    text.contains("connection reset by peer"),
+                    "normal error changed in {name}"
+                );
+                text.contains("SAFE_FAKE_").then_some(name)
+            })
+            .collect::<Vec<_>>();
+        assert!(leaks.is_empty(), "fake credential survives in: {leaks:?}");
+    }
+    #[test]
+    fn control_compact_sensitive_value_and_ordinary_error() {
+        assert_eq!(
+            sanitize_free_text("token=SAFE_FAKE_TOKEN"),
+            "token=[REDACTED]"
+        );
+        assert_eq!(
+            sanitize_free_text("connection reset by peer"),
+            "connection reset by peer"
+        );
+    }
+
+    #[test]
+    fn credentials_with_separators_and_schemes() {
+        for input in [
+            "token= FAKE_SECRET",
+            "password: FAKE_SECRET",
+            "TOKEN: 'FAKE_SECRET'",
+            "token = FAKE_SECRET",
+            "token : FAKE_SECRET",
+            "Authorization=Basic FAKE_SECRET",
+            "authorization= Bearer FAKE_SECRET",
+            "authorization Basic FAKE_SECRET",
+            "token=\"FAKE_SECRET\"",
+            "token= \"FAKE_SECRET\"",
+            "token=FAKE_SECRET password: FAKE_OTHER",
+            "token= password: FAKE_OTHER",
+            "Authorization: bEaReR FAKE_SECRET",
+            "authorization =Bearer FAKE_SECRET",
+            "authorization :Basic FAKE_SECRET",
+            "token= password FAKE_SECRET",
+            "token= authorization :Bearer FAKE_SECRET",
+        ] {
+            assert!(!sanitize_free_text(input).contains("FAKE_"), "{input}");
+        }
+        assert_eq!(sanitize_free_text("token="), "token=[REDACTED]");
+        assert_eq!(sanitize_free_text("password:"), "password=[REDACTED]");
+        assert_eq!(
+            sanitize_free_text("token=\"\" connection reset by peer"),
+            "token=[REDACTED] connection reset by peer"
+        );
+        assert_eq!(
+            sanitize_free_text("password='' connection reset by peer"),
+            "password=[REDACTED] connection reset by peer"
+        );
+    }
+}
