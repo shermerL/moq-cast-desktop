@@ -60,6 +60,6 @@ UI v2 候选复用 shared-ui 的主题、内嵌字体、品牌、页头、设备
 
 ## AppImage 构建输出
 
-`./scripts/build-appimage.sh` 显式使用 `linux/target` 作为 Cargo 输出目录，不采用外部 `CARGO_TARGET_DIR` 或 Cargo 配置中的 `build.target-dir`。构建、来源信息和安装程序均从同一目录读取，避免将旧二进制与本次构建信息一起打包。`MOQCAST_PACKAGE_DIR` 仍只指定最终打包目录。
+`./scripts/build-appimage.sh` 显式使用 `linux/target` 作为 Cargo 输出目录，不采用外部 `CARGO_TARGET_DIR` 或 Cargo 配置中的 `build.target-dir`。打包时读取本次 Cargo 报告的可执行文件，以及同一包的构建脚本生成的来源记录。Cargo 显式指定原生 target 时也使用该次构建的产物。`MOQCAST_PACKAGE_DIR` 仍只指定最终打包目录。
 
-`python3 linux/scripts/check-appimage-build.py`（仓库根目录）使用最小 Rust 程序验证默认/环境变量/Cargo 配置目录及构建失败路径。它只验证产物选择，不替代 Linux AppImage 构建和运行验收。
+`python3 linux/scripts/check-appimage-build.py`（仓库根目录）使用最小 Rust 程序验证默认目录、环境变量和 Cargo 配置指定的目录、显式原生 target 及构建失败路径。它只验证产物选择，不替代 Linux AppImage 构建和运行验收。

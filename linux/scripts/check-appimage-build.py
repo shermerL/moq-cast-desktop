@@ -16,15 +16,24 @@ class BuildOutputTests(unittest.TestCase):
         self.addCleanup(lambda: print(f"Fixture retained: {root}"))
         for directory in ("scripts", "src", "target/release", "bin", ".cargo"):
             (root / directory).mkdir(parents=True, exist_ok=True)
-        for name in ("build-appimage.sh", "build-info.sh"):
+        for name in ("build-appimage.sh", "build-info.sh", "appimage-artifacts.py"):
             shutil.copy2(SCRIPTS / name, root / "scripts" / name)
         (root / "Cargo.toml").write_text('[package]\nname="moq-cast-desktop"\nversion="0.0.0"\nedition="2021"\n')
         (root / "src/main.rs").write_text('invalid Rust' if broken else 'fn main() { println!("fresh-binary"); }')
         (root / "build.rs").write_text('''fn main() {
-    std::fs::write(std::env::var("MOQCAST_PROVENANCE_OUTPUT").unwrap(),
-        "app_version=0.0.0\\nbuild_identity=linux-x86_64\\ntarget=x86_64-unknown-linux-gnu\\nsource_identity=fresh-build\\n").unwrap();
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=MOQCAST_PROVENANCE_OUTPUT");
+    let record = "app_version=0.0.0\\nbuild_identity=linux-x86_64\\ntarget=x86_64-unknown-linux-gnu\\nsource_identity=fresh-build\\n";
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(out.join("moqcast-build-info.txt"), record).unwrap();
+    if let Some(path) = std::env::var_os("MOQCAST_PROVENANCE_OUTPUT") {
+        std::fs::write(path, record).unwrap();
+    }
 }''')
-        (root / "target/release/moq-cast-desktop").write_bytes(b"stale-binary")
+        stale = root / "target/release/moq-cast-desktop"
+        stale.write_text("#!/bin/sh\necho stale-binary\n")
+        stale.chmod(0o755)
+        (stale.parent / "moqcast-build-info.txt").write_text("source_identity=stale-build\n")
         assets = ["packaging/appimage/AppRun", "packaging/appimage/dev.moq.moqcast.desktop.desktop",
                   "assets/fonts/LICENSE-NOTO", "vendor/moq-video/LICENSE-APACHE",
                   "vendor/moq-video/LICENSE-MIT", "vendor/libspa/LICENSE"]
@@ -61,12 +70,15 @@ else:
         env = dict(os.environ, PATH=str(root / "bin") + os.pathsep + os.environ["PATH"],
                    CARGO_NET_OFFLINE="true", MOQCAST_PACKAGE_DIR=str(root / "out"),
                    MOQCAST_PACKAGE_VARIANT="linux-x86_64", LINUXDEPLOY="linuxdeploy")
-        for name in ("CARGO_TARGET_DIR", "CARGO_BUILD_TARGET", "CARGO_BUILD_TARGET_DIR", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"):
+        for name in ("CARGO_TARGET_DIR", "CARGO_BUILD_TARGET", "CARGO_BUILD_TARGET_DIR", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "MOQCAST_PROVENANCE_OUTPUT"):
             env.pop(name, None)
         if mode == "env":
             env["CARGO_TARGET_DIR"] = str(root / "custom target")
         if mode == "config":
             (root / ".cargo/config.toml").write_text('[build]\ntarget-dir="custom target"\n')
+        if mode == "native-target":
+            triple = subprocess.check_output(["rustc", "--print", "host-tuple"], text=True).strip()
+            (root / ".cargo/config.toml").write_text(f'[build]\ntarget="{triple}"\n')
         subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=root, env=env, check=True, capture_output=True)
         result = subprocess.run(["bash", str(root / "scripts/build-appimage.sh")], cwd=root, env=env, capture_output=True, text=True)
         appdir = root / "out/MoQCast-0.0.0-linux-x86_64.AppDir"
@@ -77,7 +89,6 @@ else:
             return
         self.assertEqual(result.returncode, 99, result.stderr)
         packaged = appdir / "usr/bin/moq-cast-desktop"
-        self.assertNotEqual(packaged.read_bytes(), b"stale-binary", "packaged an old binary alongside fresh provenance")
         self.assertEqual(subprocess.check_output([str(packaged)], text=True).strip(), "fresh-binary")
         self.assertIn("source_identity=fresh-build", (appdir / "usr/share/doc/moqcast/build-info.txt").read_text())
 
@@ -89,6 +100,9 @@ else:
 
     def test_cargo_config_directory(self):
         self.check_output("config")
+
+    def test_explicit_native_target(self):
+        self.check_output("native-target")
 
     def test_failed_build_does_not_package_stale_binary(self):
         self.check_output("env", broken=True)
