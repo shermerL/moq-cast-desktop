@@ -1276,15 +1276,11 @@ impl ServiceRun<'_> {
                     None
                 }
                 RuntimeInput::InitialScanFinished => {
-                    scan_finished = true;
-                    let phase = if self.snapshot.peers.values().any(|peer| peer.discovered) {
-                        DiscoveryPhase::Ready
-                    } else {
-                        DiscoveryPhase::Empty
-                    };
-                    self.snapshot
-                        .discovery
-                        .apply(self.generations.discovery, phase);
+                    finish_initial_scan(
+                        self.snapshot,
+                        self.generations.discovery,
+                        &mut scan_finished,
+                    );
                     None
                 }
             };
@@ -1709,6 +1705,11 @@ fn has_available_screen(snapshot: &AppSnapshot, peer_id: &str) -> bool {
     snapshot.remote_screens.values().any(|screen| {
         screen.peer_id == peer_id && screen.availability == ScreenAvailability::Available
     })
+}
+
+fn finish_initial_scan(snapshot: &mut AppSnapshot, generation: Generation, finished: &mut bool) {
+    *finished = true;
+    refresh_discovery_result(snapshot, generation, *finished);
 }
 
 fn refresh_discovery_result(
@@ -3479,5 +3480,94 @@ mod suspended_nearby_tests {
         h.command(RuntimeCommand::StopNetwork);
         h.event(SystemEvent::Resume);
         h.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod initial_scan_tests {
+    use super::*;
+    #[test]
+    fn failed_scan_keeps_error_and_connected_peer() {
+        for discovered in [false, true] {
+            let mut s = AppSnapshot::default();
+            let g = s.discovery.begin(DiscoveryPhase::Scanning);
+            let session = s.session.begin(SessionPhase::Listening);
+            s.peers.insert(
+                "peer".into(),
+                PeerSnapshot {
+                    bandwidth: Default::default(),
+                    ordinal: 1,
+                    discovered,
+                    session: PeerSession::Connected,
+                },
+            );
+            let path = crate::contract::screen_path("peer");
+            s.remote_screens.insert(
+                path.clone(),
+                ScreenView {
+                    peer_id: "peer".into(),
+                    availability: ScreenAvailability::Available,
+                },
+            );
+            apply_network_event(&mut s, g, session, NetworkEvent::DiscoveryStopped);
+            let mut finished = false;
+            finish_initial_scan(&mut s, g, &mut finished);
+            assert!(finished);
+            assert_eq!(s.discovery.phase(), DiscoveryPhase::Failed);
+            assert_eq!(s.nearby_issue, Some(NearbyIssue::DiscoveryStopped));
+            assert!(s.can_watch("peer", &path));
+            assert_eq!(s.peers["peer"].session, PeerSession::Connected);
+        }
+    }
+    #[test]
+    fn failed_scan_can_be_explicitly_reopened() {
+        let mut snapshot = AppSnapshot::default();
+        let old = begin_network_start(&mut snapshot);
+        apply_network_event(
+            &mut snapshot,
+            old.discovery,
+            old.session,
+            NetworkEvent::DiscoveryStopped,
+        );
+        assert_eq!(snapshot.discovery.phase(), DiscoveryPhase::Failed);
+        let new = begin_network_start(&mut snapshot);
+        assert_eq!(snapshot.nearby_issue, None);
+        assert!(
+            snapshot
+                .discovery
+                .apply(new.discovery, DiscoveryPhase::Scanning)
+        );
+        let mut finished = false;
+        finish_initial_scan(&mut snapshot, old.discovery, &mut finished);
+        assert_eq!(snapshot.discovery.phase(), DiscoveryPhase::Scanning);
+        finish_initial_scan(&mut snapshot, new.discovery, &mut finished);
+        assert_eq!(snapshot.discovery.phase(), DiscoveryPhase::Empty);
+        assert_eq!(snapshot.nearby_issue, None);
+    }
+
+    #[test]
+    fn scan_stop_reopen_and_old_generation() {
+        let mut s = AppSnapshot::default();
+        let old = s.discovery.begin(DiscoveryPhase::Scanning);
+        let stopped = s.discovery.begin(DiscoveryPhase::Stopped);
+        let mut finished = false;
+        finish_initial_scan(&mut s, stopped, &mut finished);
+        assert_eq!(s.discovery.phase(), DiscoveryPhase::Stopped);
+        let new = s.discovery.begin(DiscoveryPhase::Scanning);
+        finish_initial_scan(&mut s, old, &mut finished);
+        assert_eq!(s.discovery.phase(), DiscoveryPhase::Scanning);
+        finish_initial_scan(&mut s, new, &mut finished);
+        assert_eq!(s.discovery.phase(), DiscoveryPhase::Empty);
+        s.peers.insert(
+            "peer".into(),
+            PeerSnapshot {
+                bandwidth: Default::default(),
+                ordinal: 1,
+                discovered: true,
+                session: PeerSession::Waiting,
+            },
+        );
+        refresh_discovery_result(&mut s, new, finished);
+        assert_eq!(s.discovery.phase(), DiscoveryPhase::Ready);
     }
 }
