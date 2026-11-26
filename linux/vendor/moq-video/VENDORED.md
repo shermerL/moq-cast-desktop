@@ -11,6 +11,9 @@ Those implementations now come directly from upstream, rather than backports.
 
 The retained Linux product patches are:
 
+- The PipeWire portal client uses ashpd's async-io backend. AccessKit also
+  drives zbus on async-io. Enabling zbus's Tokio backend would require a Tokio
+  reactor on AccessKit's accessibility thread.
 - `encode::Options::max_size` resizes display capture before probing and
   encoding, keeping the catalog and encoded output within MoQCast's 1080p
   ceiling. It is applied through the upstream `encode::Capture` driver.
@@ -52,3 +55,5 @@ revision used by the desktop application, including moq-nvenc and moq-v4l.
 PipeWire tests retain fixed negotiated format fixtures and stable transfer
 constants for the supported distribution headers. `LICENSE-APACHE` and `LICENSE-MIT`
 come from the source repository root.
+
+AI 修订：gpt-6.2-astra（Linux Portal 的 D-Bus 后端选择）

@@ -329,7 +329,6 @@ dependencies = [
  "getrandom 0.4.3",
  "serde",
  "serde_repr",
- "tokio",
  "zbus",
 ]
 
@@ -3202,6 +3201,7 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "eframe",
+ "futures-lite",
  "gethostname",
  "hang",
  "moq-audio",
@@ -3222,6 +3222,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "zbus",
  "zip",
 ]
 
@@ -6035,7 +6036,6 @@ dependencies = [
  "signal-hook-registry",
  "socket2",
  "tokio-macros",
- "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -7590,7 +7590,6 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_repr",
- "tokio",
  "tracing",
  "uds_windows",
  "uuid",
