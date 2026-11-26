@@ -429,7 +429,7 @@ fn dialog_close_icons_only_dismiss_their_surface() {
         }
         let output = render(&ctx, &mut app, &s, size, vec![]);
         let close_texture = ctx
-            .data(|data| data.get_temp::<egui::TextureHandle>(egui::Id::new("v2-tabler-close")))
+            .data(|data| data.get_temp::<egui::TextureHandle>(egui::Id::new("v2-icon-close")))
             .expect("close texture")
             .id();
         let icon = output

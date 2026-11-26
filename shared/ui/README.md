@@ -59,7 +59,7 @@ Mac 页面组合的离线验收在 `mac/src/app/tests/layout.rs`，通过现有 
 
 `Action` / `ActionTone` 区分 Accent、Neutral 和 Danger；旧 `action` 保持 Accent 便捷入口。`dialog_header` 绘制标题并返回右侧关闭按钮的响应，调用者决定只关闭哪一个弹层。组件不直接停止媒体或网络。
 
-桌面 v2 使用 Lucide 图标。原始 SVG 和 72×72 白色 RGBA 像素保存在 [assets/icons](assets/icons/README.md)，运行时按语义色着色。三端「设置 → 图标许可」可离线阅读 Lucide ISC 及 Feather 衍生图标的 MIT 声明。
+桌面 v2 全部 15 枚界面图标均为 MoQCast 自绘原创线性图标（`24×24` 网格、`stroke-width="2"` 圆头圆角）。原始 SVG 和 72×72 白色 RGBA 像素保存在 [assets/icons](assets/icons/README.md)，运行时按语义色着色；随包第三方 Lucide/Feather 图标及三端「设置 → 图标许可」专属提示已退场，字体（Noto Sans SC SIL OFL）及其他依赖许可照常保留。
 
 Mac 页面测试另外覆盖长播放错误时“停止并返回”可见，以及设置/详情/附近设备关闭确认中的 `×` 只关闭界面、不发送网络或媒体命令。实际网络、媒体与导出保存对话框仍需分别验证。
 

@@ -551,7 +551,6 @@ impl MoqCastApp {
                     {
                         self.settings_open = false;
                     }
-                    moqcast_ui::v2::icon_licenses(ui, self.text("图标许可", "Icon licenses"));
                 });
             });
     }

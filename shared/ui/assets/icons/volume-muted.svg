@@ -1,17 +1,6 @@
-<!-- @license lucide-static v1.77.0 - ISC -->
-<svg
-  class="lucide lucide-volume-x"
-  xmlns="http://www.w3.org/2000/svg"
-  width="24"
-  height="24"
-  viewBox="0 0 24 24"
-  fill="none"
-  stroke="currentColor"
-  stroke-width="2"
-  stroke-linecap="round"
-  stroke-linejoin="round"
->
-  <path d="M11 4.702a.7.7 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.7.7 0 0 0 11 19.298z" />
-  <path d="m16.5 14.5 5-5" />
-  <path d="m16.5 9.5 5 5" />
+<!-- MoQCast Original Icon Set v1: volume-muted (主动静音), 24x24 geometric arc grid, 2026-11-26 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M 10.75 6.25 L 7.25 9.25 H 4.75 A 1.25 1.25 0 0 0 3.5 10.5 V 13.5 A 1.25 1.25 0 0 0 4.75 14.75 H 7.25 L 10.75 17.75 Z" />
+  <path d="M 15.25 9.75 L 19.75 14.25" />
+  <path d="M 19.75 9.75 L 15.25 14.25" />
 </svg>

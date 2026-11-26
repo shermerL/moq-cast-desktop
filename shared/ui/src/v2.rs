@@ -1036,7 +1036,7 @@ pub enum Icon {
 impl Icon {
     fn asset(self) -> (&'static str, &'static [u8]) {
         match self {
-            Self::Close => ("v2-tabler-close", include_bytes!("../assets/icons/x.rgba")),
+            Self::Close => ("v2-icon-close", include_bytes!("../assets/icons/x.rgba")),
             Self::Settings => (
                 "v2-icon-settings",
                 include_bytes!("../assets/icons/settings.rgba"),
@@ -1308,10 +1308,10 @@ pub fn volume_control(
         );
         let interacting = response.enabled()
             && (response.hovered() || response.is_pointer_button_down_on() || response.has_focus());
-        crate::components::player::paint_speaker_icon(
+        crate::components::player::paint_volume_icon(
             ui,
             egui::Rect::from_center_size(response.rect.center(), egui::vec2(20.0, 20.0)),
-            state.muted(),
+            labels.enabled.then_some(state.percent()),
             if interacting { p.accent } else { p.muted },
         );
         response.widget_info(|| {
@@ -1400,13 +1400,6 @@ pub fn player_info_control(
         button,
         Some(Palette::for_ui(ui)),
     )
-}
-
-/// Shows the notices for the bundled Lucide and Feather icons in desktop settings.
-pub fn icon_licenses(ui: &mut Ui, label: &str) {
-    disclosure(ui, egui::Id::new("v2-icon-licenses"), label, false, |ui| {
-        ui.add(egui::Label::new(include_str!("../assets/icons/LICENSE.txt")).wrap());
-    });
 }
 
 /// Actions emitted by a destructive confirmation dialog footer.
@@ -2038,18 +2031,153 @@ mod controls_contract_tests {
     }
 
     #[test]
-    fn first_party_back_icon_asset_is_pure_white_72x72_alpha_mask() {
-        let (key, bytes) = Icon::Back.asset();
-        assert_eq!(key, "v2-icon-moqcast-back");
-        assert_eq!(bytes.len(), 72 * 72 * 4);
-        let mut nonzero = 0usize;
-        for pixel in bytes.chunks_exact(4) {
-            if pixel[3] > 0 {
-                nonzero += 1;
-                assert_eq!(&pixel[..3], &[255, 255, 255]);
+    fn all_fifteen_first_party_icons_are_pure_white_72x72_alpha_masks() {
+        let all = [
+            Icon::Close,
+            Icon::Settings,
+            Icon::Information,
+            Icon::Fullscreen,
+            Icon::ExitFullscreen,
+            Icon::Back,
+            Icon::ChevronRight,
+            Icon::ChevronDown,
+            Icon::VolumeHigh,
+            Icon::VolumeLow,
+            Icon::VolumeMuted,
+            Icon::VolumeOff,
+            Icon::AlertTriangle,
+            Icon::AlertCircle,
+            Icon::Monitor,
+        ];
+        assert_eq!(all.len(), 15);
+        let mut seen_keys = std::collections::BTreeSet::new();
+        let mut seen_masks = std::collections::BTreeSet::new();
+        for icon in all {
+            let (key, bytes) = icon.asset();
+            assert!(seen_keys.insert(key), "duplicate icon texture key: {key}");
+            let lower = key.to_ascii_lowercase();
+            assert!(
+                !lower.contains("lucide")
+                    && !lower.contains("tabler")
+                    && !lower.contains("feather"),
+                "stale third-party icon key: {key}"
+            );
+            assert_eq!(bytes.len(), 72 * 72 * 4, "icon {key} must be 72x72 RGBA");
+            let mut nonzero = 0usize;
+            for pixel in bytes.chunks_exact(4) {
+                if pixel[3] > 0 {
+                    nonzero += 1;
+                    assert_eq!(
+                        &pixel[..3],
+                        &[255, 255, 255],
+                        "icon {key} must be pure white"
+                    );
+                } else {
+                    assert_eq!(
+                        &pixel[..3],
+                        &[0, 0, 0],
+                        "icon {key} transparent pixels must be zeroed"
+                    );
+                }
+            }
+            assert!(
+                (200..4000).contains(&nonzero),
+                "icon {key} nonzero stroke pixels out of range: {nonzero}"
+            );
+            assert!(
+                seen_masks.insert(bytes),
+                "icon {key} must have a distinct mask"
+            );
+        }
+        assert_eq!(Icon::Back.asset().0, "v2-icon-moqcast-back");
+        assert_ne!(Icon::VolumeMuted.asset().1, Icon::VolumeOff.asset().1);
+    }
+
+    #[test]
+    fn volume_controls_map_all_four_audio_states_to_distinct_icons_in_light_and_dark() {
+        let cases = [
+            (false, 80u8, "v2-icon-volume-off"),
+            (true, 0u8, "v2-icon-volume-muted"),
+            (true, 35u8, "v2-icon-volume-low"),
+            (true, 80u8, "v2-icon-volume-high"),
+        ];
+        for dark in [false, true] {
+            for (enabled, percent, expected_key) in cases {
+                let ctx = Context::default();
+                install(&ctx);
+                ctx.set_theme(if dark {
+                    egui::Theme::Dark
+                } else {
+                    egui::Theme::Light
+                });
+                let mut state = crate::PlayerVolumeState::default();
+                state.set_percent(percent);
+                let mut out = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(320.0, 120.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |root| {
+                        egui::CentralPanel::default().show(root, |ui| {
+                            ui.horizontal(|ui| {
+                                let _ = crate::player_volume_control(
+                                    ui, &mut state, enabled, "Mute", "Unmute", "Volume", "No audio",
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                let _ = volume_control(
+                                    ui,
+                                    &mut state,
+                                    VolumeLabels {
+                                        mute: "Mute",
+                                        unmute: "Unmute",
+                                        volume: "Volume",
+                                        unavailable: "No audio",
+                                        enabled,
+                                    },
+                                );
+                            });
+                        });
+                    },
+                );
+                let expected_tex = ctx
+                    .data(|d| d.get_temp::<egui::TextureHandle>(egui::Id::new(expected_key)))
+                    .unwrap_or_else(|| {
+                        panic!("expected texture {expected_key} for dark={dark}, enabled={enabled}, percent={percent}")
+                    })
+                    .id();
+                let painted_matches = out
+                    .shapes
+                    .iter()
+                    .filter(|s| matches!(&s.shape, egui::Shape::Mesh(m) if m.texture_id == expected_tex))
+                    .count();
+                assert_eq!(
+                    painted_matches, 2,
+                    "both player_volume_control and v2::volume_control must paint {expected_key}"
+                );
+                for other_key in [
+                    "v2-icon-volume-off",
+                    "v2-icon-volume-muted",
+                    "v2-icon-volume-low",
+                    "v2-icon-volume-high",
+                ] {
+                    if other_key != expected_key {
+                        let loaded = ctx.data(|d| {
+                            d.get_temp::<egui::TextureHandle>(egui::Id::new(other_key))
+                                .is_some()
+                        });
+                        assert!(
+                            !loaded,
+                            "unexpected texture {other_key} loaded alongside {expected_key}"
+                        );
+                    }
+                }
+                out.textures_delta.clear();
             }
         }
-        assert!(nonzero > 200, "back icon mask should contain stroke pixels");
     }
 
     #[test]

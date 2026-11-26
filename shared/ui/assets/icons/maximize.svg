@@ -1,18 +1,7 @@
-<!-- @license lucide-static v1.77.0 - ISC -->
-<svg
-  class="lucide lucide-maximize"
-  xmlns="http://www.w3.org/2000/svg"
-  width="24"
-  height="24"
-  viewBox="0 0 24 24"
-  fill="none"
-  stroke="currentColor"
-  stroke-width="2"
-  stroke-linecap="round"
-  stroke-linejoin="round"
->
-  <path d="M8 3H5a2 2 0 0 0-2 2v3" />
-  <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
-  <path d="M3 16v3a2 2 0 0 0 2 2h3" />
-  <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+<!-- MoQCast Original Icon Set v1: maximize (进入全屏), 24x24 geometric arc grid, 2026-11-26 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M 4.5 8.75 V 6.25 A 1.75 1.75 0 0 1 6.25 4.5 H 8.75" />
+  <path d="M 15.25 4.5 H 17.75 A 1.75 1.75 0 0 1 19.5 6.25 V 8.75" />
+  <path d="M 19.5 15.25 V 17.75 A 1.75 1.75 0 0 1 17.75 19.5 H 15.25" />
+  <path d="M 8.75 19.5 H 6.25 A 1.75 1.75 0 0 1 4.5 17.75 V 15.25" />
 </svg>

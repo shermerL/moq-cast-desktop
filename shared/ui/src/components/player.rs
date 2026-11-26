@@ -222,11 +222,7 @@ fn player_volume_icon_button(ui: &mut Ui, percent: u8, accessible_label: &str) -
     response
 }
 
-pub(crate) fn paint_speaker_icon(ui: &Ui, rect: Rect, muted: bool, icon_color: Color32) {
-    paint_volume_icon(ui, rect, Some(if muted { 0 } else { 100 }), icon_color);
-}
-
-fn paint_volume_icon(ui: &Ui, rect: Rect, percent: Option<u8>, icon_color: Color32) {
+pub(crate) fn paint_volume_icon(ui: &Ui, rect: Rect, percent: Option<u8>, icon_color: Color32) {
     let icon = match percent {
         None => crate::v2::Icon::VolumeOff,
         Some(0) => crate::v2::Icon::VolumeMuted,

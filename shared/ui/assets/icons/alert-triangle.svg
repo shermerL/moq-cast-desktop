@@ -1,17 +1,6 @@
-<!-- @license lucide-static v1.77.0 - ISC -->
-<svg
-  class="lucide lucide-triangle-alert"
-  xmlns="http://www.w3.org/2000/svg"
-  width="24"
-  height="24"
-  viewBox="0 0 24 24"
-  fill="none"
-  stroke="currentColor"
-  stroke-width="2"
-  stroke-linecap="round"
-  stroke-linejoin="round"
->
-  <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
-  <path d="M12 9v4" />
-  <path d="M12 17h.01" />
+<!-- MoQCast Original Icon Set v1: alert-triangle (警告), 24x24 geometric arc grid, 2026-11-26 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M 10.45 5.15 L 4.05 16.45 A 1.85 1.85 0 0 0 5.65 19.25 H 18.35 A 1.85 1.85 0 0 0 19.95 16.45 L 13.55 5.15 A 1.8 1.8 0 0 0 10.45 5.15 Z" />
+  <path d="M 12 9.75 V 13.25" />
+  <path d="M 12 16.25 H 12.01" />
 </svg>
