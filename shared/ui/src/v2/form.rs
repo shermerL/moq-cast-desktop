@@ -1,7 +1,7 @@
 //! Theme-aware form controls with native egui editing and popup behavior.
 
-use super::{Palette, StatusTone, notice};
-use egui::{ComboBox, Id, InnerResponse, Margin, Response, RichText, Stroke, Ui};
+use super::{Icon, Palette, StatusTone, notice};
+use egui::{Color32, ComboBox, Frame, Id, InnerResponse, Margin, Response, RichText, Stroke, Ui};
 
 fn style(ui: &mut Ui) {
     let p = Palette::for_ui(ui);
@@ -110,100 +110,397 @@ pub fn select<R>(
     .inner
 }
 
-/// Choose one value without opening a separate popup.
-pub fn segmented<T: Copy + Eq>(ui: &mut Ui, value: &mut T, options: &[(T, &str)]) {
+/// Choose one value inside a framed segmented trough without opening a popup.
+/// Returns `true` when the selected option changed on this frame.
+pub fn segmented<T: Copy + Eq>(ui: &mut Ui, value: &mut T, options: &[(T, &str)]) -> bool {
     let p = Palette::for_ui(ui);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        for &(option, label) in options {
-            let selected = *value == option;
-            let button = egui::Button::selectable(selected, label)
-                .min_size(egui::vec2(76.0, 40.0))
-                .fill(if selected { p.soft } else { p.surface })
-                .stroke(Stroke::new(1.0, if selected { p.accent } else { p.border }));
-            if ui.add(button).clicked() {
-                *value = option;
-            }
-        }
-    });
+    let enabled = ui.is_enabled();
+    let mut changed = false;
+    Frame::new()
+        .fill(p.canvas)
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(8)
+        .inner_margin(Margin::same(3))
+        .show(ui, |ui| {
+            ui.spacing_mut().interact_size.y = 32.0;
+            ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+            ui.horizontal(|ui| {
+                for &(option, label) in options {
+                    let selected = *value == option;
+                    let text_color = if !enabled {
+                        p.muted.gamma_multiply(0.6)
+                    } else if selected {
+                        p.accent
+                    } else {
+                        p.muted
+                    };
+                    let rich = RichText::new(label)
+                        .size(13.5)
+                        .variation(b"wght", if selected { 500.0 } else { 400.0 })
+                        .color(text_color);
+                    let galley = egui::WidgetText::from(rich).into_galley(
+                        ui,
+                        Some(egui::TextWrapMode::Extend),
+                        f32::INFINITY,
+                        egui::FontSelection::Default,
+                    );
+                    let width = (galley.size().x + 22.0).max(58.0);
+                    let sense = if enabled {
+                        egui::Sense::click()
+                    } else {
+                        egui::Sense::hover()
+                    };
+                    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 32.0), sense);
+                    let hovered = enabled && response.hovered();
+                    if selected {
+                        ui.painter().rect(
+                            rect,
+                            6,
+                            p.surface,
+                            Stroke::new(1.0, p.border),
+                            egui::StrokeKind::Inside,
+                        );
+                    } else if hovered {
+                        ui.painter().rect_filled(rect, 6, p.hover);
+                    }
+                    if response.has_focus() {
+                        ui.painter().rect_stroke(
+                            rect,
+                            6,
+                            Stroke::new(2.0, p.accent),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    let final_color = if hovered && !selected {
+                        p.text
+                    } else {
+                        text_color
+                    };
+                    let text_pos = egui::pos2(
+                        rect.center().x - galley.size().x * 0.5,
+                        rect.center().y - galley.size().y * 0.5,
+                    );
+                    ui.painter().galley(text_pos, galley, final_color);
+                    response.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::RadioButton,
+                            enabled,
+                            selected,
+                            label,
+                        )
+                    });
+                    let response = if enabled {
+                        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+                    } else {
+                        response
+                    };
+                    if enabled && response.clicked() && !selected {
+                        *value = option;
+                        changed = true;
+                    }
+                }
+            });
+        });
+    changed
 }
 
-/// A keyboard-accessible switch; the caller keeps ownership of the setting.
-pub fn switch(ui: &mut Ui, value: &mut bool, label: &str) -> Response {
+fn paint_switch_track(
+    ui: &Ui,
+    track: egui::Rect,
+    value: bool,
+    enabled: bool,
+    hovered: bool,
+    has_focus: bool,
+) {
     let p = Palette::for_ui(ui);
-    let (rect, mut response) = ui.allocate_exact_size(egui::vec2(48.0, 40.0), egui::Sense::click());
-    if response.clicked() {
-        *value = !*value;
-        response.mark_changed();
-    }
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::Checkbox,
-            response.enabled(),
-            *value,
-            label,
+    let alpha = if enabled { 1.0 } else { 0.5 };
+    let (track_fill, track_stroke) = if value {
+        (p.accent.gamma_multiply(alpha), Stroke::NONE)
+    } else {
+        (
+            p.canvas.gamma_multiply(alpha),
+            Stroke::new(
+                1.0,
+                if hovered {
+                    p.accent
+                } else {
+                    p.border.gamma_multiply(alpha)
+                },
+            ),
         )
-    });
-    let track = egui::Rect::from_center_size(rect.center(), egui::vec2(44.0, 24.0));
-    let fill = if *value { p.accent } else { p.muted };
-    ui.painter().rect_filled(
+    };
+    ui.painter().rect(
         track,
         12.0,
-        if response.enabled() { fill } else { p.border },
+        track_fill,
+        track_stroke,
+        egui::StrokeKind::Inside,
     );
-    let x = if *value {
+    let knob_x = if value {
         track.right() - 12.0
     } else {
         track.left() + 12.0
     };
+    let dark = ui.visuals().dark_mode;
+    let knob_color = if value {
+        if dark {
+            Color32::from_rgb(0x14, 0x17, 0x18)
+        } else {
+            Color32::WHITE
+        }
+        .gamma_multiply(alpha)
+    } else if hovered {
+        p.text
+    } else {
+        p.muted.gamma_multiply(alpha)
+    };
     ui.painter()
-        .circle_filled(egui::pos2(x, track.center().y), 9.0, p.surface);
-    if response.has_focus() {
+        .circle_filled(egui::pos2(knob_x, track.center().y), 8.5, knob_color);
+    if has_focus {
         ui.painter().rect_stroke(
-            rect,
-            7,
+            track.expand(2.5),
+            14.0,
             Stroke::new(2.0, p.accent),
-            egui::StrokeKind::Inside,
+            egui::StrokeKind::Outside,
         );
     }
-    response
+}
+
+/// A keyboard-accessible switch; the caller keeps ownership of the setting.
+pub fn switch(ui: &mut Ui, value: &mut bool, label: &str) -> Response {
+    let enabled = ui.is_enabled();
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, mut response) = ui.allocate_exact_size(egui::vec2(48.0, 40.0), sense);
+    if enabled && response.clicked() {
+        *value = !*value;
+        response.mark_changed();
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, *value, label)
+    });
+    let track = egui::Rect::from_center_size(rect.center(), egui::vec2(44.0, 24.0));
+    paint_switch_track(
+        ui,
+        track,
+        *value,
+        enabled,
+        enabled && response.hovered(),
+        response.has_focus(),
+    );
+    if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    }
+}
+
+/// A single keyboard-accessible switch paired with a clickable inline text label.
+pub fn switch_with_label(ui: &mut Ui, value: &mut bool, label: &str) -> Response {
+    let p = Palette::for_ui(ui);
+    let enabled = ui.is_enabled();
+    let text_color = if enabled {
+        p.text
+    } else {
+        p.muted.gamma_multiply(0.6)
+    };
+    let galley = egui::WidgetText::from(RichText::new(label).size(14.0).color(text_color))
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::FontSelection::Default,
+        );
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let size = egui::vec2(
+        48.0 + 6.0 + galley.size().x + 4.0,
+        40.0_f32.max(galley.size().y + 8.0),
+    );
+    let (rect, mut response) = ui.allocate_exact_size(size, sense);
+    if enabled && response.clicked() {
+        *value = !*value;
+        response.mark_changed();
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, *value, label)
+    });
+    let track = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 24.0, rect.center().y),
+        egui::vec2(44.0, 24.0),
+    );
+    paint_switch_track(
+        ui,
+        track,
+        *value,
+        enabled,
+        enabled && response.hovered(),
+        response.has_focus(),
+    );
+    let text_pos = egui::pos2(rect.left() + 54.0, rect.center().y - galley.size().y * 0.5);
+    ui.painter().galley(text_pos, galley, text_color);
+    if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    }
 }
 
 /// A full-width disclosure row. The stable id keeps editing and language changes independent.
 pub fn disclosure(ui: &mut Ui, id: Id, label: &str, force_open: bool, body: impl FnOnce(&mut Ui)) {
+    disclosure_with_badge(ui, id, label, None, force_open, body);
+}
+
+/// A full-width disclosure row with an optional compact status pill badge beside the title.
+pub fn disclosure_with_badge(
+    ui: &mut Ui,
+    id: Id,
+    label: &str,
+    badge: Option<&str>,
+    force_open: bool,
+    body: impl FnOnce(&mut Ui),
+) {
+    let badge = badge.filter(|text| !text.trim().is_empty());
     let mut state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
     if force_open {
         state.set_open(true);
     }
     let p = Palette::for_ui(ui);
-    let response = ui
-        .scope(|ui| {
-            style(ui);
-            ui.add(
-                egui::Button::new(label)
-                    .min_size(egui::vec2(ui.available_width(), 40.0))
-                    .fill(p.hover),
-            )
-        })
-        .inner;
-    let center = egui::pos2(response.rect.right() - 18.0, response.rect.center().y);
-    let points = if state.is_open() {
-        [(-4.0, -2.0), (0.0, 2.0), (4.0, -2.0)]
+    let enabled = ui.is_enabled();
+    let sense = if enabled {
+        egui::Sense::click()
     } else {
-        [(-2.0, -4.0), (2.0, 0.0), (-2.0, 4.0)]
+        egui::Sense::hover()
     };
-    ui.painter().add(egui::Shape::line(
-        points
-            .into_iter()
-            .map(|(x, y)| center + egui::vec2(x, y))
-            .collect(),
-        Stroke::new(1.5, p.muted),
-    ));
-    if response.clicked() {
+    let width = ui.available_width().max(120.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 40.0), sense);
+    let visual_rect = rect.shrink2(egui::vec2(0.0, 2.0));
+    if enabled && response.is_pointer_button_down_on() {
+        ui.painter()
+            .rect_filled(visual_rect, 8, p.surface.lerp_to_gamma(p.accent, 0.14));
+    } else if enabled && response.hovered() {
+        ui.painter().rect_filled(visual_rect, 8, p.hover);
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            visual_rect.shrink(1.0),
+            8,
+            Stroke::new(2.0, p.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let icon = if state.is_open() {
+        Icon::ChevronDown
+    } else {
+        Icon::ChevronRight
+    };
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(visual_rect.left() + 16.0, visual_rect.center().y),
+        egui::vec2(16.0, 16.0),
+    );
+    let icon_tint = if !enabled {
+        p.muted.gamma_multiply(0.6)
+    } else if response.hovered() || response.is_pointer_button_down_on() {
+        p.text
+    } else {
+        p.muted
+    };
+    icon.paint(ui, icon_rect, icon_tint);
+
+    let title_color = if enabled {
+        p.text
+    } else {
+        p.muted.gamma_multiply(0.75)
+    };
+    let title_galley = egui::WidgetText::from(
+        RichText::new(label)
+            .size(14.0)
+            .variation(b"wght", 500.0)
+            .color(title_color),
+    )
+    .into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::FontSelection::Default,
+    );
+    let title_pos = egui::pos2(
+        icon_rect.right() + 6.0,
+        visual_rect.center().y - title_galley.size().y * 0.5,
+    );
+    let title_right = title_pos.x + title_galley.size().x;
+    ui.painter().galley(title_pos, title_galley, title_color);
+
+    if let Some(badge_text) = badge {
+        let badge_galley = egui::WidgetText::from(
+            RichText::new(badge_text)
+                .size(12.0)
+                .variation(b"wght", 500.0)
+                .color(p.accent),
+        )
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::FontSelection::Default,
+        );
+        let pill_w = badge_galley.size().x + 16.0;
+        let pill_rect = egui::Rect::from_min_size(
+            egui::pos2(title_right + 8.0, visual_rect.center().y - 11.0),
+            egui::vec2(pill_w, 22.0),
+        );
+        if pill_rect.right() <= visual_rect.right() - 4.0 {
+            ui.painter().rect_filled(pill_rect, 11.0, p.soft);
+            ui.painter().galley(
+                egui::pos2(
+                    pill_rect.center().x - badge_galley.size().x * 0.5,
+                    pill_rect.center().y - badge_galley.size().y * 0.5,
+                ),
+                badge_galley,
+                p.accent,
+            );
+        }
+    }
+
+    let response = if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    };
+    if enabled && response.clicked() {
         state.toggle(ui);
     }
-    state.show_body_unindented(ui, body);
+    state.store(ui.ctx());
+    let accessible_label = badge.map(|badge_text| format!("{label} · {badge_text}"));
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Button,
+            enabled,
+            state.is_open(),
+            accessible_label.as_deref().unwrap_or(label),
+        )
+    });
+    if state.is_open() {
+        ui.add_space(6.0);
+        state.show_body_unindented(ui, |ui| {
+            Frame::new()
+                .fill(p.canvas)
+                .stroke(Stroke::new(1.0, p.border))
+                .corner_radius(10)
+                .inner_margin(Margin::same(14))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    body(ui);
+                });
+        });
+    }
 }
 
 #[cfg(test)]
@@ -382,6 +679,485 @@ mod tests {
                 assert!(output.shapes.iter().any(|s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.job.text == "Invalid URL")));
                 output.textures_delta.clear();
             }
+        }
+    }
+
+    #[test]
+    fn segmented_switch_and_disclosure_batch2_controls_behave_in_light_and_dark() {
+        for dark in [false, true] {
+            let ctx = egui::Context::default();
+            super::super::install(&ctx);
+            ctx.set_theme(if dark {
+                egui::Theme::Dark
+            } else {
+                egui::Theme::Light
+            });
+            let mut mode = 0u8;
+            let mut enabled_flag = false;
+
+            let run_pass =
+                |events: Vec<egui::Event>,
+                 mode: &mut u8,
+                 enabled_flag: &mut bool|
+                 -> (egui::FullOutput, egui::Rect, egui::Rect, egui::Rect, bool) {
+                    let mut seg_rect = egui::Rect::NOTHING;
+                    let mut sw_rect = egui::Rect::NOTHING;
+                    let mut disc_rect = egui::Rect::NOTHING;
+                    let mut body_drawn = false;
+                    let out = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(520.0, 320.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |root| {
+                            egui::CentralPanel::default().show(root, |ui| {
+                                seg_rect = ui
+                                    .scope(|ui| {
+                                        ui.spacing_mut().item_spacing.y = 0.0;
+                                        segmented(
+                                            ui,
+                                            mode,
+                                            &[(0, "Dark"), (1, "Light"), (2, "System")],
+                                        );
+                                    })
+                                    .response
+                                    .rect;
+                                sw_rect = switch(ui, enabled_flag, "Developer mode").rect;
+                                disc_rect = ui
+                                    .scope(|ui| {
+                                        ui.spacing_mut().item_spacing.y = 0.0;
+                                        disclosure_with_badge(
+                                            ui,
+                                            Id::new("pin-test"),
+                                            "Certificate verification",
+                                            Some("Set"),
+                                            false,
+                                            |ui| {
+                                                body_drawn = true;
+                                                ui.label("SHA-256 body");
+                                            },
+                                        );
+                                    })
+                                    .response
+                                    .rect;
+                            });
+                        },
+                    );
+                    (out, seg_rect, sw_rect, disc_rect, body_drawn)
+                };
+
+            // Warmup + measure pass
+            let (mut out, seg_rect, sw_rect, disc_rect, body_drawn) =
+                run_pass(vec![], &mut mode, &mut enabled_flag);
+            out.textures_delta.clear();
+            let (mut out, _, _, _, _) = run_pass(vec![], &mut mode, &mut enabled_flag);
+            out.textures_delta.clear();
+
+            assert!(!body_drawn, "disclosure must start collapsed");
+            assert!(
+                seg_rect.height() <= 40.0,
+                "segmented height={} must fit inside 40pt settings_row",
+                seg_rect.height()
+            );
+            assert!(
+                sw_rect.height() >= 40.0,
+                "switch hit height={}",
+                sw_rect.height()
+            );
+            assert!(
+                disc_rect.height() >= 40.0,
+                "disclosure hit height={}",
+                disc_rect.height()
+            );
+            assert!(
+                out.shapes.iter().any(
+                    |s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.job.text == "Set")
+                ),
+                "disclosure badge must be rendered"
+            );
+            let second_seg_center = out
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.job.text == "Light" => {
+                        Some(t.galley.rect.translate(t.pos.to_vec2()).center())
+                    }
+                    _ => None,
+                })
+                .expect("Light segment label");
+
+            // Click Light segment, switch, and disclosure trigger to open
+            let mut body_drawn_after_open = false;
+            for click_pos in [second_seg_center, sw_rect.center(), disc_rect.center()] {
+                for pressed in [true, false] {
+                    let (mut out, _, _, _, drawn) = run_pass(
+                        vec![
+                            egui::Event::PointerMoved(click_pos),
+                            egui::Event::PointerButton {
+                                pos: click_pos,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: Default::default(),
+                            },
+                        ],
+                        &mut mode,
+                        &mut enabled_flag,
+                    );
+                    out.textures_delta.clear();
+                    body_drawn_after_open = drawn;
+                }
+            }
+            assert_eq!(mode, 1, "segmented must switch to Light");
+            assert!(enabled_flag, "switch must toggle on");
+            assert!(body_drawn_after_open, "disclosure must expand on click");
+
+            // Click disclosure trigger again and verify collapse persists on next frame
+            for pressed in [true, false] {
+                let (mut out, _, _, _, _) = run_pass(
+                    vec![
+                        egui::Event::PointerMoved(disc_rect.center()),
+                        egui::Event::PointerButton {
+                            pos: disc_rect.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        },
+                    ],
+                    &mut mode,
+                    &mut enabled_flag,
+                );
+                out.textures_delta.clear();
+            }
+            let (mut out, _, _, _, body_drawn_after_close) =
+                run_pass(vec![], &mut mode, &mut enabled_flag);
+            out.textures_delta.clear();
+            assert!(
+                !body_drawn_after_close,
+                "disclosure collapse must persist across frames"
+            );
+        }
+    }
+
+    #[test]
+    fn disclosure_with_badge_preserves_badge_in_accesskit_when_collapsed() {
+        for (title, badge, expected_with_badge) in [
+            ("证书校验", "已设置", "证书校验 · 已设置"),
+            (
+                "Certificate verification",
+                "Set",
+                "Certificate verification · Set",
+            ),
+        ] {
+            for has_badge in [false, true] {
+                let ctx = egui::Context::default();
+                super::super::install(&ctx);
+                ctx.enable_accesskit();
+                let mut body_drawn = false;
+                let mut trigger_id = None;
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(520.0, 240.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |root| {
+                        egui::CentralPanel::default().show(root, |ui| {
+                            disclosure_with_badge(
+                                ui,
+                                Id::new("relay-pin-a11y"),
+                                title,
+                                has_badge.then_some(badge),
+                                false,
+                                |ui| {
+                                    body_drawn = true;
+                                    ui.label("SHA-256");
+                                },
+                            );
+                        });
+                    },
+                );
+                assert!(!body_drawn, "disclosure should start collapsed");
+                let update = output
+                    .platform_output
+                    .accesskit_update
+                    .as_ref()
+                    .expect("AccessKit update must be emitted");
+                let button_labels: Vec<&str> = update
+                    .nodes
+                    .iter()
+                    .filter(|(_, node)| node.role() == egui::accesskit::Role::Button)
+                    .filter_map(|(_, node)| node.label())
+                    .collect();
+                let expected = if has_badge {
+                    expected_with_badge
+                } else {
+                    title
+                };
+                assert!(
+                    button_labels.contains(&expected),
+                    "expected AccessKit button label {expected:?}, got {button_labels:?}"
+                );
+                if !has_badge {
+                    assert!(
+                        !button_labels.iter().any(|l| l.contains(badge)),
+                        "badge must not appear when unset: {button_labels:?}"
+                    );
+                }
+                output.textures_delta.clear();
+
+                // Keyboard activation (Enter on focused disclosure) must still expand and keep badge label
+                let mut trigger_rect = egui::Rect::NOTHING;
+                let mut out2 = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(520.0, 240.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |root| {
+                        egui::CentralPanel::default().show(root, |ui| {
+                            let scope = ui.scope(|ui| {
+                                disclosure_with_badge(
+                                    ui,
+                                    Id::new("relay-pin-a11y"),
+                                    title,
+                                    has_badge.then_some(badge),
+                                    false,
+                                    |ui| {
+                                        body_drawn = true;
+                                        ui.label("SHA-256");
+                                    },
+                                );
+                            });
+                            trigger_rect = scope.response.rect;
+                        });
+                    },
+                );
+                out2.textures_delta.clear();
+                // Tab focus into the disclosure trigger and press Space
+                let mut out3 = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(520.0, 240.0),
+                        )),
+                        events: vec![egui::Event::Key {
+                            key: egui::Key::Tab,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers: Default::default(),
+                        }],
+                        ..Default::default()
+                    },
+                    |root| {
+                        egui::CentralPanel::default().show(root, |ui| {
+                            disclosure_with_badge(
+                                ui,
+                                Id::new("relay-pin-a11y"),
+                                title,
+                                has_badge.then_some(badge),
+                                false,
+                                |ui| {
+                                    body_drawn = true;
+                                    ui.label("SHA-256");
+                                },
+                            );
+                            trigger_id = ui.ctx().memory(|m| m.focused());
+                        });
+                    },
+                );
+                out3.textures_delta.clear();
+                assert!(
+                    trigger_id.is_some() && trigger_rect.height() >= 40.0,
+                    "disclosure trigger must receive keyboard focus"
+                );
+                let mut out4 = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(520.0, 240.0),
+                        )),
+                        events: vec![egui::Event::Key {
+                            key: egui::Key::Space,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers: Default::default(),
+                        }],
+                        ..Default::default()
+                    },
+                    |root| {
+                        egui::CentralPanel::default().show(root, |ui| {
+                            disclosure_with_badge(
+                                ui,
+                                Id::new("relay-pin-a11y"),
+                                title,
+                                has_badge.then_some(badge),
+                                false,
+                                |ui| {
+                                    body_drawn = true;
+                                    ui.label("SHA-256");
+                                },
+                            );
+                        });
+                    },
+                );
+                out4.textures_delta.clear();
+                assert!(body_drawn, "Space on focused disclosure must expand it");
+            }
+        }
+    }
+
+    #[test]
+    fn switch_with_label_toggles_once_from_text_or_track_with_single_focus_stop() {
+        for label in ["暂停自动滚动", "Pause auto-scroll"] {
+            let ctx = egui::Context::default();
+            super::super::install(&ctx);
+            ctx.enable_accesskit();
+            let mut value = false;
+
+            let render = |events: Vec<egui::Event>, value: &mut bool| {
+                let mut control_rect = egui::Rect::NOTHING;
+                let mut changed = false;
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(480.0, 120.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |root| {
+                        egui::CentralPanel::default().show(root, |ui| {
+                            let response = switch_with_label(ui, value, label);
+                            control_rect = response.rect;
+                            changed = response.changed();
+                        });
+                    },
+                );
+                output.textures_delta.clear();
+                (output, control_rect, changed)
+            };
+
+            // Warmup and locate painted text center and track center
+            let (out, control_rect, _) = render(vec![], &mut value);
+            let update = out
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .expect("AccessKit update");
+            let checkboxes: Vec<&str> = update
+                .nodes
+                .iter()
+                .filter(|(_, node)| node.role() == egui::accesskit::Role::CheckBox)
+                .filter_map(|(_, node)| node.label())
+                .collect();
+            assert_eq!(
+                checkboxes,
+                vec![label],
+                "switch_with_label must expose exactly one CheckBox control"
+            );
+
+            let text_center = out
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.job.text == label => {
+                        Some(t.galley.rect.translate(t.pos.to_vec2()).center())
+                    }
+                    _ => None,
+                })
+                .expect("inline switch label must be painted");
+            let track_center = egui::pos2(control_rect.left() + 24.0, control_rect.center().y);
+
+            // Click painted label text: false -> true (single toggle, no double trigger)
+            let mut changed_on_release = false;
+            for pressed in [true, false] {
+                let (_, _, changed) = render(
+                    vec![
+                        egui::Event::PointerMoved(text_center),
+                        egui::Event::PointerButton {
+                            pos: text_center,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        },
+                    ],
+                    &mut value,
+                );
+                changed_on_release = changed;
+            }
+            assert!(value, "clicking label text must toggle false -> true");
+            assert!(changed_on_release);
+
+            // Click painted label text again: true -> false
+            for pressed in [true, false] {
+                let _ = render(
+                    vec![
+                        egui::Event::PointerMoved(text_center),
+                        egui::Event::PointerButton {
+                            pos: text_center,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        },
+                    ],
+                    &mut value,
+                );
+            }
+            assert!(!value, "second label click must toggle true -> false");
+
+            // Click switch track: false -> true
+            for pressed in [true, false] {
+                let _ = render(
+                    vec![
+                        egui::Event::PointerMoved(track_center),
+                        egui::Event::PointerButton {
+                            pos: track_center,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        },
+                    ],
+                    &mut value,
+                );
+            }
+            assert!(value, "clicking track must toggle false -> true");
+
+            // Keyboard Tab + Space must toggle once with a single focusable stop
+            let _ = render(
+                vec![egui::Event::Key {
+                    key: egui::Key::Tab,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                }],
+                &mut value,
+            );
+            let _ = render(
+                vec![egui::Event::Key {
+                    key: egui::Key::Space,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                }],
+                &mut value,
+            );
+            assert!(
+                !value,
+                "Space on focused switch_with_label must toggle once"
+            );
         }
     }
 }

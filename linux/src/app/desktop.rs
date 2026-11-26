@@ -379,19 +379,24 @@ impl MoqCastApp {
                         self.text("取消", "Cancel"),
                     )
                     .clicked();
-                    ui.label(self.text(
-                        "关闭会停止当前观看或共享，并断开附近连接。",
-                        "Turning off Nearby stops the current watch or share and closes nearby connections.",
-                    ));
-                    let confirm = (Action {
-                        label: self.text("关闭附近设备", "Turn off Nearby"),
-                        size: vec2(156.0, 40.0),
-                        enabled: true,
-                        tone: ActionTone::Danger,
-                    })
-                    .show(ui)
-                    .clicked();
-                    (close, confirm)
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(self.text(
+                                "关闭会停止当前观看或共享，并断开附近连接。",
+                                "Turning off Nearby stops the current watch or share and closes nearby connections.",
+                            ))
+                            .size(14.0)
+                            .color(p.muted),
+                        )
+                        .wrap(),
+                    );
+                    let actions = v2::confirm_dialog_actions(
+                        ui,
+                        self.text("取消", "Cancel"),
+                        self.text("关闭附近设备", "Turn off Nearby"),
+                        156.0,
+                    );
+                    (close || actions.cancelled, actions.confirmed)
                 });
             if result.inner.1 {
                 self.send(UserCommand::StopDiscovery);

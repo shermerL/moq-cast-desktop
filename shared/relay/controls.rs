@@ -151,7 +151,14 @@ impl Ui {
                             Ok(config) => {
                                 result = Some(ActionRequest::Command(Command::Connect(config)))
                             }
-                            Err(error) => self.error = Some(error),
+                            Err(error) => {
+                                self.error = Some(error);
+                                if error == ConfigError::Fingerprint {
+                                    ui.memory_mut(|m| {
+                                        m.request_focus(egui::Id::new("relay-fingerprint"))
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -237,22 +244,34 @@ impl Ui {
                 }
             });
         if self.confirm_disconnect == Some(generation) {
-            egui::Modal::new("relay-disconnect".into()).show(ui.ctx(), |ui| {
-                ui.label(text(
-                    "断开会结束本场 Relay 媒体。",
-                    "Disconnecting will stop this Relay session.",
-                ));
-                if ui.button(text("取消", "Cancel")).clicked() {
-                    self.confirm_disconnect = None;
-                }
-                if ui
-                    .button(text("停止并断开", "Stop and disconnect"))
-                    .clicked()
-                {
-                    self.confirm_disconnect = None;
-                    result = Some(ActionRequest::Command(Command::Disconnect(generation)));
-                }
-            });
+            let modal = egui::Modal::new("relay-disconnect".into())
+                .frame(palette.dialog())
+                .show(ui.ctx(), |ui| {
+                    ui.set_width((ui.ctx().content_rect().width() - 96.0).clamp(240.0, 412.0));
+                    let close = v2::dialog_header(
+                        ui,
+                        text("断开 Relay？", "Disconnect Relay?"),
+                        text("关闭弹窗", "Close dialog"),
+                    )
+                    .clicked();
+                    ui.label(text(
+                        "断开会结束本场 Relay 媒体。",
+                        "Disconnecting will stop this Relay session.",
+                    ));
+                    let actions = v2::confirm_dialog_actions(
+                        ui,
+                        text("取消", "Cancel"),
+                        text("停止并断开", "Stop and disconnect"),
+                        164.0,
+                    );
+                    (close || actions.cancelled, actions.confirmed)
+                });
+            if modal.inner.1 {
+                self.confirm_disconnect = None;
+                result = Some(ActionRequest::Command(Command::Disconnect(generation)));
+            } else if modal.inner.0 || modal.should_close() {
+                self.confirm_disconnect = None;
+            }
         }
         result
     }
@@ -292,16 +311,14 @@ impl Ui {
         }
         let pin_set = !self.fingerprint.trim().is_empty()
             && moq_tokio::tls::parse_fingerprint(self.fingerprint.trim()).is_ok();
-        let title = if pin_set {
-            text("证书校验 · 已设置", "Certificate verification · Set")
-        } else {
-            text("证书校验", "Certificate verification")
-        };
+        let title = text("证书校验", "Certificate verification");
+        let badge = pin_set.then_some(text("已设置", "Set"));
         ui.add_enabled_ui(editable, |ui| {
-            moqcast_ui::v2::disclosure(
+            v2::disclosure_with_badge(
                 ui,
                 egui::Id::new("relay-pin-section"),
                 title,
+                badge,
                 self.error == Some(ConfigError::Fingerprint),
                 |ui| {
                     let label = text(
@@ -361,6 +378,131 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Exercise the same form and modal used by both desktop supervisors.
+    fn frame(
+        form: &mut Ui,
+        ctx: &egui::Context,
+        state: &Snapshot,
+        events: Vec<egui::Event>,
+        chinese: bool,
+    ) -> (egui::FullOutput, Option<ActionRequest>) {
+        let mut action = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1040.0, 700.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    action = form.page(ui, chinese, state, &MediaRoute::Nearby, false);
+                });
+            },
+        );
+        output.textures_delta.clear();
+        (output, action)
+    }
+
+    fn click(
+        form: &mut Ui,
+        ctx: &egui::Context,
+        state: &Snapshot,
+        label: &str,
+    ) -> Option<ActionRequest> {
+        let (out, _) = frame(form, ctx, state, vec![], false);
+        let pos = out
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.job.text == label => Some(
+                    t.galley
+                        .rect
+                        .translate(t.pos.to_vec2())
+                        .intersect(s.clip_rect)
+                        .center(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing action {label}"));
+        let mut action = None;
+        for pressed in [true, false] {
+            action = frame(
+                form,
+                ctx,
+                state,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+                false,
+            )
+            .1;
+        }
+        action
+    }
+
+    #[test]
+    fn relay_pin_badge_and_invalid_pin_focus_reach_the_connection_form() {
+        for (chinese, expected) in [
+            (false, "Certificate verification · Set"),
+            (true, "证书校验 · 已设置"),
+        ] {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let state = Snapshot::default();
+            let mut form = Ui {
+                address: "moqt://relay.example/".into(),
+                fingerprint: "ab".repeat(32),
+                ..Default::default()
+            };
+            let (out, _) = frame(&mut form, &ctx, &state, vec![], chinese);
+            let tree = out.platform_output.accesskit_update.unwrap();
+            assert!(
+                tree.nodes
+                    .iter()
+                    .any(|(_, node)| node.label() == Some(expected))
+            );
+            form.fingerprint = "invalid".into();
+            assert!(click(&mut form, &ctx, &state, "Connect").is_none());
+            frame(&mut form, &ctx, &state, vec![], false);
+            assert_eq!(form.error, Some(ConfigError::Fingerprint));
+            assert!(ctx.memory(|m| m.has_focus(egui::Id::new("relay-fingerprint"))));
+        }
+    }
+
+    #[test]
+    fn disconnect_dialog_cancels_or_disconnects_only_the_pending_publications_connection() {
+        let ctx = egui::Context::default();
+        let mut state = Snapshot::default();
+        let first = state.lifecycle.begin(Phase::Connected);
+        let mut form = Ui {
+            publish_pending: Some((first, state.publish_request)),
+            ..Default::default()
+        };
+        assert!(click(&mut form, &ctx, &state, "Disconnect Relay").is_none());
+        assert_eq!(form.confirm_disconnect, Some(first));
+        assert!(click(&mut form, &ctx, &state, "Cancel").is_none());
+        assert_eq!(form.confirm_disconnect, None);
+        assert!(click(&mut form, &ctx, &state, "Disconnect Relay").is_none());
+        let second = state.lifecycle.begin(Phase::Connected);
+        form.reconcile(&state, &MediaRoute::Nearby, false);
+        assert_eq!(form.confirm_disconnect, None);
+        form.publish_pending = Some((second, state.publish_request));
+        assert!(click(&mut form, &ctx, &state, "Disconnect Relay").is_none());
+        assert!(
+            matches!(click(&mut form, &ctx, &state, "Stop and disconnect"),
+            Some(ActionRequest::Command(Command::Disconnect(g))) if g == second)
+        );
+    }
 
     #[test]
     fn pin_survives_scope_edit_but_retarget_requires_another_gesture() {

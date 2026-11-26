@@ -65,32 +65,36 @@ impl DiagnosticsUi {
             .on_hover_text(reason);
         }
         moqcast_ui::v2::settings_row(ui, text(locale, "日志", "Logs"), |ui| {
-            if ui
-                .add_enabled(
-                    file_available && self.open_rx.is_none(),
-                    egui::Button::new(text(locale, "打开目录", "Open folder")),
-                )
-                .on_hover_text(match &file_status {
-                    FileStatus::Available(directory) => directory.display().to_string(),
-                    FileStatus::Unavailable(reason) => reason.clone(),
-                })
-                .clicked()
-            {
-                self.open_directory(ui.ctx().clone());
-            }
-            if ui
-                .add_enabled(
-                    file_available && self.export_rx.is_none(),
-                    egui::Button::new(text(locale, "导出本地日志", "Export local logs")),
-                )
-                .on_hover_text(text(
-                    locale,
-                    "日志仅保存在本机，导出时由你选择位置。",
-                    "Logs stay on this Mac; choose a location when exporting.",
-                ))
-                .clicked()
+            if (moqcast_ui::v2::Action {
+                label: text(locale, "导出本地日志", "Export local logs"),
+                size: egui::vec2(108.0, 40.0),
+                enabled: file_available && self.export_rx.is_none(),
+                tone: moqcast_ui::v2::ActionTone::Neutral,
+            })
+            .show(ui)
+            .on_hover_text(text(
+                locale,
+                "日志仅保存在本机，导出时由你选择位置。",
+                "Logs stay on this Mac; choose a location when exporting.",
+            ))
+            .clicked()
             {
                 self.choose_export(ui.ctx().clone());
+            }
+            if (moqcast_ui::v2::Action {
+                label: text(locale, "打开目录", "Open folder"),
+                size: egui::vec2(96.0, 40.0),
+                enabled: file_available && self.open_rx.is_none(),
+                tone: moqcast_ui::v2::ActionTone::Neutral,
+            })
+            .show(ui)
+            .on_hover_text(match &file_status {
+                FileStatus::Available(directory) => directory.display().to_string(),
+                FileStatus::Unavailable(reason) => reason.clone(),
+            })
+            .clicked()
+            {
+                self.open_directory(ui.ctx().clone());
             }
         });
         if let Some(status) = self.localized_status(locale) {
@@ -100,7 +104,15 @@ impl DiagnosticsUi {
 
     pub(super) fn show_developer_settings(&mut self, ui: &mut egui::Ui, locale: Locale) -> bool {
         moqcast_ui::v2::settings_row(ui, text(locale, "详细日志", "Detailed logs"), |ui| {
-            if ui.button(text(locale, "查看日志", "Open logs")).clicked() {
+            if (moqcast_ui::v2::Action {
+                label: text(locale, "查看日志", "Open logs"),
+                size: egui::vec2(108.0, 40.0),
+                enabled: true,
+                tone: moqcast_ui::v2::ActionTone::Neutral,
+            })
+            .show(ui)
+            .clicked()
+            {
                 self.visible = true;
             }
         });
@@ -126,9 +138,11 @@ impl DiagnosticsUi {
             .show(context, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(text(locale, "最低级别", "Minimum level"));
-                    egui::ComboBox::from_id_salt("diagnostics-level")
-                        .selected_text(self.minimum_level.as_str())
-                        .show_ui(ui, |ui| {
+                    moqcast_ui::v2::select(
+                        ui,
+                        egui::ComboBox::from_id_salt("diagnostics-level")
+                            .selected_text(self.minimum_level.as_str()),
+                        |ui| {
                             for level in [
                                 LogLevel::Error,
                                 LogLevel::Warn,
@@ -137,7 +151,8 @@ impl DiagnosticsUi {
                             ] {
                                 ui.selectable_value(&mut self.minimum_level, level, level.as_str());
                             }
-                        });
+                        },
+                    );
                     ui.label(text(locale, "搜索", "Search"));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.search)
@@ -148,7 +163,8 @@ impl DiagnosticsUi {
                                 "Target, thread, or event",
                             )),
                     );
-                    ui.checkbox(
+                    moqcast_ui::v2::switch_with_label(
+                        ui,
                         &mut self.pause_auto_scroll,
                         text(locale, "暂停自动滚动", "Pause auto-scroll"),
                     );
@@ -157,9 +173,14 @@ impl DiagnosticsUi {
                 self.display_cache
                     .refresh(&self.snapshot, self.minimum_level, &self.search);
                 ui.horizontal(|ui| {
-                    if ui
-                        .button(text(locale, "复制当前结果", "Copy visible logs"))
-                        .clicked()
+                    if (moqcast_ui::v2::Action {
+                        label: text(locale, "复制当前结果", "Copy visible logs"),
+                        size: egui::vec2(124.0, 40.0),
+                        enabled: true,
+                        tone: moqcast_ui::v2::ActionTone::Neutral,
+                    })
+                    .show(ui)
+                    .clicked()
                     {
                         context.copy_text(self.display_cache.lines.join("\n"));
                     }
@@ -452,5 +473,69 @@ mod tests {
         let command = directory_command(Path::new("/tmp/logs"));
         assert_eq!(command.get_program(), "/usr/bin/open");
         assert_eq!(command.get_args().collect::<Vec<_>>(), ["/tmp/logs"]);
+    }
+
+    #[test]
+    fn log_window_pause_label_click_toggles_once() {
+        for (locale, label) in [
+            (Locale::Chinese, "暂停自动滚动"),
+            (Locale::English, "Pause auto-scroll"),
+        ] {
+            let diagnostics = moqcast_diagnostics::init(moqcast_diagnostics::Config::without_file(
+                crate::build_info::diagnostics(),
+                "UI fixture",
+            ));
+            let mut ui = DiagnosticsUi::new(diagnostics.handle(), false);
+            ui.visible = true;
+            let ctx = egui::Context::default();
+            moqcast_ui::v2::install(&ctx);
+            let render = |ui: &mut DiagnosticsUi, events| {
+                let mut out = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(960.0, 640.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |root| {
+                        let _ = ui.show_window(root.ctx(), locale);
+                    },
+                );
+                out.textures_delta.clear();
+                out
+            };
+            let _ = render(&mut ui, vec![]);
+            let out = render(&mut ui, vec![]);
+            let text_center = out
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.job.text == label => {
+                        Some(t.galley.rect.translate(t.pos.to_vec2()).center())
+                    }
+                    _ => None,
+                })
+                .expect("pause auto-scroll label must be painted");
+            assert!(!ui.pause_auto_scroll);
+            for expected in [true, false] {
+                for pressed in [true, false] {
+                    let _ = render(
+                        &mut ui,
+                        vec![
+                            egui::Event::PointerMoved(text_center),
+                            egui::Event::PointerButton {
+                                pos: text_center,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: Default::default(),
+                            },
+                        ],
+                    );
+                }
+                assert_eq!(ui.pause_auto_scroll, expected, "locale={locale:?}");
+            }
+        }
     }
 }

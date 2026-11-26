@@ -2,6 +2,7 @@
 use super::*;
 use crate::relay::{Config, ConfigError, Endpoint, Phase, Selection};
 use crate::runtime::MediaSource;
+use egui::RichText;
 use moqcast_ui::v2::{Action, ActionTone, Palette, StatusTone, notice};
 
 #[derive(Default)]
@@ -91,14 +92,78 @@ impl Ui {
     }
 }
 
-fn source_badge(ui: &mut egui::Ui, label: &str) {
+fn active_banner(
+    ui: &mut egui::Ui,
+    source: &str,
+    path: &str,
+    return_label: &str,
+    stop_label: &str,
+    stop_enabled: bool,
+) -> (bool, bool) {
     let p = Palette::for_ui(ui);
-    StatusTone::Active.indicator(ui);
+    let mut returned = false;
+    let mut stopped = false;
     egui::Frame::new()
         .fill(p.soft)
-        .corner_radius(8)
-        .inner_margin(5)
-        .show(ui, |ui| ui.colored_label(p.accent, label));
+        .stroke(egui::Stroke::new(1.0, p.border))
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(14, 4))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.set_min_height(40.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    stopped = Action {
+                        label: stop_label,
+                        size: egui::vec2(88.0, 40.0),
+                        enabled: stop_enabled,
+                        tone: ActionTone::Danger,
+                    }
+                    .show(ui)
+                    .clicked();
+                    returned = Action {
+                        label: return_label,
+                        size: egui::vec2(88.0, 40.0),
+                        enabled: true,
+                        tone: ActionTone::Neutral,
+                    }
+                    .show(ui)
+                    .clicked();
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let (_, dot) = ui.allocate_space(egui::vec2(8.0, 8.0));
+                        ui.painter().circle_filled(dot.center(), 4.0, p.accent);
+                        egui::Frame::new()
+                            .fill(p.surface)
+                            .stroke(egui::Stroke::new(1.0, p.border))
+                            .corner_radius(6)
+                            .inner_margin(egui::Margin::symmetric(8, 3))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new(source)
+                                        .size(12.0)
+                                        .variation(b"wght", 500.0)
+                                        .color(p.text),
+                                );
+                            });
+                        ui.add_space(2.0);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(path)
+                                    .size(14.0)
+                                    .variation(b"wght", 500.0)
+                                    .color(p.text),
+                            )
+                            .halign(egui::Align::Min)
+                            .truncate(),
+                        )
+                        .on_hover_text(path);
+                    });
+                });
+            });
+        });
+    (returned, stopped)
 }
 
 impl MoqCastApp {
@@ -152,62 +217,41 @@ impl MoqCastApp {
                     }
                 });
                 if snapshot.media_owner.is_some() {
-                    ui.horizontal(|ui| {
-                        let relay = snapshot.relay_media();
-                        let source = if relay {
-                            "Relay"
+                    ui.add_space(6.0);
+                    let relay = snapshot.relay_media();
+                    let source = if relay {
+                        "Relay"
+                    } else {
+                        self.text("附近设备", "Nearby")
+                    };
+                    let path = snapshot
+                        .media_path
+                        .as_deref()
+                        .unwrap_or(self.text("屏幕共享", "Screen share"));
+                    let (returned, stopped) = active_banner(
+                        ui,
+                        source,
+                        path,
+                        self.text("返回", "Return"),
+                        self.text("停止", "Stop"),
+                        snapshot.media.phase() != MediaPhase::Stopping,
+                    );
+                    if returned {
+                        self.page = if snapshot.media_owner == Some(MediaOwner::Watch) {
+                            Page::Watch
+                        } else if relay {
+                            Page::RelayShare
                         } else {
-                            self.text("附近设备", "Nearby")
+                            Page::ScreenShare
                         };
-                        source_badge(ui, source);
-                        let label_width =
-                            (ui.available_width() - 176.0 - 2.0 * ui.spacing().item_spacing.x)
-                                .max(0.0);
-                        ui.add_sized(
-                            egui::vec2(label_width, 40.0),
-                            egui::Label::new(
-                                snapshot
-                                    .media_path
-                                    .as_deref()
-                                    .unwrap_or(self.text("屏幕共享", "Screen share")),
-                            )
-                            .halign(egui::Align::Min)
-                            .truncate(),
-                        );
-                        if (Action {
-                            label: self.text("返回", "Return"),
-                            size: egui::vec2(88.0, 40.0),
-                            enabled: true,
-                            tone: ActionTone::Neutral,
-                        })
-                        .show(ui)
-                        .clicked()
-                        {
-                            self.page = if snapshot.media_owner == Some(MediaOwner::Watch) {
-                                Page::Watch
-                            } else if relay {
-                                Page::RelayShare
-                            } else {
-                                Page::ScreenShare
-                            };
-                        }
-                        if (Action {
-                            label: self.text("停止", "Stop"),
-                            size: egui::vec2(88.0, 40.0),
-                            enabled: snapshot.media.phase() != MediaPhase::Stopping,
-                            tone: ActionTone::Danger,
-                        })
-                        .show(ui)
-                        .clicked()
-                        {
-                            self.command_error = !if snapshot.media_owner == Some(MediaOwner::Watch)
-                            {
-                                self.runtime.stop_watching(snapshot.media.generation())
-                            } else {
-                                self.runtime.stop_sharing(snapshot.media.generation())
-                            };
-                        }
-                    });
+                    }
+                    if stopped {
+                        self.command_error = !if snapshot.media_owner == Some(MediaOwner::Watch) {
+                            self.runtime.stop_watching(snapshot.media.generation())
+                        } else {
+                            self.runtime.stop_sharing(snapshot.media.generation())
+                        };
+                    }
                 }
             });
     }
@@ -356,16 +400,14 @@ impl MoqCastApp {
         }
         let pin_set = !self.relay_ui.fingerprint.trim().is_empty()
             && moq_tokio::tls::parse_fingerprint(self.relay_ui.fingerprint.trim()).is_ok();
-        let title = if pin_set {
-            self.text("证书校验 · 已设置", "Certificate verification · Set")
-        } else {
-            self.text("证书校验", "Certificate verification")
-        };
+        let title = self.text("证书校验", "Certificate verification");
+        let badge = pin_set.then_some(self.text("已设置", "Set"));
         ui.add_enabled_ui(editable, |ui| {
-            moqcast_ui::v2::disclosure(
+            moqcast_ui::v2::disclosure_with_badge(
                 ui,
                 egui::Id::new("relay-pin-section"),
                 title,
+                badge,
                 self.relay_ui.error == Some(ConfigError::Fingerprint),
                 |ui| {
                     let label = self.text(
@@ -482,10 +524,11 @@ impl MoqCastApp {
             let response = egui::Modal::new(egui::Id::new("disconnect-relay"))
                 .frame(Palette::for_ui(ui).dialog())
                 .show(ui.ctx(), |ui| {
+                    ui.set_width((ui.ctx().content_rect().width() - 96.0).clamp(240.0, 412.0));
                     if moqcast_ui::v2::dialog_header(
                         ui,
                         self.text("断开 Relay？", "Disconnect Relay?"),
-                        self.text("取消", "Cancel"),
+                        self.text("关闭弹窗", "Close dialog"),
                     )
                     .clicked()
                     {
@@ -493,46 +536,41 @@ impl MoqCastApp {
                     }
                     let sharing = matches!(snapshot.media_source, MediaSource::RelayShare(_))
                         || self.relay_ui.publish_pending.is_some();
-                    ui.label(if sharing {
-                        self.text(
-                            "将停止当前共享并从 Relay 撤回广播。",
-                            "Sharing will stop and the broadcast will be withdrawn.",
-                        )
-                    } else {
-                        self.text(
-                            "这会停止当前 Relay 观看。附近设备设置保持不变。",
-                            "This stops Relay playback. Your Nearby setting stays the same.",
-                        )
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if (Action {
-                            label: if sharing {
-                                self.text("停止并断开", "Stop and disconnect")
+                    let p = Palette::for_ui(ui);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(if sharing {
+                                self.text(
+                                    "将停止当前共享并从 Relay 撤回广播。",
+                                    "Sharing will stop and the broadcast will be withdrawn.",
+                                )
                             } else {
-                                self.text("断开 Relay", "Disconnect Relay")
-                            },
-                            size: egui::vec2(180.0, 44.0),
-                            enabled: true,
-                            tone: ActionTone::Danger,
-                        })
-                        .show(ui)
-                        .clicked()
-                        {
-                            self.relay_ui.confirm_disconnect = None;
-                            self.disconnect_relay(snapshot);
-                        }
-                        if (Action {
-                            label: self.text("取消", "Cancel"),
-                            size: egui::vec2(96.0, 44.0),
-                            enabled: true,
-                            tone: ActionTone::Neutral,
-                        })
-                        .show(ui)
-                        .clicked()
-                        {
-                            self.relay_ui.confirm_disconnect = None;
-                        }
-                    });
+                                self.text(
+                                    "这会停止当前 Relay 观看。附近设备设置保持不变。",
+                                    "This stops Relay playback. Your Nearby setting stays the same.",
+                                )
+                            })
+                            .size(14.0)
+                            .color(p.muted),
+                        )
+                        .wrap(),
+                    );
+                    let actions = moqcast_ui::v2::confirm_dialog_actions(
+                        ui,
+                        self.text("取消", "Cancel"),
+                        if sharing {
+                            self.text("停止并断开", "Stop and disconnect")
+                        } else {
+                            self.text("断开 Relay", "Disconnect Relay")
+                        },
+                        144.0,
+                    );
+                    if actions.confirmed {
+                        self.relay_ui.confirm_disconnect = None;
+                        self.disconnect_relay(snapshot);
+                    } else if actions.cancelled {
+                        self.relay_ui.confirm_disconnect = None;
+                    }
                 });
             if response.should_close() {
                 self.relay_ui.confirm_disconnect = None;
@@ -541,14 +579,57 @@ impl MoqCastApp {
     }
 
     fn directory(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
-        ui.label(self.text("共享列表", "Shared broadcasts"));
+        let p = Palette::for_ui(ui);
+        ui.label(
+            RichText::new(self.text("共享列表", "Shared broadcasts"))
+                .size(15.0)
+                .variation(b"wght", 600.0)
+                .color(p.text),
+        );
         if snapshot.relay.entries.is_empty() {
             // The pinned SDK has no directory-complete signal. Silence is not an empty or refused directory.
-            ui.label(self.text("当前未发现共享", "No broadcasts found at the moment"));
+            let empty_height = ui.available_height().clamp(120.0, 152.0);
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), empty_height),
+                egui::Sense::hover(),
+            );
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(Layout::top_down(Align::Center)),
+                |ui| {
+                    ui.add_space(((empty_height - 92.0) * 0.5).max(8.0));
+                    let (_, icon_rect) = ui.allocate_space(egui::vec2(36.0, 36.0));
+                    moqcast_ui::v2::monitor(ui, icon_rect, p.muted);
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(
+                            self.text("当前未发现共享", "No broadcasts found at the moment"),
+                        )
+                        .size(15.0)
+                        .variation(b"wght", 500.0)
+                        .color(p.text),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(self.text(
+                            "有新的共享公告时会自动显示",
+                            "New shared broadcasts will appear automatically.",
+                        ))
+                        .size(13.0)
+                        .color(p.muted),
+                    );
+                },
+            );
+            return;
         }
+        ui.add_space(8.0);
+        let max_height = ui.available_height().clamp(72.0, 480.0);
         egui::ScrollArea::vertical()
             .id_salt("relay-broadcasts")
+            .max_height(max_height)
             .auto_shrink([false, true])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
             .show(ui, |ui| {
                 for (path, revision) in &snapshot.relay.entries {
                     let selection = Selection {
@@ -744,6 +825,58 @@ mod tests {
             visible,
             "pin validation must not disappear inside a collapsed section"
         );
+    }
+
+    #[test]
+    fn collapsed_certificate_section_exposes_pin_status_in_accesskit() {
+        let valid_pin = "ab".repeat(32);
+        for (locale, plain_label, badge_label) in [
+            (Locale::Chinese, "证书校验", "证书校验 · 已设置"),
+            (
+                Locale::English,
+                "Certificate verification",
+                "Certificate verification · Set",
+            ),
+        ] {
+            for pin_set in [false, true] {
+                let (mut app, _commands) = crate::app::tests::layout::app();
+                app.locale = locale;
+                app.relay_ui.address = "moqt://localhost/".into();
+                if pin_set {
+                    app.relay_ui.fingerprint = valid_pin.clone();
+                }
+                let ctx = egui::Context::default();
+                moqcast_ui::v2::install(&ctx);
+                ctx.enable_accesskit();
+                let snapshot = AppSnapshot::default();
+                let mut output = ctx.run_ui(egui::RawInput::default(), |root| {
+                    egui::CentralPanel::default().show(root, |ui| app.relay_page(ui, &snapshot));
+                });
+                let update = output
+                    .platform_output
+                    .accesskit_update
+                    .as_ref()
+                    .expect("AccessKit update must be present");
+                let labels: Vec<&str> = update
+                    .nodes
+                    .iter()
+                    .filter(|(_, node)| node.role() == egui::accesskit::Role::Button)
+                    .filter_map(|(_, node)| node.label())
+                    .collect();
+                let expected = if pin_set { badge_label } else { plain_label };
+                assert!(
+                    labels.contains(&expected),
+                    "locale={locale:?} pin_set={pin_set}: expected {expected:?} in {labels:?}"
+                );
+                if !pin_set {
+                    assert!(
+                        !labels.contains(&badge_label),
+                        "locale={locale:?} unset pin must not advertise {badge_label:?}"
+                    );
+                }
+                output.textures_delta.clear();
+            }
+        }
     }
 
     #[test]

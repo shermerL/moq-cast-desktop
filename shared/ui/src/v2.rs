@@ -3,7 +3,9 @@
 use egui::{Color32, Context, Frame, Margin, Response, RichText, Stroke, Ui, Vec2};
 
 mod form;
-pub use form::{TextField, disclosure, segmented, select, switch};
+pub use form::{
+    TextField, disclosure, disclosure_with_badge, segmented, select, switch, switch_with_label,
+};
 
 /// Semantic colors for the S2 desktop shell.
 #[derive(Clone, Copy)]
@@ -1009,8 +1011,8 @@ pub enum Icon {
     Fullscreen,
     /// Return from fullscreen playback.
     ExitFullscreen,
-    /// Navigates back to the parent view.
-    ChevronLeft,
+    /// Navigates back to the parent view (first-party MoQCast Sample C icon).
+    Back,
     /// Collapsed disclosure chevron.
     ChevronRight,
     /// Expanded disclosure or dropdown chevron.
@@ -1051,9 +1053,9 @@ impl Icon {
                 "v2-icon-minimize",
                 include_bytes!("../assets/icons/minimize.rgba"),
             ),
-            Self::ChevronLeft => (
-                "v2-icon-chevron-left",
-                include_bytes!("../assets/icons/chevron-left.rgba"),
+            Self::Back => (
+                "v2-icon-moqcast-back",
+                include_bytes!("../assets/icons/back.rgba"),
             ),
             Self::ChevronRight => (
                 "v2-icon-chevron-right",
@@ -1402,11 +1404,49 @@ pub fn player_info_control(
 
 /// Shows the notices for the bundled Lucide and Feather icons in desktop settings.
 pub fn icon_licenses(ui: &mut Ui, label: &str) {
-    egui::CollapsingHeader::new(label)
-        .id_salt("v2-icon-licenses")
-        .show(ui, |ui| {
-            ui.add(egui::Label::new(include_str!("../assets/icons/LICENSE.txt")).wrap());
-        });
+    disclosure(ui, egui::Id::new("v2-icon-licenses"), label, false, |ui| {
+        ui.add(egui::Label::new(include_str!("../assets/icons/LICENSE.txt")).wrap());
+    });
+}
+
+/// Actions emitted by a destructive confirmation dialog footer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConfirmDialogActions {
+    /// Dismissed without applying the destructive action.
+    pub cancelled: bool,
+    /// Explicitly confirmed the destructive action.
+    pub confirmed: bool,
+}
+
+/// Renders a right-aligned dual-button confirmation footer (`Cancel` + primary `Danger`).
+pub fn confirm_dialog_actions(
+    ui: &mut Ui,
+    cancel_label: &str,
+    confirm_label: &str,
+    confirm_width: f32,
+) -> ConfirmDialogActions {
+    ui.add_space(20.0);
+    let mut result = ConfirmDialogActions::default();
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        result.confirmed = Action {
+            label: confirm_label,
+            size: egui::vec2(confirm_width.max(144.0), 40.0),
+            enabled: true,
+            tone: ActionTone::Danger,
+        }
+        .show(ui)
+        .clicked();
+        result.cancelled = Action {
+            label: cancel_label,
+            size: egui::vec2(96.0, 40.0),
+            enabled: true,
+            tone: ActionTone::Neutral,
+        }
+        .show(ui)
+        .clicked();
+    });
+    result
 }
 
 /// A compact settings row with a stable label column and trailing controls.
@@ -1682,7 +1722,7 @@ fn back_button(ui: &mut Ui, label: &str, palette: Palette) -> Response {
     } else {
         palette.muted
     };
-    Icon::ChevronLeft.paint(ui, icon_rect, icon_tint);
+    Icon::Back.paint(ui, icon_rect, icon_tint);
     let text_pos = egui::pos2(
         icon_rect.right() + gap,
         rect.center().y - galley.size().y * 0.5,
@@ -1993,6 +2033,61 @@ mod controls_contract_tests {
         assert!(
             mesh_count >= 2,
             "warning and error notices should paint icon textures, got {mesh_count}"
+        );
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn first_party_back_icon_asset_is_pure_white_72x72_alpha_mask() {
+        let (key, bytes) = Icon::Back.asset();
+        assert_eq!(key, "v2-icon-moqcast-back");
+        assert_eq!(bytes.len(), 72 * 72 * 4);
+        let mut nonzero = 0usize;
+        for pixel in bytes.chunks_exact(4) {
+            if pixel[3] > 0 {
+                nonzero += 1;
+                assert_eq!(&pixel[..3], &[255, 255, 255]);
+            }
+        }
+        assert!(nonzero > 200, "back icon mask should contain stroke pixels");
+    }
+
+    #[test]
+    fn confirm_dialog_actions_right_align_cancel_left_of_danger() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(412.0, 120.0),
+                )),
+                ..Default::default()
+            },
+            |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    confirm_dialog_actions(ui, "Cancel", "Disconnect Relay", 144.0);
+                });
+            },
+        );
+        let find_x = |label: &str| {
+            out.shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.job.text == label => Some(t.pos.x),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing {label}"))
+        };
+        let cancel_x = find_x("Cancel");
+        let confirm_x = find_x("Disconnect Relay");
+        assert!(
+            cancel_x < confirm_x,
+            "Cancel ({cancel_x}) must sit left of primary Danger ({confirm_x})"
+        );
+        assert!(
+            cancel_x > 100.0,
+            "Dual-button bar must be right-aligned, got cancel_x={cancel_x}"
         );
         out.textures_delta.clear();
     }

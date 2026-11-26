@@ -491,22 +491,11 @@ impl MoqCastApp {
                 p.card().show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.add_enabled_ui(editable, |ui| {
-                        ui.horizontal(|ui| {
-                            for (kind, label) in [
-                                (CaptureSourceKind::Display, self.text("屏幕", "Screen")),
-                                (CaptureSourceKind::Window, self.text("窗口", "Window")),
-                            ] {
-                                if ui
-                                    .add(
-                                        egui::Button::selectable(self.capture_kind == kind, label)
-                                            .min_size(vec2(88.0, 40.0)),
-                                    )
-                                    .clicked()
-                                {
-                                    self.capture_kind = kind;
-                                }
-                            }
-                        });
+                        let kinds = [
+                            (CaptureSourceKind::Display, self.text("屏幕", "Screen")),
+                            (CaptureSourceKind::Window, self.text("窗口", "Window")),
+                        ];
+                        v2::segmented(ui, &mut self.capture_kind, &kinds);
                         ui.add_space(12.0);
                         let catalog = self.snapshot.media.capture_sources.clone();
                         // Leave room for the tabs, refresh action and encoding/audio settings.
@@ -586,9 +575,11 @@ impl MoqCastApp {
                         v2::settings_row(ui, self.text("视频编码", "Video encoding"), |ui| {
                             let mut policy = self.snapshot.media.video_encoding;
                             ui.add_enabled_ui(editable, |ui| {
-                                egui::ComboBox::from_id_salt("video-policy")
-                                    .selected_text(video_encoding_label(self.locale, policy))
-                                    .show_ui(ui, |ui| {
+                                v2::select(
+                                    ui,
+                                    egui::ComboBox::from_id_salt("video-policy")
+                                        .selected_text(video_encoding_label(self.locale, policy)),
+                                    |ui| {
                                         for candidate in [
                                             VideoEncodingPolicy::Compatible,
                                             VideoEncodingPolicy::NativeQhdHardware,
@@ -599,7 +590,8 @@ impl MoqCastApp {
                                                 video_encoding_label(self.locale, candidate),
                                             );
                                         }
-                                    });
+                                    },
+                                );
                             });
                             if policy != self.snapshot.media.video_encoding {
                                 self.send(RuntimeCommand::SetVideoEncodingPolicy(policy));
@@ -636,9 +628,11 @@ impl MoqCastApp {
                             } else {
                                 opted_in
                             };
-                            let checkbox = egui::Checkbox::new(&mut checked, label);
                             let enabled = !active && self.relay_ui.publish_pending.is_none();
-                            if ui.add_enabled(enabled, checkbox).changed() {
+                            let switch = ui.add_enabled_ui(enabled, |ui| {
+                                v2::switch_with_label(ui, &mut checked, label)
+                            });
+                            if switch.inner.changed() {
                                 self.relay_audio_opt_in = checked.then_some(draft);
                             }
                         }
@@ -762,28 +756,27 @@ impl MoqCastApp {
                         )
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
+                            let theme_options = [
+                                (egui::ThemePreference::Dark, self.text("深色", "Dark")),
+                                (egui::ThemePreference::Light, self.text("浅色", "Light")),
+                                (egui::ThemePreference::System, self.text("系统", "System")),
+                            ];
                             v2::settings_row(ui, self.text("外观", "Appearance"), |ui| {
-                                for (theme, label) in [
-                                    (egui::ThemePreference::Dark, self.text("深色", "Dark")),
-                                    (egui::ThemePreference::Light, self.text("浅色", "Light")),
-                                    (egui::ThemePreference::System, self.text("系统", "System")),
-                                ] {
-                                    if ui
-                                        .selectable_value(&mut self.theme_preference, theme, label)
-                                        .changed()
-                                    {
-                                        ctx.set_theme(theme);
-                                    }
+                                if v2::segmented(ui, &mut self.theme_preference, &theme_options) {
+                                    ctx.set_theme(self.theme_preference);
                                 }
                             });
                             v2::settings_row(ui, self.text("语言", "Language"), |ui| {
-                                egui::ComboBox::from_id_salt("v2-language")
-                                    .selected_text(if self.locale == Locale::Chinese {
-                                        "简体中文"
-                                    } else {
-                                        "English"
-                                    })
-                                    .show_ui(ui, |ui| {
+                                v2::select(
+                                    ui,
+                                    egui::ComboBox::from_id_salt("v2-language").selected_text(
+                                        if self.locale == Locale::Chinese {
+                                            "简体中文"
+                                        } else {
+                                            "English"
+                                        },
+                                    ),
+                                    |ui| {
                                         ui.selectable_value(
                                             &mut self.locale,
                                             Locale::Chinese,
@@ -794,17 +787,15 @@ impl MoqCastApp {
                                             Locale::English,
                                             "English",
                                         );
-                                    });
+                                    },
+                                );
                             });
 
                             self.diagnostics.show_settings(ui, self.locale);
-                            v2::settings_row(
-                                ui,
-                                self.text("开发者模式", "Developer mode"),
-                                |ui| {
-                                    ui.checkbox(&mut self.developer_mode, "");
-                                },
-                            );
+                            let developer_label = self.text("开发者模式", "Developer mode");
+                            v2::settings_row(ui, developer_label, |ui| {
+                                v2::switch(ui, &mut self.developer_mode, developer_label);
+                            });
                             crate::app::media_diagnostics::settings(
                                 ui,
                                 self.locale == Locale::Chinese,
@@ -879,19 +870,24 @@ impl MoqCastApp {
                         self.text("取消", "Cancel"),
                     )
                     .clicked();
-                    ui.label(self.text(
-                        "关闭会停止当前观看或共享，并断开附近连接。",
-                        "Turning off Nearby stops media and closes nearby connections.",
-                    ));
-                    let confirm = (Action {
-                        label: self.text("关闭附近设备", "Turn off Nearby"),
-                        size: vec2(156.0, 40.0),
-                        enabled: true,
-                        tone: ActionTone::Danger,
-                    })
-                    .show(ui)
-                    .clicked();
-                    (close, confirm)
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(self.text(
+                                "关闭会停止当前观看或共享，并断开附近连接。",
+                                "Turning off Nearby stops media and closes nearby connections.",
+                            ))
+                            .size(14.0)
+                            .color(p.muted),
+                        )
+                        .wrap(),
+                    );
+                    let actions = v2::confirm_dialog_actions(
+                        ui,
+                        self.text("取消", "Cancel"),
+                        self.text("关闭附近设备", "Turn off Nearby"),
+                        156.0,
+                    );
+                    (close || actions.cancelled, actions.confirmed)
                 });
             if response.inner.1 {
                 self.request_turn_off_nearby();
@@ -1213,6 +1209,47 @@ mod tests {
             Some(egui::accesskit::Toggled::from(checked))
         );
         assert_eq!(!checkbox.is_disabled(), enabled);
+    }
+
+    #[test]
+    fn keyboard_activates_the_named_back_button_on_the_relay_share_page() {
+        let (mut app, mut commands) = relay_share_fixture();
+        app.page = Page::RelayShare;
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let size = vec2(1040.0, 700.0);
+        let output = render(&ctx, &mut app, size, vec![]);
+        let tree = output.platform_output.accesskit_update.unwrap();
+        let (back, node) = tree
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == egui::accesskit::Role::Button && n.label() == Some("Relay"))
+            .expect("named header back button");
+        assert_eq!(node.bounds().unwrap().height(), 40.0);
+
+        let key = |key, pressed| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+        let press = |app: &mut MoqCastApp, k| {
+            render(&ctx, app, size, vec![key(k, true)]);
+            render(&ctx, app, size, vec![key(k, false)])
+        };
+        let mut focused = tree.focus;
+        for _ in 0..tree.nodes.len() {
+            if focused == *back {
+                break;
+            }
+            let output = press(&mut app, egui::Key::Tab);
+            focused = output.platform_output.accesskit_update.unwrap().focus;
+        }
+        assert_eq!(focused, *back);
+        press(&mut app, egui::Key::Space);
+        assert_eq!(app.page, Page::Relay);
+        assert!(commands.try_recv().is_err());
     }
 
     #[test]
@@ -1760,5 +1797,61 @@ mod tests {
             local_media_status(Locale::English, &s),
             (StatusTone::Error, "Playback failed")
         );
+    }
+
+    #[test]
+    fn screen_share_source_kind_uses_v2_segmented_and_switches_capture_kind() {
+        let (mut app, _commands) = fixture();
+        app.page = Page::ScreenShare;
+        app.locale = Locale::English;
+        let ctx = egui::Context::default();
+        v2::install(&ctx);
+        ctx.enable_accesskit();
+        let size = vec2(960.0, 720.0);
+        let _ = render(&ctx, &mut app, size, vec![]);
+        let out = render(&ctx, &mut app, size, vec![]);
+        let update = out
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("AccessKit update");
+        let radios: Vec<&str> = update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == egui::accesskit::Role::RadioButton)
+            .filter_map(|(_, node)| node.label())
+            .collect();
+        assert!(
+            radios.contains(&"Screen") && radios.contains(&"Window"),
+            "expected v2::segmented RadioButtons for Screen/Window, got {radios:?}"
+        );
+        let window_center = out
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(t) if t.galley.job.text == "Window" => {
+                    Some(t.galley.rect.translate(t.pos.to_vec2()).center())
+                }
+                _ => None,
+            })
+            .expect("Window segment must be painted");
+        assert_eq!(app.capture_kind, CaptureSourceKind::Display);
+        for pressed in [true, false] {
+            let _ = render(
+                &ctx,
+                &mut app,
+                size,
+                vec![
+                    egui::Event::PointerMoved(window_center),
+                    egui::Event::PointerButton {
+                        pos: window_center,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+        }
+        assert_eq!(app.capture_kind, CaptureSourceKind::Window);
     }
 }

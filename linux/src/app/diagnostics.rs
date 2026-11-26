@@ -152,9 +152,11 @@ impl DiagnosticsUi {
             .show(context, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(locale.log_level());
-                    egui::ComboBox::from_id_salt("diagnostics-level")
-                        .selected_text(self.minimum_level.as_str())
-                        .show_ui(ui, |ui| {
+                    moqcast_ui::v2::select(
+                        ui,
+                        egui::ComboBox::from_id_salt("diagnostics-level")
+                            .selected_text(self.minimum_level.as_str()),
+                        |ui| {
                             for level in [
                                 LogLevel::Error,
                                 LogLevel::Warn,
@@ -163,20 +165,33 @@ impl DiagnosticsUi {
                             ] {
                                 ui.selectable_value(&mut self.minimum_level, level, level.as_str());
                             }
-                        });
+                        },
+                    );
                     ui.label(locale.search_logs());
                     ui.add(
                         egui::TextEdit::singleline(&mut self.search)
                             .desired_width(220.0)
                             .hint_text(locale.search_logs_hint()),
                     );
-                    ui.checkbox(&mut self.pause_auto_scroll, locale.pause_auto_scroll());
+                    moqcast_ui::v2::switch_with_label(
+                        ui,
+                        &mut self.pause_auto_scroll,
+                        locale.pause_auto_scroll(),
+                    );
                 });
 
                 self.display_cache
                     .refresh(&self.snapshot, self.minimum_level, &self.search);
                 ui.horizontal(|ui| {
-                    if ui.button(locale.copy_visible_logs()).clicked() {
+                    if (moqcast_ui::v2::Action {
+                        label: locale.copy_visible_logs(),
+                        size: egui::vec2(124.0, 40.0),
+                        enabled: true,
+                        tone: moqcast_ui::v2::ActionTone::Neutral,
+                    })
+                    .show(ui)
+                    .clicked()
+                    {
                         context.copy_text(self.display_cache.lines.join("\n"));
                     }
                     ui.label(
@@ -352,5 +367,69 @@ mod tests {
         assert!(cache.should_rebuild(8, LogLevel::Info, "peer"));
         assert!(cache.should_rebuild(7, LogLevel::Debug, "peer"));
         assert!(cache.should_rebuild(7, LogLevel::Info, "screen"));
+    }
+
+    #[test]
+    fn log_window_pause_label_click_toggles_once() {
+        for (locale, label) in [
+            (Locale::Chinese, "暂停自动滚动"),
+            (Locale::English, "Pause auto-scroll"),
+        ] {
+            let diagnostics = moqcast_diagnostics::init(moqcast_diagnostics::Config::without_file(
+                moqcast_diagnostics::BuildInfo::new("test"),
+                "UI fixture",
+            ));
+            let mut ui = DiagnosticsUi::new(diagnostics.handle(), false);
+            ui.set_visible(true);
+            let ctx = egui::Context::default();
+            moqcast_ui::v2::install(&ctx);
+            let render = |ui: &mut DiagnosticsUi, events| {
+                let mut out = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(960.0, 640.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |root| {
+                        ui.show_window(root.ctx(), locale);
+                    },
+                );
+                out.textures_delta.clear();
+                out
+            };
+            let _ = render(&mut ui, vec![]);
+            let out = render(&mut ui, vec![]);
+            let text_center = out
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.job.text == label => {
+                        Some(t.galley.rect.translate(t.pos.to_vec2()).center())
+                    }
+                    _ => None,
+                })
+                .expect("pause auto-scroll label must be painted");
+            assert!(!ui.pause_auto_scroll);
+            for expected in [true, false] {
+                for pressed in [true, false] {
+                    let _ = render(
+                        &mut ui,
+                        vec![
+                            egui::Event::PointerMoved(text_center),
+                            egui::Event::PointerButton {
+                                pos: text_center,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: Default::default(),
+                            },
+                        ],
+                    );
+                }
+                assert_eq!(ui.pause_auto_scroll, expected, "locale={locale:?}");
+            }
+        }
     }
 }

@@ -500,21 +500,18 @@ impl MoqCastApp {
                     ui.set_width(ui.available_width());
                     ui.spacing_mut().item_spacing.y = 8.0;
                     let appearance = self.text("外观", "Appearance");
+                    let theme_options = [
+                        (egui::ThemePreference::Dark, self.text("深色", "Dark")),
+                        (egui::ThemePreference::Light, self.text("浅色", "Light")),
+                        (
+                            egui::ThemePreference::System,
+                            self.text("跟随系统", "System"),
+                        ),
+                    ];
                     moqcast_ui::v2::settings_row(ui, appearance, |ui| {
-                        for (preference, label) in [
-                            (egui::ThemePreference::Dark, self.text("深色", "Dark")),
-                            (egui::ThemePreference::Light, self.text("浅色", "Light")),
-                            (
-                                egui::ThemePreference::System,
-                                self.text("跟随系统", "System"),
-                            ),
-                        ] {
-                            if ui
-                                .selectable_value(&mut self.theme_preference, preference, label)
-                                .changed()
-                            {
-                                ui.ctx().set_theme(self.theme_preference);
-                            }
+                        if moqcast_ui::v2::segmented(ui, &mut self.theme_preference, &theme_options)
+                        {
+                            ui.ctx().set_theme(self.theme_preference);
                         }
                     });
                     let language = self.text("语言", "Language");
@@ -539,7 +536,7 @@ impl MoqCastApp {
                     let developer = self.text("开发者模式", "Developer mode");
                     let previous = self.developer_mode;
                     moqcast_ui::v2::settings_row(ui, developer, |ui| {
-                        ui.checkbox(&mut self.developer_mode, "")
+                        moqcast_ui::v2::switch(ui, &mut self.developer_mode, developer)
                             .on_hover_text(developer);
                     });
                     if previous != self.developer_mode {
@@ -595,7 +592,9 @@ impl MoqCastApp {
                     ui.label(RichText::new(self.text("共享来源", "Sharing source")).size(15.0).variation(b"wght", 600.0));
                     ui.add_space(10.0);
                     let kinds = [(capture_picker::Kind::Display,self.text("屏幕","Screen")),(capture_picker::Kind::Window,self.text("窗口","Window"))];
-                    ui.add_enabled_ui(idle && !self.picker_pending, |ui| moqcast_ui::v2::segmented(ui, &mut self.picker_kind, &kinds));
+                    ui.add_enabled_ui(idle && !self.picker_pending, |ui| {
+                        moqcast_ui::v2::segmented(ui, &mut self.picker_kind, &kinds);
+                    });
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

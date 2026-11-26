@@ -353,21 +353,45 @@ impl MoqCastApp {
         if !self.confirm_turn_off_nearby {
             return;
         }
-        let response = egui::Modal::new(egui::Id::new("mac-turn-off-nearby-dialog")).frame(moqcast_ui::v2::Palette::new(context.global_style().visuals.dark_mode).dialog()).show(context, |ui| {
-            ui.set_max_width(400.0);
-            if moqcast_ui::v2::dialog_header(ui, self.text("关闭附近设备？", "Turn off Nearby?"), self.text("取消关闭附近设备", "Cancel turning off Nearby")).clicked() {
-                self.confirm_turn_off_nearby = false;
-            }
-            ui.label(self.text("关闭会停止 LAN 观看或共享，并断开附近连接。Relay 保持连接。", "Turning off Nearby stops LAN media and nearby connections. Relay stays connected."));
-            ui.horizontal(|ui| {
-                if (moqcast_ui::v2::Action { label: self.text("取消", "Cancel"), size: egui::vec2(108.0, 42.0), enabled: true, tone: moqcast_ui::v2::ActionTone::Neutral }).show(ui).clicked() { self.confirm_turn_off_nearby = false; }
-                if (moqcast_ui::v2::Action { label: self.text("关闭附近设备", "Turn off Nearby"), size: egui::vec2(148.0,42.0), enabled: true, tone: moqcast_ui::v2::ActionTone::Danger }).show(ui).clicked() {
+        let palette = moqcast_ui::v2::Palette::new(context.global_style().visuals.dark_mode);
+        let response = egui::Modal::new(egui::Id::new("mac-turn-off-nearby-dialog"))
+            .frame(palette.dialog())
+            .show(context, |ui| {
+                ui.set_width((context.content_rect().width() - 96.0).clamp(240.0, 412.0));
+                if moqcast_ui::v2::dialog_header(
+                    ui,
+                    self.text("关闭附近设备？", "Turn off Nearby?"),
+                    self.text("取消关闭附近设备", "Cancel turning off Nearby"),
+                )
+                .clicked()
+                {
+                    self.confirm_turn_off_nearby = false;
+                }
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(self.text(
+                            "关闭会停止 LAN 观看或共享，并断开附近连接。Relay 保持连接。",
+                            "Turning off Nearby stops LAN media and nearby connections. Relay stays connected.",
+                        ))
+                        .size(14.0)
+                        .color(palette.muted),
+                    )
+                    .wrap(),
+                );
+                let actions = moqcast_ui::v2::confirm_dialog_actions(
+                    ui,
+                    self.text("取消", "Cancel"),
+                    self.text("关闭附近设备", "Turn off Nearby"),
+                    148.0,
+                );
+                if actions.cancelled {
+                    self.confirm_turn_off_nearby = false;
+                } else if actions.confirmed {
                     self.confirm_turn_off_nearby = false;
                     let snapshot = self.runtime.snapshot();
                     self.request_turn_off_nearby(&snapshot);
                 }
             });
-        });
         if response.should_close() {
             self.confirm_turn_off_nearby = false;
         }

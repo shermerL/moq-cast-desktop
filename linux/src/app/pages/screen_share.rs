@@ -115,14 +115,25 @@ pub(in crate::app) fn show(
                         match &snapshot.sources {
                             SourceCatalog::Unloaded=>{if editable {command.get_or_insert(UserCommand::RefreshCaptureSources);}},
                             SourceCatalog::Loading=>{ui.spinner();},
-                            SourceCatalog::Portal=>{
-                                ui.horizontal(|ui| {
-                                    for (source, label) in [(CaptureSource::Portal, locale.text("屏幕", "Screen")), (CaptureSource::PortalWindow, locale.text("窗口", "Window"))] {
-                                        if ui.add(egui::Button::selectable(selected.as_ref() == Some(&source), label).min_size(egui::vec2(88.0, 40.0))).clicked() { *selected = Some(source); }
-                                    }
-                                });
-                                ui.add_space(12.0);ui.label(locale.text("开始共享时，由系统选择具体屏幕或窗口。","Choose the screen or window in the system picker when sharing starts."));
-                            },
+                            SourceCatalog::Portal => {
+                                let mut kind = matches!(selected, Some(CaptureSource::PortalWindow));
+                                let options = [
+                                    (false, locale.text("屏幕", "Screen")),
+                                    (true, locale.text("窗口", "Window")),
+                                ];
+                                if v2::segmented(ui, &mut kind, &options) {
+                                    *selected = Some(if kind {
+                                        CaptureSource::PortalWindow
+                                    } else {
+                                        CaptureSource::Portal
+                                    });
+                                }
+                                ui.add_space(12.0);
+                                ui.label(locale.text(
+                                    "开始共享时，由系统选择具体屏幕或窗口。",
+                                    "Choose the screen or window in the system picker when sharing starts.",
+                                ));
+                            }
                             SourceCatalog::Ready(choices)=>{
                                 // Keep refresh and audio controls outside the source viewport.
                                 v2::source_list(ui, (content.height() - 240.0).clamp(48.0, 240.0), |ui| {
@@ -144,7 +155,12 @@ pub(in crate::app) fn show(
                     .max_height((content.bottom() - ui.cursor().top()).max(0.0))
                     .auto_shrink([false,true]).show(ui, |ui| {
                 crate::app::media_diagnostics::sharing(ui, locale == Locale::Chinese);
-                v2::settings_row(ui,locale.system_audio(),|ui| {ui.add_enabled(editable,egui::Checkbox::new(audio,"")).on_hover_text(locale.system_audio_hint());});
+                v2::settings_row(ui, locale.system_audio(), |ui| {
+                    ui.add_enabled_ui(editable, |ui| {
+                        v2::switch(ui, audio, locale.system_audio())
+                            .on_hover_text(locale.system_audio_hint());
+                    });
+                });
                 ui.label(egui::RichText::new(locale.text("系统声音包含设备输出，不限于所选窗口。","System sound includes device output, not only the selected window.")).small().color(p.muted));
                 if editable&&relay.is_none()&&!snapshot.access().ready{v2::notice(ui,StatusTone::Neutral,locale.enable_nearby_before_sharing());}
                 if matches!(snapshot.media,MediaState::PreparingView{..}|MediaState::Viewing{..}|MediaState::StoppingView{..}) {v2::notice(ui,StatusTone::Neutral,locale.text("停止观看后可开始共享。","Stop watching before sharing."));}

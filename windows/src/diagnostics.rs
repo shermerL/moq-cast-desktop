@@ -4,11 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
 
-use eframe::egui::{self};
+use eframe::egui::{self, RichText};
 use moqcast_diagnostics::{Entry, FileStatus, Handle, LogLevel, Snapshot};
-use moqcast_ui::{
-    COLORS, SelectSpec, SwitchSpec, TypographyRole, secondary_button, select, switch, typography,
-};
 
 use crate::app::Locale;
 
@@ -99,15 +96,12 @@ impl DiagnosticsUi {
     pub(crate) fn show_developer_settings(&mut self, ui: &mut egui::Ui, locale: Locale) {
         use moqcast_ui::v2::{self, Action, ActionTone, StatusTone};
         let mut detailed = self.handle.detailed();
-        v2::settings_row(
-            ui,
-            text(locale, "详细诊断", "Detailed diagnostics"),
-            |ui| {
-                if ui.checkbox(&mut detailed, "").changed() {
-                    self.handle.set_detailed(detailed);
-                }
-            },
-        );
+        let detailed_label = text(locale, "详细诊断", "Detailed diagnostics");
+        v2::settings_row(ui, detailed_label, |ui| {
+            if v2::switch(ui, &mut detailed, detailed_label).changed() {
+                self.handle.set_detailed(detailed);
+            }
+        });
         v2::settings_row(ui, text(locale, "应用日志", "Application logs"), |ui| {
             if (Action {
                 label: text(locale, "打开日志", "Open logs"),
@@ -148,30 +142,24 @@ impl DiagnosticsUi {
             .min_size(egui::vec2(520.0, 320.0))
             .show(context, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(text(locale, "最低级别", "Minimum level"));
-                    let levels = [
-                        LogLevel::Error,
-                        LogLevel::Warn,
-                        LogLevel::Info,
-                        LogLevel::Debug,
-                    ];
-                    let options = ["ERROR", "WARN", "INFO", "DEBUG"];
-                    let mut level_index = levels
-                        .iter()
-                        .position(|level| *level == self.minimum_level)
-                        .unwrap_or(2);
-                    select(
+                    let level_label = ui.label(text(locale, "最低级别", "Minimum level"));
+                    moqcast_ui::v2::select(
                         ui,
-                        &mut level_index,
-                        SelectSpec::new(
-                            egui::Id::new("diagnostics-level"),
-                            "Minimum log level",
-                            &options,
-                        )
-                        .expect("diagnostics levels are available"),
+                        egui::ComboBox::from_id_salt("diagnostics-level")
+                            .selected_text(self.minimum_level.as_str()),
+                        |ui| {
+                            for level in [
+                                LogLevel::Error,
+                                LogLevel::Warn,
+                                LogLevel::Info,
+                                LogLevel::Debug,
+                            ] {
+                                ui.selectable_value(&mut self.minimum_level, level, level.as_str());
+                            }
+                        },
                     )
-                    .expect("diagnostics level is valid");
-                    self.minimum_level = levels[level_index];
+                    .response
+                    .labelled_by(level_label.id);
                     ui.label(text(locale, "搜索", "Search"));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.search)
@@ -182,30 +170,35 @@ impl DiagnosticsUi {
                                 "Target, thread, or event",
                             )),
                     );
-                    switch(
+                    moqcast_ui::v2::switch_with_label(
                         ui,
                         &mut self.pause_auto_scroll,
-                        SwitchSpec::new(text(locale, "暂停自动滚动", "Pause auto-scroll")),
+                        text(locale, "暂停自动滚动", "Pause auto-scroll"),
                     );
                 });
 
                 self.display_cache
                     .refresh(&self.snapshot, self.minimum_level, &self.search);
                 ui.horizontal(|ui| {
-                    if secondary_button(ui, text(locale, "复制当前结果", "Copy visible logs"), true)
-                        .clicked()
+                    if (moqcast_ui::v2::Action {
+                        label: text(locale, "复制当前结果", "Copy visible logs"),
+                        size: egui::vec2(124.0, 40.0),
+                        enabled: true,
+                        tone: moqcast_ui::v2::ActionTone::Neutral,
+                    })
+                    .show(ui)
+                    .clicked()
                     {
                         context.copy_text(self.display_cache.lines.join("\n"));
                     }
-                    ui.label(typography(
-                        format!(
+                    ui.label(
+                        RichText::new(format!(
                             "{}: {}",
                             text(locale, "已丢弃诊断项", "Dropped diagnostics"),
                             self.snapshot.dropped()
-                        ),
-                        TypographyRole::Meta,
-                        COLORS.muted.into(),
-                    ));
+                        ))
+                        .small(),
+                    );
                 });
                 ui.separator();
                 let scroll = egui::ScrollArea::both()
@@ -224,12 +217,8 @@ impl DiagnosticsUi {
                     scroll.show_rows(ui, 16.0, lines.len(), |ui, visible_rows| {
                         for row in visible_rows {
                             ui.add(
-                                egui::Label::new(typography(
-                                    &lines[row],
-                                    TypographyRole::Mono,
-                                    COLORS.text.into(),
-                                ))
-                                .extend(),
+                                egui::Label::new(RichText::new(&lines[row]).monospace().size(11.0))
+                                    .extend(),
                             );
                         }
                     });
@@ -457,5 +446,231 @@ mod tests {
         assert!(cache.should_rebuild(8, LogLevel::Info, "peer"));
         assert!(cache.should_rebuild(7, LogLevel::Debug, "peer"));
         assert!(cache.should_rebuild(7, LogLevel::Info, "screen"));
+    }
+
+    #[test]
+    fn log_window_v2_controls_toggle_pause_once_and_render_level_and_copy() {
+        for (locale, level_label, pause_label, copy_label) in [
+            (Locale::Chinese, "最低级别", "暂停自动滚动", "复制当前结果"),
+            (
+                Locale::English,
+                "Minimum level",
+                "Pause auto-scroll",
+                "Copy visible logs",
+            ),
+        ] {
+            let diagnostics = moqcast_diagnostics::init(moqcast_diagnostics::Config::without_file(
+                moqcast_diagnostics::BuildInfo::new("test"),
+                "UI fixture",
+            ));
+            let handle = diagnostics.handle();
+            let mut ui = DiagnosticsUi::new(handle, false);
+            ui.visible = true;
+            let ctx = egui::Context::default();
+            moqcast_ui::v2::install(&ctx);
+            ctx.enable_accesskit();
+            let render = |ui: &mut DiagnosticsUi, events| {
+                let mut out = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(960.0, 640.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |root| {
+                        ui.show_window(root.ctx(), locale);
+                    },
+                );
+                out.textures_delta.clear();
+                out
+            };
+            let _ = render(&mut ui, vec![]);
+            let out = render(&mut ui, vec![]);
+            let update = out
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .expect("AccessKit update must be emitted");
+            let (_, combo_node) = update
+                .nodes
+                .iter()
+                .find(|(_, node)| node.role() == egui::accesskit::Role::ComboBox)
+                .expect("v2 level select must expose an AccessKit ComboBox node");
+            assert_eq!(
+                combo_node.value(),
+                Some("INFO"),
+                "ComboBox must keep accessible current level value"
+            );
+            let labelled_texts: Vec<&str> = combo_node
+                .labelled_by()
+                .iter()
+                .filter_map(|target_id| {
+                    update
+                        .nodes
+                        .iter()
+                        .find(|(id, _)| id == target_id)
+                        .and_then(|(_, node)| node.value().or_else(|| node.label()))
+                })
+                .collect();
+            assert!(
+                combo_node.label() == Some(level_label) || labelled_texts.contains(&level_label),
+                "locale={locale:?}: ComboBox label={:?}, labelled_by texts={labelled_texts:?}, expected {level_label:?}",
+                combo_node.label()
+            );
+
+            // Switch level from INFO to ERROR via the v2 ComboBox and verify filtering + copy
+            let combo_center = out
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.job.text == "INFO" => {
+                        Some(t.galley.rect.translate(t.pos.to_vec2()).center())
+                    }
+                    _ => None,
+                })
+                .expect("v2 level select must render current level");
+            for pressed in [true, false] {
+                let _ = render(
+                    &mut ui,
+                    vec![
+                        egui::Event::PointerMoved(combo_center),
+                        egui::Event::PointerButton {
+                            pos: combo_center,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        },
+                    ],
+                );
+            }
+            let popup_out = render(&mut ui, vec![]);
+            let error_option = popup_out
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.job.text == "ERROR" => {
+                        Some(t.galley.rect.translate(t.pos.to_vec2()).center())
+                    }
+                    _ => None,
+                })
+                .expect("ERROR level option must appear in v2 select popup");
+            for pressed in [true, false] {
+                let _ = render(
+                    &mut ui,
+                    vec![
+                        egui::Event::PointerMoved(error_option),
+                        egui::Event::PointerButton {
+                            pos: error_option,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        },
+                    ],
+                );
+            }
+            let filtered_out = render(&mut ui, vec![]);
+            assert_eq!(ui.minimum_level, LogLevel::Error);
+            let filtered_update = filtered_out
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .expect("AccessKit update after level switch");
+            let (_, filtered_combo) = filtered_update
+                .nodes
+                .iter()
+                .find(|(_, node)| node.role() == egui::accesskit::Role::ComboBox)
+                .expect("ComboBox must stay accessible after level switch");
+            assert_eq!(filtered_combo.value(), Some("ERROR"));
+            let filtered_labelled_texts: Vec<&str> = filtered_combo
+                .labelled_by()
+                .iter()
+                .filter_map(|target_id| {
+                    filtered_update
+                        .nodes
+                        .iter()
+                        .find(|(id, _)| id == target_id)
+                        .and_then(|(_, node)| node.value().or_else(|| node.label()))
+                })
+                .collect();
+            assert!(
+                filtered_combo.label() == Some(level_label)
+                    || filtered_labelled_texts.contains(&level_label),
+                "locale={locale:?}: ComboBox lost label after switch: {:?}",
+                filtered_labelled_texts
+            );
+
+            ui.display_cache = DisplayCache {
+                revision: Some(ui.snapshot.revision()),
+                minimum_level: Some(LogLevel::Error),
+                search: String::new(),
+                lines: vec!["2026-11-26 ERROR moqcast::test [main] error-visible".to_owned()],
+            };
+            let copy_center = filtered_out
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.job.text == copy_label => {
+                        Some(t.galley.rect.translate(t.pos.to_vec2()).center())
+                    }
+                    _ => None,
+                })
+                .expect("v2 copy action must render");
+            let mut copied = None;
+            for pressed in [true, false] {
+                let copy_out = render(
+                    &mut ui,
+                    vec![
+                        egui::Event::PointerMoved(copy_center),
+                        egui::Event::PointerButton {
+                            pos: copy_center,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        },
+                    ],
+                );
+                for command in copy_out.platform_output.commands {
+                    if let egui::OutputCommand::CopyText(text) = command {
+                        copied = Some(text);
+                    }
+                }
+            }
+            let copied = copied.expect("clicking Copy visible logs must copy filtered lines");
+            assert_eq!(
+                copied,
+                "2026-11-26 ERROR moqcast::test [main] error-visible"
+            );
+
+            let text_center = filtered_out
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.job.text == pause_label => {
+                        Some(t.galley.rect.translate(t.pos.to_vec2()).center())
+                    }
+                    _ => None,
+                })
+                .expect("pause auto-scroll label must be painted");
+            assert!(!ui.pause_auto_scroll);
+            for expected in [true, false] {
+                for pressed in [true, false] {
+                    let _ = render(
+                        &mut ui,
+                        vec![
+                            egui::Event::PointerMoved(text_center),
+                            egui::Event::PointerButton {
+                                pos: text_center,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: Default::default(),
+                            },
+                        ],
+                    );
+                }
+                assert_eq!(ui.pause_auto_scroll, expected, "locale={locale:?}");
+            }
+        }
     }
 }
