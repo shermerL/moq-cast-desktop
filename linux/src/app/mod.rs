@@ -37,12 +37,17 @@ pub enum Page {
     Nearby,
     /// Capture selection and publication controls.
     ScreenShare,
+    /// Manual relay and its native sharing settings.
+    Relay,
+    /// Share a native source on the connected relay.
+    RelayShare,
     /// Independent playback canvas.
     Watch,
 }
 /// The native MoQCast desktop application.
 pub struct MoqCastApp {
     page: Page,
+    relay_ui: crate::relay::controls::Ui,
     selected_peer: Option<String>,
     settings_open: bool,
     confirm_nearby_off: bool,
@@ -104,6 +109,7 @@ impl MoqCastApp {
             confirm_nearby_off: false,
             nearby_turn_off_pending: false,
             page: Page::default(),
+            relay_ui: Default::default(),
             selected_peer: None,
             locale,
             system_audio,
@@ -143,8 +149,31 @@ impl MoqCastApp {
             &self.runtime.stats,
             &mut self.player,
         ) {
+            Some(pages::watch::WatchAction::Command(UserCommand::StopWatching))
+                if snapshot.route.is_relay() =>
+            {
+                self.send(UserCommand::Relay(crate::relay::Command::Stop(
+                    snapshot.route.clone(),
+                )))
+            }
             Some(pages::watch::WatchAction::Command(command)) => self.send(command),
-            Some(pages::watch::WatchAction::OpenNearby) => self.page = Page::Nearby,
+            Some(pages::watch::WatchAction::Return { stop }) => {
+                if stop {
+                    self.send(if snapshot.route.is_relay() {
+                        UserCommand::Relay(crate::relay::Command::Stop(snapshot.route.clone()))
+                    } else {
+                        UserCommand::StopWatching
+                    });
+                    if self.command_error.is_some() {
+                        return;
+                    }
+                }
+                self.page = if snapshot.route.is_relay() {
+                    Page::Relay
+                } else {
+                    Page::Nearby
+                }
+            }
             None => {}
         }
     }

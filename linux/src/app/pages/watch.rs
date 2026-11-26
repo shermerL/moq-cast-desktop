@@ -8,7 +8,7 @@ use super::super::{AppSnapshot, Locale, MediaState, UserCommand};
 
 pub(in crate::app) enum WatchAction {
     Command(UserCommand),
-    OpenNearby,
+    Return { stop: bool },
 }
 
 pub(in crate::app) fn show(
@@ -76,11 +76,19 @@ pub(in crate::app) fn show(
                     } else {
                         ""
                     },
-                    action: locale.open_nearby(),
+                    action: if matches!(snapshot.media, MediaState::FailedView { .. }) {
+                        locale.text("停止并返回", "Stop and return")
+                    } else if snapshot.route.is_relay() {
+                        locale.text("返回 Relay", "Back to Relay")
+                    } else {
+                        locale.open_nearby()
+                    },
                 },
             )
             .clicked()
-            .then_some(WatchAction::OpenNearby)
+            .then_some(WatchAction::Return {
+                stop: matches!(snapshot.media, MediaState::FailedView { .. }),
+            })
         }
     }
 }
@@ -103,6 +111,9 @@ pub(in crate::app) fn device_name<'a>(
     path: &str,
     locale: Locale,
 ) -> &'a str {
+    if let crate::relay::MediaRoute::Watching(selection, _) = &snapshot.route {
+        return &selection.path;
+    }
     snapshot
         .peers
         .iter()

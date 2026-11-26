@@ -40,6 +40,10 @@ pub(crate) enum Page {
     #[default]
     Nearby,
     ScreenShare,
+    /// Manual relay and its native sharing settings.
+    Relay,
+    /// Share a native source on the connected relay.
+    RelayShare,
     Watch,
 }
 
@@ -82,6 +86,9 @@ impl Locale {
 
 pub(crate) struct MoqCastApp {
     page: Page,
+    relay_ui: crate::relay::controls::Ui,
+    /// The editable Relay request for which the user opted into system audio.
+    relay_audio_opt_in: Option<(crate::relay::Generation, u64)>,
     locale: Locale,
     developer_mode: bool,
     settings_open: bool,
@@ -141,6 +148,8 @@ impl MoqCastApp {
         let snapshot = runtime.snapshot();
         Self {
             page: Page::Nearby,
+            relay_ui: Default::default(),
+            relay_audio_opt_in: None,
             locale,
             developer_mode,
             settings_open: false,
@@ -185,6 +194,9 @@ impl MoqCastApp {
 
     fn watch_source(&self) -> Option<String> {
         let path = self.snapshot.view.path.as_deref()?;
+        if self.snapshot.route.is_relay() {
+            return Some(path.to_owned());
+        }
         self.snapshot
             .peers
             .values()
@@ -213,7 +225,11 @@ impl MoqCastApp {
     fn handle_player_action(&mut self, action: Option<PlayerAction>) {
         match action {
             Some(PlayerAction::Stop) => {
-                self.send(RuntimeCommand::StopWatching);
+                self.send(if self.snapshot.route.is_relay() {
+                    RuntimeCommand::Relay(crate::relay::Command::Stop(self.snapshot.route.clone()))
+                } else {
+                    RuntimeCommand::StopWatching(self.snapshot.view.generation)
+                });
             }
             Some(PlayerAction::SetVolume {
                 generation,

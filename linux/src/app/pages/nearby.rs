@@ -9,6 +9,9 @@ pub(in crate::app) enum NearbyAction {
     ReturnToPlayer,
 }
 fn owns_playback(snapshot: &AppSnapshot, id: &str) -> bool {
+    if snapshot.route.is_relay() {
+        return false;
+    }
     match &snapshot.media {
         MediaState::PreparingView { path }
         | MediaState::Viewing { path }

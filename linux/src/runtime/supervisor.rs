@@ -20,6 +20,7 @@ use crate::network::discovery::{PeerRegistry, PeerUpdate};
 use crate::network::{peer, server, service};
 use crate::publish::session::{Failure as PublishFailure, Options as PublishOptions, Publication};
 use crate::publish::source::{self, CaptureSource, SourceCatalog};
+use crate::relay::{self, MediaRoute};
 
 use super::PlaybackFrame;
 
@@ -112,6 +113,7 @@ fn next_retry(
 }
 
 enum Input {
+    Relay(relay::Update),
     Command(Option<UserCommand>),
     Service(Option<service::Event>),
     Operation(Option<OperationEvent>),
@@ -156,6 +158,13 @@ enum OperationEvent {
         path: String,
         broadcast: Option<moq_net::broadcast::Consumer>,
     },
+    PublishAudioFailed {
+        generation: u64,
+        message: String,
+    },
+    PublishReady {
+        generation: u64,
+    },
     PublishEnded {
         generation: u64,
         result: Result<(), PublishFailure>,
@@ -179,6 +188,22 @@ enum OperationEvent {
         generation: u64,
         result: Result<(), String>,
     },
+}
+
+impl OperationEvent {
+    fn is_media(&self) -> bool {
+        match self {
+            Self::PublishAudioFailed { .. }
+            | Self::PublishReady { .. }
+            | Self::PublishEnded { .. }
+            | Self::ViewEnded { .. }
+            | Self::ViewAudioChanged { .. }
+            | Self::ViewVideoChanged { .. } => true,
+            #[cfg(target_os = "linux")]
+            Self::ViewStarted { .. } => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -494,6 +519,7 @@ impl Origins {
 }
 
 struct Supervisor {
+    relay: relay::Link,
     cleanup: crate::cleanup::Errors,
     state: AppSnapshot,
     origins: Option<Origins>,
@@ -517,6 +543,7 @@ impl Supervisor {
         let (service_tx, service_rx) = mpsc::channel(EVENT_CAPACITY);
         let (operation_tx, operation_rx) = mpsc::channel(EVENT_CAPACITY);
         Self {
+            relay: relay::Link::default(),
             cleanup: Default::default(),
             state: AppSnapshot::default(),
             origins: None,
@@ -543,11 +570,13 @@ impl Supervisor {
     ) {
         loop {
             let input = tokio::select! {
+                event = self.relay.next(&mut self.state.relay) => Input::Relay(event),
                 command = commands.recv() => Input::Command(command),
                 event = self.service_rx.recv() => Input::Service(event),
                 event = self.operation_rx.recv() => Input::Operation(event),
             };
             let action = match input {
+                Input::Relay(event) => self.relay_event(event).await,
                 Input::Command(Some(command)) => {
                     if matches!(command, UserCommand::StopDiscovery) {
                         self.state.lan_stopping = true;
@@ -593,12 +622,36 @@ impl Supervisor {
             task.abort();
             let _ = task.await;
         }
+        self.end_relay_media().await;
+        self.relay.close(&mut self.state.relay, None).await;
         self.stop_lan().await;
         tracing::info!(stage = "runtime", "desktop runtime stopped");
     }
 
     async fn handle_command(&mut self, command: UserCommand) -> LoopAction {
         match command {
+            UserCommand::Relay(command) => self.relay_command(command).await,
+            UserCommand::StartRelayShare {
+                connection,
+                prefix,
+                system_audio,
+                source,
+            } => {
+                self.state.relay.publish_request += 1;
+                if self.state.media == MediaState::Idle
+                    && let Some(origin) = self.relay.publish_origin(&self.state.relay, connection)
+                {
+                    let path = prefix.broadcast_path();
+                    self.state.route = MediaRoute::Publishing {
+                        connection,
+                        path: path.clone(),
+                    };
+                    self.state.media = MediaState::PreparingPublish;
+                    self.state.last_error = None;
+                    self.launch_publish(system_audio, source, Some((origin, path)));
+                }
+                LoopAction::Changed
+            }
             UserCommand::StartDiscovery => self.start_discovery(),
             UserCommand::StopDiscovery => {
                 self.stop_lan().await;
@@ -610,6 +663,11 @@ impl Supervisor {
                 system_audio,
                 source,
             } => self.start_publish(system_audio, source),
+            UserCommand::StopScreenShare | UserCommand::StopWatching
+                if self.state.route.is_relay() =>
+            {
+                LoopAction::Unchanged
+            }
             UserCommand::StopScreenShare => self.stop_publish().await,
             UserCommand::StartWatching { path } => self.start_view(path),
             UserCommand::SetPlaybackVolume {
@@ -634,6 +692,91 @@ impl Supervisor {
             UserCommand::StopWatching => self.stop_view().await,
             UserCommand::Shutdown => LoopAction::Shutdown,
         }
+    }
+
+    async fn relay_command(&mut self, command: relay::Command) -> LoopAction {
+        match command {
+            relay::Command::Connect(config) => self.relay.connect(&mut self.state.relay, config),
+            relay::Command::Disconnect(generation)
+                if generation == self.state.relay.lifecycle.generation() =>
+            {
+                self.end_relay_media().await;
+                self.relay.close(&mut self.state.relay, None).await;
+            }
+            relay::Command::Watch(selection) => {
+                self.state.relay.watch_request += 1;
+                if self.state.media == MediaState::Idle
+                    && self.relay.request(&self.state.relay, &selection)
+                {
+                    self.state.view_generation = self.view.advance();
+                    self.state.prepare_view(&selection.path);
+                    self.state.route = MediaRoute::Watching(selection, self.state.view_generation);
+                }
+            }
+            relay::Command::Stop(route) if self.state.route == route && route.is_relay() => {
+                self.end_relay_media().await
+            }
+            _ => {}
+        }
+        LoopAction::Changed
+    }
+
+    async fn end_relay_media(&mut self) {
+        self.relay.cancel_request();
+        if self.state.media == MediaState::Idle {
+            return;
+        }
+        match self.state.route {
+            MediaRoute::Watching(_, _) => {
+                self.stop_view().await;
+            }
+            MediaRoute::Publishing { .. } => {
+                self.stop_publish().await;
+            }
+            MediaRoute::Nearby => {}
+        }
+    }
+
+    async fn relay_event(&mut self, event: relay::Update) -> LoopAction {
+        match event {
+            relay::Update::Directory => {
+                if let MediaRoute::Watching(s, _) = &self.state.route
+                    && matches!(
+                        self.state.media,
+                        MediaState::PreparingView { .. } | MediaState::Viewing { .. }
+                    )
+                    && !self.state.relay.contains(s)
+                {
+                    self.terminate_view("The Relay broadcast was withdrawn.")
+                        .await;
+                }
+            }
+            relay::Update::Broadcast(result) => {
+                if let MediaRoute::Watching(s, _) = &self.state.route
+                    && matches!(self.state.media, MediaState::PreparingView { .. })
+                    && self.state.relay.contains(s)
+                {
+                    match result {
+                        Ok(broadcast) => {
+                            self.launch_view(s.path.clone(), Some(broadcast));
+                        }
+                        Err(error) => {
+                            self.state.fail_view(error).expect("requested relay view");
+                        }
+                    }
+                }
+            }
+            relay::Update::Closed(error) => {
+                let watching = matches!(self.state.route, MediaRoute::Watching(_, _))
+                    && self.state.media != MediaState::Idle;
+                self.end_relay_media().await;
+                if watching {
+                    self.state.watch_error = Some(error.clone());
+                }
+                self.relay.close(&mut self.state.relay, Some(error)).await;
+            }
+        }
+        LoopAction::Changed
     }
 
     async fn stop_lan(&mut self) {
@@ -679,14 +822,23 @@ impl Supervisor {
             step = "view",
             "discovery tasks stopped; stopping viewer"
         );
-        let view_result = self.view.stop().await;
+        let relay_active = self.state.route.is_relay() && self.state.media != MediaState::Idle;
+        let view_result = if relay_active {
+            Ok(())
+        } else {
+            self.view.stop().await
+        };
         tracing::debug!(
             stage = "lan_shutdown",
             generation,
             step = "publish",
             "viewer stopped; stopping publisher"
         );
-        let publish_result = self.publish.stop().await;
+        let publish_result = if relay_active {
+            Ok(())
+        } else {
+            self.publish.stop().await
+        };
         tracing::debug!(
             stage = "lan_shutdown",
             generation,
@@ -727,6 +879,7 @@ impl Supervisor {
             task.abort();
             self.cleanup.join("cancelled LAN task", task.await, true);
         }
+        let mut retained_media = Vec::new();
         while let Ok(event) = self.operation_rx.try_recv() {
             match event {
                 OperationEvent::ServicesStarted {
@@ -746,6 +899,7 @@ impl Supervisor {
                     self.source_refresh = None;
                     self.state.sources = result.unwrap_or_else(SourceCatalog::Failed);
                 }
+                other if relay_active => retained_media.push(other),
                 _ => {}
             }
         }
@@ -764,16 +918,23 @@ impl Supervisor {
         if let Some(origins) = self.origins.take() {
             self.cleanup.result("origins", origins.shutdown().await);
         }
-        self.playback_tx.send_replace(None);
         self.state.stop_discovery();
         self.state.lan_stopping = false;
         self.state.peers.clear();
         self.state.remote_screens.clear();
         self.state.inbound_session_count = 0;
         self.state.local_peer_id = None;
-        self.state.media = MediaState::Idle;
-        self.state.remote_audio = RemoteAudioSnapshot::default();
-        self.state.remote_video = RemoteVideoSnapshot::default();
+        if !relay_active {
+            self.playback_tx.send_replace(None);
+            self.state.media = MediaState::Idle;
+            self.state.remote_audio = RemoteAudioSnapshot::default();
+            self.state.remote_video = RemoteVideoSnapshot::default();
+        }
+        for event in retained_media {
+            if event.is_media() {
+                self.handle_operation_event(event).await;
+            }
+        }
         self.cleanup.result("viewer", view_result);
         self.cleanup.result("publisher", publish_result);
         if let Err(error) = std::mem::take(&mut self.cleanup).finish() {
@@ -996,7 +1157,24 @@ impl Supervisor {
             self.state.last_error = Some(error.to_string());
             return LoopAction::Changed;
         }
+        self.state.route = MediaRoute::Nearby;
+        let destination = self
+            .state
+            .local_peer_id
+            .as_ref()
+            .zip(self.origins.as_ref())
+            .map(|(peer, origins)| (origins.publish.clone(), crate::screen_path::for_peer(peer)));
+        self.launch_publish(system_audio, source, destination)
+    }
+
+    fn launch_publish(
+        &mut self,
+        system_audio: bool,
+        source: CaptureSource,
+        destination: Option<(moq_net::origin::Producer, String)>,
+    ) -> LoopAction {
         use moqcast_diagnostics::media::{Session, Source};
+        self.state.publish_audio_error = None;
         let generation = self.publish.advance();
         let category = if matches!(source, CaptureSource::PortalWindow) {
             Source::Window
@@ -1007,7 +1185,7 @@ impl Supervisor {
         if let CaptureSource::Display { width, height, .. } = &source {
             session.format("avc1", Some((*width, *height)));
         }
-        let Some(local_peer_id) = self.state.local_peer_id.clone() else {
+        let Some((origin, path)) = destination else {
             session.finish(true);
             self.state
                 .fail_publish("LAN services are not ready.")
@@ -1016,12 +1194,8 @@ impl Supervisor {
         };
 
         let publication = match Publication::prepare(
-            &self
-                .origins
-                .as_ref()
-                .expect("LAN origins exist while publishing")
-                .publish,
-            &local_peer_id,
+            &origin,
+            &path,
             PublishOptions {
                 system_audio,
                 source,
@@ -1038,7 +1212,22 @@ impl Supervisor {
         };
 
         let (cancel, cancelled) = watch::channel(false);
-        let capture = publication.run(cancelled.clone());
+        let local_ready = self.state.route.is_relay();
+        let events = self.operation_tx.clone();
+        let ready = local_ready.then_some(async move {
+            let _ = events
+                .send(OperationEvent::PublishReady { generation })
+                .await;
+        });
+        let audio_events = self.operation_tx.clone();
+        let capture = publication.run(cancelled.clone(), ready, async move |message| {
+            let _ = audio_events
+                .send(OperationEvent::PublishAudioFailed {
+                    generation,
+                    message,
+                })
+                .await;
+        });
         let completion = PublishCompletion {
             session,
             events: self.operation_tx.clone(),
@@ -1046,9 +1235,11 @@ impl Supervisor {
         };
         self.publish.cancel = Some(cancel);
         self.publish.task = Some(tokio::spawn(completion.run(capture)));
-        self.state
-            .finish_publish()
-            .expect("publication preparation was active");
+        if !local_ready {
+            self.state
+                .finish_publish()
+                .expect("publication preparation was active");
+        }
         LoopAction::Changed
     }
 
@@ -1080,9 +1271,19 @@ impl Supervisor {
             self.state.last_error = Some(error.to_string());
             return LoopAction::Changed;
         }
-        let generation = self.view.advance();
+        self.state.view_generation = self.view.advance();
+        let broadcast = self.remote_screens.get(&path).cloned();
+        self.launch_view(path, broadcast)
+    }
+
+    fn launch_view(
+        &mut self,
+        path: String,
+        broadcast: Option<moq_net::broadcast::Consumer>,
+    ) -> LoopAction {
+        let generation = self.state.view_generation;
         let session = WatchSession::new(generation, &self.stats);
-        let Some(broadcast) = self.remote_screens.get(&path).cloned() else {
+        let Some(broadcast) = broadcast else {
             session.media.finish(true);
             self.state
                 .fail_view("The selected screen is no longer available.")
@@ -1103,7 +1304,18 @@ impl Supervisor {
         LoopAction::Changed
     }
 
+    async fn terminate_view(&mut self, message: &str) {
+        self.relay.cancel_request();
+        let result = self.view.stop().await;
+        self.playback_tx.send_replace(None);
+        self.state.fail_view(message).expect("active watch");
+        if let Err(error) = result {
+            self.state.last_error = Some(error);
+        }
+    }
+
     async fn stop_view(&mut self) -> LoopAction {
+        self.relay.cancel_request();
         if let Err(error) = self.state.begin_stop_view() {
             self.state.last_error = Some(error.to_string());
             return LoopAction::Changed;
@@ -1351,11 +1563,43 @@ impl Supervisor {
                 } else {
                     self.remote_screens.remove(&path);
                 }
+                if !available
+                    && !self.state.route.is_relay()
+                    && matches!(&self.state.media, MediaState::PreparingView { path: current } | MediaState::Viewing { path: current } if current == &path)
+                {
+                    self.terminate_view("The Nearby broadcast was withdrawn.")
+                        .await;
+                    return LoopAction::Changed;
+                }
                 if changed {
                     LoopAction::Changed
                 } else {
                     LoopAction::Unchanged
                 }
+            }
+            OperationEvent::PublishAudioFailed {
+                generation,
+                message,
+            } => {
+                if generation != self.publish.generation
+                    || !matches!(
+                        self.state.media,
+                        MediaState::PreparingPublish | MediaState::Publishing
+                    )
+                {
+                    return LoopAction::Unchanged;
+                }
+                self.state.publish_audio_error = Some(message);
+                LoopAction::Changed
+            }
+            OperationEvent::PublishReady { generation } => {
+                if generation == self.publish.generation
+                    && self.state.media == MediaState::PreparingPublish
+                {
+                    self.state.finish_publish().expect("publication preparing");
+                    return LoopAction::Changed;
+                }
+                LoopAction::Unchanged
             }
             OperationEvent::PublishEnded { generation, result } => {
                 if generation != self.publish.generation {
@@ -1420,10 +1664,18 @@ impl Supervisor {
                 }
             }
             OperationEvent::ViewEnded { generation, result } => {
-                if generation != self.view.generation {
+                if generation != self.view.generation
+                    || !matches!(
+                        self.state.media,
+                        MediaState::PreparingView { .. } | MediaState::Viewing { .. }
+                    )
+                {
                     return LoopAction::Unchanged;
                 }
-                self.view.task = None;
+                if let Some(task) = self.view.task.take() {
+                    self.cleanup.join("ended playback", task.await, false);
+                }
+                self.view.volume = None;
                 self.view.cancel = None;
                 self.playback_tx.send_replace(None);
                 match result {
@@ -3450,3 +3702,7 @@ mod tests {
         supervisor.mesh.close_all();
     }
 }
+
+#[cfg(all(target_os = "linux", test))]
+#[path = "relay_loopback_tests.rs"]
+mod relay_loopback_tests;

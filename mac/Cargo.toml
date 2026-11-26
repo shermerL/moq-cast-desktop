@@ -27,6 +27,7 @@ watch = [
     "dep:moqcast-diagnostics",
     "network",
     "dep:hang",
+    "dep:uuid",
     "dep:moq-audio",
     "dep:moq-mux",
     "dep:moqcast-playback-stats",
@@ -47,6 +48,7 @@ foundation = [
 ]
 
 [dependencies]
+uuid = { version = "=1.26.0", features = ["v4"], optional = true }
 moqcast-playback-stats = { path = "../shared/playback-stats", optional = true }
 moqcast-lan-state = { path = "../shared/lan-state" }
 anyhow = "1"
@@ -69,7 +71,7 @@ moq-video = { git = "https://github.com/moq-dev/moq", rev = "f8215bc47199b48512d
 objc2 = { version = "0.6.4", optional = true }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWorkspace"], optional = true }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGDirectDisplay", "CGWindow"], optional = true }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSError", "NSNotification", "NSOperation", "NSUUID", "NSString", "block2"], optional = true }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSError", "NSNotification", "NSOperation", "NSString", "block2"], optional = true }
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["SCContentSharingPicker", "SCShareableContent", "SCStream"], optional = true }
 
 [[bin]]

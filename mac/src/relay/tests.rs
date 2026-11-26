@@ -12,6 +12,26 @@ async fn roundtrip(config: Config) {
         publisher.version().unwrap(),
         viewer.version().unwrap()
     );
+    assert_ne!(publisher.origin.hop(), publish.hop());
+    assert_ne!(viewer.origin.hop(), viewer.publish_origin().hop());
+    // An older withdrawal for the same path cannot retract the replacement.
+    let mut ordered = Snapshot::default();
+    let route = |epoch: &str| moq_net::announce::Announce {
+        prefix: "fixture/epoch".into(),
+        captures: None,
+        route: moq_net::origin::Route::default().with_epoch(epoch.parse().unwrap()),
+    };
+    let old = route("01900000-0000-7000-8000-000000000001");
+    let new = route("01900000-0000-7000-8000-000000000002");
+    viewer.apply(&mut ordered, moq_net::announce::Event::Start(old.clone()));
+    let first = ordered.entries["fixture/epoch"];
+    viewer.apply(&mut ordered, moq_net::announce::Event::Start(new.clone()));
+    let second = ordered.entries["fixture/epoch"];
+    assert_ne!(first, second);
+    viewer.apply(&mut ordered, moq_net::announce::Event::End(old));
+    assert_eq!(ordered.entries["fixture/epoch"], second);
+    viewer.apply(&mut ordered, moq_net::announce::Event::End(new));
+    assert!(!ordered.entries.contains_key("fixture/epoch"));
     let name = format!(
         "probe-{}-{}",
         std::process::id(),

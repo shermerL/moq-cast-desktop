@@ -74,6 +74,7 @@ mod tests {
                 "dep:moqcast-diagnostics",
                 "network",
                 "dep:hang",
+                "dep:uuid",
                 "dep:moq-audio",
                 "dep:moq-mux",
                 "dep:moqcast-playback-stats",

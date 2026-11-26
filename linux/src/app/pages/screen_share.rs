@@ -8,6 +8,7 @@ pub(in crate::app) fn show(
     snapshot: &AppSnapshot,
     audio: &mut bool,
     selected: &mut Option<CaptureSource>,
+    relay: Option<Option<crate::relay::PublishPrefix>>,
 ) -> Option<UserCommand> {
     let mut command = None;
     let editable = snapshot.media == MediaState::Idle;
@@ -38,15 +39,23 @@ pub(in crate::app) fn show(
                 MediaState::PreparingPublish => {
                     (locale.preparing_share(), false, ActionTone::Neutral)
                 }
-                MediaState::Idle if !snapshot.discovery.is_active() && !snapshot.lan_stopping => (
-                    locale.text("开启附近设备", "Turn on Nearby"),
-                    true,
-                    ActionTone::Accent,
-                ),
+                MediaState::Idle
+                    if relay.is_none()
+                        && !snapshot.discovery.is_active()
+                        && !snapshot.lan_stopping =>
+                {
+                    (
+                        locale.text("开启附近设备", "Turn on Nearby"),
+                        true,
+                        ActionTone::Accent,
+                    )
+                }
                 _ => (
                     locale.text("开始共享", "Start sharing"),
                     editable
-                        && snapshot.access().publish()
+                        && relay
+                            .as_ref()
+                            .map_or_else(|| snapshot.access().publish(), Option::is_some)
                         && snapshot.sources.selected(selected.as_ref()).is_some(),
                     ActionTone::Accent,
                 ),
@@ -61,12 +70,26 @@ pub(in crate::app) fn show(
             .clicked()
             {
                 command = Some(match snapshot.media {
+                    MediaState::Publishing if relay.is_some() => {
+                        UserCommand::Relay(crate::relay::Command::Stop(snapshot.route.clone()))
+                    }
                     MediaState::Publishing => UserCommand::StopScreenShare,
                     MediaState::Idle
-                        if !snapshot.discovery.is_active() && !snapshot.lan_stopping =>
+                        if relay.is_none()
+                            && !snapshot.discovery.is_active()
+                            && !snapshot.lan_stopping =>
                     {
                         UserCommand::StartDiscovery
                     }
+                    _ if let Some(Some(prefix)) = relay.clone() => UserCommand::StartRelayShare {
+                        connection: snapshot.relay.lifecycle.generation(),
+                        prefix,
+                        system_audio: *audio,
+                        source: snapshot
+                            .sources
+                            .selected(selected.as_ref())
+                            .expect("enabled source"),
+                    },
                     _ => UserCommand::StartScreenShare {
                         system_audio: *audio,
                         source: snapshot
@@ -123,8 +146,17 @@ pub(in crate::app) fn show(
                 crate::app::media_diagnostics::sharing(ui, locale == Locale::Chinese);
                 v2::settings_row(ui,locale.system_audio(),|ui| {ui.add_enabled(editable,egui::Checkbox::new(audio,"")).on_hover_text(locale.system_audio_hint());});
                 ui.label(egui::RichText::new(locale.text("系统声音包含设备输出，不限于所选窗口。","System sound includes device output, not only the selected window.")).small().color(p.muted));
-                if editable&&!snapshot.access().ready{v2::notice(ui,StatusTone::Neutral,locale.enable_nearby_before_sharing());}
+                if editable&&relay.is_none()&&!snapshot.access().ready{v2::notice(ui,StatusTone::Neutral,locale.enable_nearby_before_sharing());}
                 if matches!(snapshot.media,MediaState::PreparingView{..}|MediaState::Viewing{..}|MediaState::StoppingView{..}) {v2::notice(ui,StatusTone::Neutral,locale.text("停止观看后可开始共享。","Stop watching before sharing."));}
+                if matches!(snapshot.media, MediaState::PreparingPublish | MediaState::Publishing)
+                    && let Some(reason) = &snapshot.publish_audio_error {
+                    let label = if snapshot.media == MediaState::Publishing {
+                        locale.text("系统声音不可用，画面共享继续。", "System audio unavailable; video sharing continues.")
+                    } else {
+                        locale.text("系统声音不可用。", "System audio unavailable.")
+                    };
+                    v2::notice(ui, StatusTone::Warning, &format!("{label} {reason}"));
+                }
                 if snapshot.last_error.is_some(){v2::notice(ui,StatusTone::Error,locale.operation_failed());}
                 });
             });
@@ -146,7 +178,14 @@ mod tests {
         };
         let context = egui::Context::default();
         let frame = context.run_ui(egui::RawInput::default(), |ui| {
-            show(ui, Locale::English, &snapshot, &mut audio, &mut selected);
+            show(
+                ui,
+                Locale::English,
+                &snapshot,
+                &mut audio,
+                &mut selected,
+                None,
+            );
         });
         frame.drop_without_applying_deltas();
         assert_eq!(selected, Some(CaptureSource::PortalWindow));
@@ -168,7 +207,14 @@ mod tests {
         };
         let context = egui::Context::default();
         let frame = context.run_ui(egui::RawInput::default(), |ui| {
-            show(ui, Locale::English, &snapshot, &mut audio, &mut selected);
+            show(
+                ui,
+                Locale::English,
+                &snapshot,
+                &mut audio,
+                &mut selected,
+                None,
+            );
         });
         frame.drop_without_applying_deltas();
         assert!(selected.is_none());
@@ -201,7 +247,7 @@ mod layout_checks {
             },
             |root| {
                 egui::CentralPanel::default().show(root, |ui| {
-                    command = show(ui, Locale::English, snapshot, &mut false, selected);
+                    command = show(ui, Locale::English, snapshot, &mut false, selected, None);
                 });
             },
         );
@@ -312,7 +358,7 @@ mod layout_checks {
                 },
                 |root| {
                     egui::CentralPanel::default().show(root, |ui| {
-                        show(ui, Locale::English, &s, &mut false, &mut selected);
+                        show(ui, Locale::English, &s, &mut false, &mut selected, None);
                     });
                 },
             );

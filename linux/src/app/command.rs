@@ -5,6 +5,15 @@ use super::CaptureSource;
 /// A user request handled by the runtime resource owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UserCommand {
+    /// Manually control the independent relay.
+    Relay(crate::relay::Command),
+    /// Publish the selected native source to the current relay connection.
+    StartRelayShare {
+        connection: crate::relay::Generation,
+        prefix: crate::relay::PublishPrefix,
+        system_audio: bool,
+        source: CaptureSource,
+    },
     /// Begin looking for LAN peers.
     StartDiscovery,
     /// Stop looking for LAN peers.

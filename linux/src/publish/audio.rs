@@ -28,20 +28,26 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Capture system output and publish it as an Opus rendition.
 pub(super) async fn publish(
-    mut broadcast: moq_net::broadcast::Producer,
+    broadcast: moq_net::broadcast::Producer,
     catalog: moq_mux::catalog::Producer,
     clock: moq_mux::Clock,
 ) -> anyhow::Result<()> {
     let capture = Capture::open(clock).await?;
-    let queue = capture.queue.clone();
+    tracing::info!(backend = capture.backend, "system-audio capture started");
+    encode_capture(broadcast, catalog, &capture.queue).await
+}
 
+async fn encode_capture(
+    mut broadcast: moq_net::broadcast::Producer,
+    catalog: moq_mux::catalog::Producer,
+    queue: &PcmQueue,
+) -> anyhow::Result<()> {
     let input = moq_audio::encode::Input::new(SAMPLE_RATE, moq_audio::Layout::Stereo);
     let options = moq_audio::encode::Options::default();
     let mut producer = moq_audio::encode::Producer::new(&mut broadcast, catalog, input, &options)
         .context("open Opus system-audio producer")?;
     let mut timeline = Timeline::default();
 
-    tracing::info!(backend = capture.backend, "system-audio capture started");
     loop {
         let chunk = queue.recv().await?;
         if timeline.discontinuous(&chunk) {
@@ -401,6 +407,50 @@ impl Timeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_disconnected_running_source_removes_its_opus_track() {
+        let mut broadcast = moq_net::broadcast::Info::new().produce();
+        let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+        let queue = PcmQueue::new(2);
+        queue.push(0, vec![0; 960 * CHANNELS as usize * BYTES_PER_SAMPLE]);
+        let encode = encode_capture(broadcast, catalog.clone(), &queue);
+        tokio::pin!(encode);
+        tokio::select! {
+            biased;
+            result = &mut encode => panic!("valid silence ended the audio source: {result:?}"),
+            () = std::future::ready(()) => {}
+        }
+        assert_eq!(catalog.snapshot().audio.renditions.len(), 1);
+        queue.close(Some("fixture running stream disconnected".to_owned()));
+        assert_eq!(
+            encode.await.unwrap_err().to_string(),
+            "fixture running stream disconnected"
+        );
+        assert!(catalog.snapshot().audio.renditions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn silent_pcm_is_valid_before_a_running_capture_disconnects() {
+        let (tx, rx) = oneshot::channel();
+        let startup = Startup::new(tx);
+        let queue = PcmQueue::new(2);
+        startup.succeed();
+        rx.await.unwrap().unwrap();
+        let silence = vec![0; 480 * CHANNELS as usize * BYTES_PER_SAMPLE];
+        assert!(valid_chunk(silence.len(), spa::buffer::ChunkFlags::empty()));
+        queue.push(0, silence.clone());
+        assert_eq!(queue.recv().await.unwrap().data, silence);
+        finish_capture(
+            Err(anyhow!("fixture stream disconnected")),
+            &queue,
+            &startup,
+        );
+        assert_eq!(
+            queue.recv().await.unwrap_err().to_string(),
+            "fixture stream disconnected"
+        );
+    }
 
     fn chunk(sequence: u64, timestamp_us: u64) -> PcmChunk {
         PcmChunk {

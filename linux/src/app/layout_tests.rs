@@ -8,6 +8,7 @@ fn fixture() -> (MoqCastApp, tokio::sync::mpsc::Receiver<UserCommand>) {
     (
         MoqCastApp {
             page: Page::Nearby,
+            relay_ui: Default::default(),
             selected_peer: None,
             settings_open: false,
             confirm_nearby_off: false,
@@ -77,7 +78,7 @@ fn page_matrix_preserves_primary_actions_and_log_export() {
                 egui::Theme::Light
             });
             let size = egui::vec2(width, 640.0);
-            for page in [Page::Nearby, Page::ScreenShare, Page::Watch] {
+            for page in [Page::Nearby, Page::ScreenShare, Page::Relay, Page::Watch] {
                 app.page = page;
                 app.settings_open = false;
                 let out = render(&ctx, &mut app, &s, size, vec![]);
@@ -85,6 +86,8 @@ fn page_matrix_preserves_primary_actions_and_log_export() {
                     Page::Nearby => "Turn on Nearby",
                     Page::ScreenShare => "Turn on Nearby",
                     Page::Watch => app.locale.open_nearby(),
+                    Page::Relay => "Connect",
+                    Page::RelayShare => unreachable!(),
                 };
                 let rect = painted(&out, label);
                 assert!(rect.is_positive() && rect.bottom() <= size.y);
@@ -473,4 +476,103 @@ fn nearby_off_during_startup_waits_for_terminal_discovery_state() {
         !app.nearby_turn_off_pending,
         "completed cleanup errors must not lock the retry action"
     );
+}
+
+#[test]
+fn relay_share_status_waits_for_the_local_video_rendition() {
+    let (mut app, _commands) = fixture();
+    app.page = Page::RelayShare;
+    let mut snapshot = AppSnapshot::default();
+    let connection = snapshot
+        .relay
+        .lifecycle
+        .begin(crate::relay::Phase::Connected);
+    snapshot.route = crate::relay::MediaRoute::Publishing {
+        connection,
+        path: "test/fixture".into(),
+    };
+    let ctx = egui::Context::default();
+    moqcast_ui::v2::install(&ctx);
+    for (phase, visible) in [
+        (MediaState::PreparingPublish, false),
+        (MediaState::Publishing, true),
+        (MediaState::StoppingPublish, false),
+    ] {
+        snapshot.media = phase;
+        let out = render(&ctx, &mut app, &snapshot, egui::vec2(1040.0, 700.0), vec![]);
+        let rendered=out.shapes.iter().any(|s| matches!(&s.shape,egui::Shape::Text(t) if t.galley.job.text=="Sharing locally · Relay visibility unconfirmed"));
+        assert_eq!(rendered, visible);
+    }
+}
+
+#[test]
+fn terminal_watch_returns_only_after_its_stop_is_queued() {
+    let (mut app, mut commands) = fixture();
+    let ctx = egui::Context::default();
+    theme::configure(&ctx);
+    let size = egui::vec2(1040.0, 700.0);
+    let mut state = AppSnapshot::default();
+    let connection = state.relay.lifecycle.begin(crate::relay::Phase::Connected);
+    let route = crate::relay::MediaRoute::Watching(
+        crate::relay::Selection {
+            generation: connection,
+            path: "fixture".into(),
+            revision: 2,
+        },
+        7,
+    );
+    state.route = route.clone();
+    state.view_generation = 7;
+    state.prepare_view("fixture");
+    state.fail_view("withdrawn").unwrap();
+    app.page = Page::Watch;
+    let pos = painted(
+        &render(&ctx, &mut app, &state, size, vec![]),
+        "Stop and return",
+    )
+    .center();
+    let click = |app: &mut MoqCastApp, state: &AppSnapshot, pos| {
+        for pressed in [true, false] {
+            render(
+                &ctx,
+                app,
+                state,
+                size,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    };
+    while app
+        .runtime
+        .try_send(UserCommand::RefreshCaptureSources)
+        .is_ok()
+    {}
+    click(&mut app, &state, pos);
+    assert_eq!(app.page, Page::Watch);
+    while commands.try_recv().is_ok() {}
+    click(&mut app, &state, pos);
+    assert_eq!(
+        commands.try_recv().unwrap(),
+        UserCommand::Relay(crate::relay::Command::Stop(route))
+    );
+    assert_eq!(app.page, Page::Relay);
+    state.begin_stop_view().unwrap();
+    state.finish_stop_view().unwrap();
+    app.page = Page::Watch;
+    let pos = painted(
+        &render(&ctx, &mut app, &state, size, vec![]),
+        "Back to Relay",
+    )
+    .center();
+    click(&mut app, &state, pos);
+    assert!(commands.try_recv().is_err());
+    assert_eq!(app.page, Page::Relay);
 }

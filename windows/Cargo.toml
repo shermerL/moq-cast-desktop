@@ -13,6 +13,7 @@ moqcast-build-provenance = { path = "../shared/build-provenance" }
 winresource = "=0.1.31"
 
 [dependencies]
+uuid = { version = "=1.26.0", features = ["v4"] }
 moqcast-lan-state = { path = "../shared/lan-state" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -48,6 +49,8 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
+hang = { git = "https://github.com/moq-dev/moq", rev = "f8215bc47199b48512d805ae9fc710cc6586de51" }
+moq-mux = { git = "https://github.com/moq-dev/moq", rev = "f8215bc47199b48512d805ae9fc710cc6586de51" }
 serde_json = "1.0.151"
 tempfile = "3.27.0"
 zip = { version = "8.6.0", default-features = false }

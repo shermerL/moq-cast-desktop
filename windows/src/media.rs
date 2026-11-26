@@ -1,11 +1,14 @@
 //! Single-publication screen media lifecycle and Windows capture pipeline.
 
+#[cfg(any(target_os = "windows", test))]
+#[path = "../../shared/relay/publication.rs"]
+mod local_video;
+
 use moq_tokio::moq_net;
 
-use crate::{
-    audio::{AudioSnapshot, StatusUpdate as AudioStatusUpdate},
-    screen_path,
-};
+use crate::audio::{AudioSnapshot, StatusUpdate as AudioStatusUpdate};
+#[cfg(test)]
+use crate::screen_path;
 
 pub(crate) const COMPATIBLE_MAX_SCREEN_EDGE: u32 = 1920;
 #[cfg(any(target_os = "windows", test))]
@@ -413,7 +416,12 @@ impl MediaSnapshot {
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn begin(&mut self, local_peer_id: &str) -> Option<u64> {
+        self.begin_path(screen_path::for_peer(local_peer_id), true)
+    }
+
+    pub(crate) fn begin_path(&mut self, path: String, system_audio: bool) -> Option<u64> {
         if matches!(
             self.phase,
             MediaPhase::Preparing | MediaPhase::Sharing | MediaPhase::Stopping
@@ -422,11 +430,13 @@ impl MediaSnapshot {
         }
         self.generation = self.generation.saturating_add(1);
         self.phase = MediaPhase::Preparing;
-        self.path = Some(screen_path::for_peer(local_peer_id));
+        self.path = Some(path);
         self.width = None;
         self.height = None;
         self.last_error = None;
-        self.audio.begin(self.generation);
+        if system_audio {
+            self.audio.begin(self.generation);
+        }
         Some(self.generation)
     }
 
@@ -534,7 +544,9 @@ impl ReadyPublication {
     pub(crate) async fn run(
         self,
         generation: u64,
+        system_audio: bool,
         audio_updates: tokio::sync::watch::Sender<Option<AudioStatusUpdate>>,
+        ready: Option<impl std::future::Future<Output = ()>>,
     ) -> Result<(), PublicationFailure> {
         #[cfg(target_os = "windows")]
         {
@@ -557,13 +569,15 @@ impl ReadyPublication {
             );
 
             let clock = self.publication.clock;
-            let audio = crate::audio::publish(
-                self.publication.broadcast.clone(),
-                self.publication.catalog.clone(),
-                clock,
-                generation,
-                audio_updates,
-            );
+            let audio = || {
+                crate::audio::publish(
+                    self.publication.broadcast.clone(),
+                    self.publication.catalog.clone(),
+                    clock,
+                    generation,
+                    audio_updates,
+                )
+            };
             let mut options = moq_video::encode::Capture::default();
             options.capture = capture;
             options.encode = encode;
@@ -572,13 +586,8 @@ impl ReadyPublication {
                 self.publication.catalog.clone(),
                 options,
             );
-            tokio::pin!(audio);
-            tokio::pin!(video);
-
-            let result = tokio::select! {
-                result = &mut video => result,
-                () = &mut audio => video.await,
-            };
+            let video = local_video::run(video, &self.publication.catalog, ready);
+            let result = local_video::with_audio(video, system_audio, audio).await;
             result.map_err(|error| {
                 tracing::warn!(
                     video_policy = self.plan.policy.name(),
@@ -601,7 +610,7 @@ impl ReadyPublication {
 
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = (generation, audio_updates);
+            let _ = (generation, system_audio, audio_updates, ready);
             Err(PublicationFailure::CaptureUnavailable)
         }
     }
@@ -655,13 +664,9 @@ impl Publication {
         }
     }
 
-    pub(crate) fn prepare(
-        origin: &moq_net::origin::Producer,
-        local_peer_id: &str,
-    ) -> anyhow::Result<Self> {
+    pub(crate) fn prepare(origin: &moq_net::origin::Producer, path: &str) -> anyhow::Result<Self> {
         #[cfg(target_os = "windows")]
         {
-            let path = screen_path::for_peer(local_peer_id);
             let mut broadcast = origin.create_broadcast(path)?;
             let clock = moq_mux::Clock::new();
             let catalog = moq_mux::catalog::Producer::new(
@@ -678,7 +683,7 @@ impl Publication {
 
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = (origin, local_peer_id);
+            let _ = (origin, path);
             anyhow::bail!("Windows screen capture is unavailable on this host")
         }
     }

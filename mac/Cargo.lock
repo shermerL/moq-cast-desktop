@@ -3246,6 +3246,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]

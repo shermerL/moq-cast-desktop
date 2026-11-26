@@ -27,11 +27,12 @@ impl MoqCastApp {
             )
             .show(root, |ui| {
                 let title = match self.page {
-                    Page::Nearby => None,
+                    Page::Nearby | Page::Relay => None,
                     Page::Watch => Some(
                         match &snapshot.media {
                             MediaState::PreparingView { path }
                             | MediaState::Viewing { path }
+                            | MediaState::FailedView { path }
                             | MediaState::StoppingView { path } => {
                                 pages::watch::device_name(snapshot, path, self.locale)
                             }
@@ -45,7 +46,12 @@ impl MoqCastApp {
                     ui,
                     moqcast_ui::v2::Header {
                         title: title.as_deref(),
-                        back: if self.page == Page::Watch && ui.ctx().content_rect().width() < 680.0
+                        back: if self.page == Page::RelayShare
+                            || self.page == Page::Watch && snapshot.route.is_relay()
+                        {
+                            "Relay"
+                        } else if self.page == Page::Watch
+                            && ui.ctx().content_rect().width() < 680.0
                         {
                             self.text("返回", "Back")
                         } else {
@@ -55,13 +61,58 @@ impl MoqCastApp {
                     },
                 );
                 if response.back {
-                    self.page = Page::Nearby;
+                    self.page = if self.page == Page::RelayShare
+                        || self.page == Page::Watch && snapshot.route.is_relay()
+                    {
+                        Page::Relay
+                    } else {
+                        Page::Nearby
+                    };
                 }
                 if response.settings {
                     self.settings_open = !self.settings_open;
                 }
             });
 
+        let active = snapshot.media != MediaState::Idle;
+        if self
+            .relay_ui
+            .reconcile(&snapshot.relay, &snapshot.route, active)
+        {
+            self.page = Page::Watch;
+        }
+        if matches!(self.page, Page::Nearby | Page::Relay) {
+            egui::Panel::top("transport-selector").show(root, |ui| {
+                ui.horizontal(|ui| {
+                    let nearby = self.text("附近设备", "Nearby");
+                    ui.selectable_value(&mut self.page, Page::Nearby, nearby);
+                    ui.selectable_value(&mut self.page, Page::Relay, "Relay");
+                    if active && snapshot.route.is_relay() {
+                        let watching =
+                            matches!(snapshot.route, crate::relay::MediaRoute::Watching(_, _));
+                        if ui
+                            .button(if watching {
+                                self.text("返回播放器", "Return to player")
+                            } else {
+                                self.text("管理 Relay 共享", "Manage Relay share")
+                            })
+                            .clicked()
+                        {
+                            self.page = if watching {
+                                Page::Watch
+                            } else {
+                                Page::RelayShare
+                            };
+                        }
+                        if ui.button(self.text("停止", "Stop")).clicked() {
+                            self.send(UserCommand::Relay(crate::relay::Command::Stop(
+                                snapshot.route.clone(),
+                            )));
+                        }
+                    }
+                });
+            });
+        }
         if self.page == Page::Nearby {
             egui::Panel::bottom("v2-nearby-footer")
                 .exact_size(metrics.footer)
@@ -93,7 +144,10 @@ impl MoqCastApp {
                             .show(ui)
                             .clicked()
                             {
-                                if active && snapshot.media != MediaState::Idle {
+                                if active
+                                    && !snapshot.route.is_relay()
+                                    && snapshot.media != MediaState::Idle
+                                {
                                     self.confirm_nearby_off = true;
                                 } else {
                                     self.send(if active {
@@ -143,6 +197,30 @@ impl MoqCastApp {
                     self.watch(ui, snapshot);
                     return;
                 }
+                if self.page == Page::Relay {
+                    use crate::relay::controls::ActionRequest;
+                    match self.relay_ui.page(
+                        ui,
+                        self.locale == Locale::Chinese,
+                        &snapshot.relay,
+                        &snapshot.route,
+                        active,
+                    ) {
+                        Some(ActionRequest::Command(command)) => {
+                            self.send(UserCommand::Relay(command.clone()));
+                            if self.command_error.is_none() {
+                                self.relay_ui.queued(&command, &snapshot.relay);
+                            }
+                        }
+                        Some(ActionRequest::Player) => self.page = Page::Watch,
+                        Some(ActionRequest::Share) => {
+                            self.page = Page::RelayShare;
+                            self.send(UserCommand::RefreshCaptureSources);
+                        }
+                        None => {}
+                    }
+                    return;
+                }
                 let width = ui.available_width().min(if self.page == Page::Nearby {
                     1240.0
                 } else {
@@ -165,7 +243,27 @@ impl MoqCastApp {
                             self.nearby(ui, snapshot, metrics);
                         }
                     } else {
-                        let enabled = !self.nearby_turn_off_pending;
+                        let relay = self.page == Page::RelayShare;
+                        let enabled = if relay {
+                            self.relay_ui.publish_pending.is_none()
+                                && snapshot.relay.lifecycle.phase()
+                                    == crate::relay::Phase::Connected
+                        } else {
+                            !self.nearby_turn_off_pending && !(active && snapshot.route.is_relay())
+                        };
+                        let prefix = relay.then(|| {
+                            self.relay_ui
+                                .prefix_input(ui, self.locale == Locale::Chinese, !active)
+                        });
+                        if relay
+                            && snapshot.media == MediaState::Publishing
+                            && matches!(snapshot.route, crate::relay::MediaRoute::Publishing { .. })
+                        {
+                            ui.label(self.text(
+                                "本机正在共享 · Relay 可见性未确认",
+                                "Sharing locally · Relay visibility unconfirmed",
+                            ));
+                        }
                         let command = ui
                             .add_enabled_ui(enabled, |ui| {
                                 pages::screen_share::show(
@@ -174,11 +272,19 @@ impl MoqCastApp {
                                     snapshot,
                                     &mut self.system_audio,
                                     &mut self.selected_source,
+                                    prefix,
                                 )
                             })
                             .inner;
                         if enabled && let Some(command) = command {
+                            let publish = matches!(command, UserCommand::StartRelayShare { .. });
                             self.send(command);
+                            if publish && self.command_error.is_none() {
+                                self.relay_ui.publish_pending = Some((
+                                    snapshot.relay.lifecycle.generation(),
+                                    snapshot.relay.publish_request,
+                                ));
+                            }
                         }
                     }
                 });
@@ -301,6 +407,7 @@ impl MoqCastApp {
             snapshot.media,
             MediaState::PreparingView { .. }
                 | MediaState::Viewing { .. }
+                | MediaState::FailedView { .. }
                 | MediaState::StoppingView { .. }
         );
         let (tone, status) = match snapshot.media {
@@ -310,6 +417,10 @@ impl MoqCastApp {
             MediaState::Viewing { .. } => (StatusTone::Active, self.locale.viewing_screen()),
             MediaState::PreparingView { .. } => (StatusTone::Busy, self.locale.preparing_view()),
             MediaState::StoppingView { .. } => (StatusTone::Busy, self.locale.stopping_view()),
+            MediaState::FailedView { .. } => (
+                StatusTone::Neutral,
+                self.text("观看已结束", "Playback ended"),
+            ),
             MediaState::Idle => (StatusTone::Neutral, self.locale.media_idle()),
         };
         let card = v2::ContextCard {
@@ -327,6 +438,8 @@ impl MoqCastApp {
         if v2::context_card(ui, card, metrics).clicked() {
             self.page = if watching {
                 Page::Watch
+            } else if snapshot.media != MediaState::Idle && snapshot.route.is_relay() {
+                Page::RelayShare
             } else {
                 Page::ScreenShare
             };

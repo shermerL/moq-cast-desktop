@@ -81,8 +81,9 @@ async fn exercise_publication_owner() {
     owner.start(session(generation), pending(), events.clone());
     let (snapshots, _) = watch::channel(snapshot.clone());
     handle_command(
-        RuntimeCommand::StopSharing,
+        RuntimeCommand::StopSharing(generation),
         RuntimeContext {
+            relay: &mut Default::default(),
             config: &RuntimeConfig {
                 bind: "127.0.0.1:0".parse().unwrap(),
                 node: None,

@@ -75,10 +75,7 @@ pub(crate) struct ViewSnapshot {
 
 impl ViewSnapshot {
     pub(crate) fn begin(&mut self, path: &str) -> Option<u64> {
-        if matches!(
-            self.phase,
-            ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping
-        ) {
+        if self.phase != ViewPhase::Idle {
             return None;
         }
         self.generation = self.generation.saturating_add(1);
@@ -136,7 +133,7 @@ impl ViewSnapshot {
     }
 
     pub(crate) fn begin_stop(&mut self) -> Option<u64> {
-        if !matches!(self.phase, ViewPhase::Preparing | ViewPhase::Viewing) {
+        if self.phase == ViewPhase::Idle || self.phase == ViewPhase::Stopping {
             return None;
         }
         self.phase = ViewPhase::Stopping;
@@ -166,7 +163,9 @@ impl ViewSnapshot {
 
     fn reset(&mut self, phase: ViewPhase, error: Option<String>) {
         self.phase = phase;
-        self.path = None;
+        if phase == ViewPhase::Idle {
+            self.path = None;
+        }
         self.decoder = None;
         self.video_codec = None;
         self.width = None;
@@ -1271,7 +1270,11 @@ mod tests {
     fn stopping_and_failures_ignore_old_generations() {
         let mut view = ViewSnapshot::default();
         let old = view.begin("moqcast.screen/peer-a").expect("old");
-        view.phase = ViewPhase::Failed;
+        assert!(view.ended(old, Err("withdrawn".into())));
+        assert_eq!(view.path.as_deref(), Some("moqcast.screen/peer-a"));
+        assert!(view.begin("moqcast.screen/peer-a").is_none());
+        assert_eq!(view.begin_stop(), Some(old));
+        assert!(view.stopped(old));
         let current = view.begin("moqcast.screen/peer-a").expect("current");
         assert!(current > old);
         assert!(!view.ended(old, Err("late".to_owned())));

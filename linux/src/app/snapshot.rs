@@ -90,6 +90,8 @@ pub enum MediaState {
     PreparingView { path: String },
     /// One remote screen is being viewed.
     Viewing { path: String },
+    /// Playback resources have ended; the user still owns the recovery action.
+    FailedView { path: String },
     /// The remote screen subscription is stopping.
     StoppingView { path: String },
 }
@@ -209,6 +211,10 @@ pub struct RemoteScreenSnapshot {
 /// The latest runtime state consumed by the UI.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AppSnapshot {
+    /// Current manual connection and its remote directory.
+    pub relay: crate::relay::Snapshot,
+    /// Transport and identity of the last admitted media operation.
+    pub route: crate::relay::MediaRoute,
     /// Current discovery lifecycle.
     pub discovery: DiscoveryState,
     /// Local shutdown blocks new commands independently of discovery results.
@@ -229,6 +235,8 @@ pub struct AppSnapshot {
     pub view_generation: u64,
     /// Terminal error for the latest watch, retained until the next watch begins.
     pub watch_error: Option<String>,
+    /// Current publication lost its audio source while video continues.
+    pub publish_audio_error: Option<String>,
     /// Remote audio progress for the current viewer.
     pub remote_audio: RemoteAudioSnapshot,
     /// Remote video decoder metadata for the current viewer.
@@ -466,7 +474,10 @@ impl AppSnapshot {
 
     /// Return a completed local publication to idle.
     pub fn end_publish(&mut self) -> Result<(), StateError> {
-        if self.media != MediaState::Publishing {
+        if !matches!(
+            self.media,
+            MediaState::Publishing | MediaState::PreparingPublish
+        ) {
             return Err(StateError::UnexpectedCompletion);
         }
         self.media = MediaState::Idle;
@@ -476,7 +487,7 @@ impl AppSnapshot {
     /// Begin stopping an active local screen publication.
     pub fn begin_stop_publish(&mut self) -> Result<(), StateError> {
         match self.media {
-            MediaState::Publishing => {
+            MediaState::Publishing | MediaState::PreparingPublish => {
                 self.media = MediaState::StoppingPublish;
                 Ok(())
             }
@@ -505,6 +516,12 @@ impl AppSnapshot {
         if !self.can_watch(path) {
             return Err(StateError::ScreenNotAvailable);
         }
+        self.route = crate::relay::MediaRoute::Nearby;
+        self.prepare_view(path);
+        Ok(())
+    }
+
+    pub(crate) fn prepare_view(&mut self, path: &str) {
         self.media = MediaState::PreparingView {
             path: path.to_owned(),
         };
@@ -515,7 +532,6 @@ impl AppSnapshot {
         self.remote_video = RemoteVideoSnapshot::default();
         self.watch_error = None;
         self.last_error = None;
-        Ok(())
     }
 
     /// Update audio state for the current remote screen without affecting video.
@@ -553,15 +569,13 @@ impl AppSnapshot {
         Ok(())
     }
 
-    /// Return a failed remote playback to idle.
+    /// Keep the watch slot and source until the viewer acknowledges the terminal state.
     pub fn fail_view(&mut self, error: impl Into<String>) -> Result<(), StateError> {
-        if !matches!(
-            self.media,
-            MediaState::PreparingView { .. } | MediaState::Viewing { .. }
-        ) {
+        let (MediaState::PreparingView { path } | MediaState::Viewing { path }) = &self.media
+        else {
             return Err(StateError::UnexpectedCompletion);
-        }
-        self.media = MediaState::Idle;
+        };
+        self.media = MediaState::FailedView { path: path.clone() };
         self.remote_audio = RemoteAudioSnapshot::default();
         self.remote_video = RemoteVideoSnapshot::default();
         let error = error.into();
@@ -570,9 +584,11 @@ impl AppSnapshot {
         Ok(())
     }
 
-    /// Return a completed remote playback to idle.
     pub fn end_view(&mut self) -> Result<(), StateError> {
-        if !matches!(self.media, MediaState::Viewing { .. }) {
+        if !matches!(
+            self.media,
+            MediaState::PreparingView { .. } | MediaState::Viewing { .. }
+        ) {
             return Err(StateError::UnexpectedCompletion);
         }
         self.media = MediaState::Idle;
@@ -584,7 +600,9 @@ impl AppSnapshot {
     /// Begin stopping the current remote playback.
     pub fn begin_stop_view(&mut self) -> Result<(), StateError> {
         let path = match &self.media {
-            MediaState::PreparingView { path } | MediaState::Viewing { path } => path.clone(),
+            MediaState::PreparingView { path }
+            | MediaState::Viewing { path }
+            | MediaState::FailedView { path } => path.clone(),
             _ => return Err(StateError::ViewNotActive),
         };
         self.media = MediaState::StoppingView { path };

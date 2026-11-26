@@ -200,7 +200,14 @@ async fn exercise_watch_reopen() {
         matches!(event, OperationEvent::ViewEnded { generation, result: Err(_) } if generation == second)
     );
     supervisor.handle_operation_event(event).await;
-    assert_eq!(supervisor.state.media, MediaState::Idle);
+    assert_eq!(
+        supervisor.state.media,
+        MediaState::FailedView { path: path.into() }
+    );
+    assert_eq!(supervisor.state.view_generation, second);
+    assert!(supervisor.view.task.is_none());
     assert!(stats.snapshot(second).is_none());
+    supervisor.handle_command(UserCommand::StopWatching).await;
+    assert_eq!(supervisor.state.media, MediaState::Idle);
     diagnostics.handle().prepare_export(root.join("failed.zip"))().unwrap();
 }

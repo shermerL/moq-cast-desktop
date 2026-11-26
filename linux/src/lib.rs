@@ -3,6 +3,9 @@
 #[path = "../../shared/task-cleanup.rs"]
 mod cleanup;
 
+#[path = "../../shared/relay/desktop.rs"]
+mod relay;
+
 #[path = "../../shared/connection-bandwidth.rs"]
 mod bandwidth;
 

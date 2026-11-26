@@ -3353,6 +3353,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "url",
+ "uuid",
  "windows",
  "winresource",
  "zip",

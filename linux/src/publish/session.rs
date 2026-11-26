@@ -1,5 +1,9 @@
 //! One Linux capture source published as the MoQCast screen broadcast.
 
+#[cfg(target_os = "linux")]
+#[path = "../../../shared/relay/publication.rs"]
+mod local_video;
+
 use super::source::CaptureSource;
 
 use moq_tokio::moq_net;
@@ -7,8 +11,6 @@ use tokio::sync::watch;
 
 #[cfg(target_os = "linux")]
 use super::audio;
-#[cfg(target_os = "linux")]
-use crate::screen_path;
 
 #[derive(Clone, Debug, thiserror::Error)]
 pub(crate) enum Failure {
@@ -58,13 +60,12 @@ impl Publication {
     /// Create the announced broadcast before opening the selected source.
     pub(crate) fn prepare(
         origin: &moq_net::origin::Producer,
-        local_peer_id: &str,
+        path: &str,
         options: Options,
     ) -> anyhow::Result<Self> {
         #[cfg(target_os = "linux")]
         {
-            let path = screen_path::for_peer(local_peer_id);
-            let mut broadcast = origin.create_broadcast(&path)?;
+            let mut broadcast = origin.create_broadcast(path)?;
             let clock = moq_mux::Clock::new();
             let catalog = moq_mux::catalog::Producer::new(
                 &mut broadcast,
@@ -82,13 +83,37 @@ impl Publication {
 
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (origin, local_peer_id, options.system_audio, options.source);
+            let _ = (origin, path, options.system_audio, options.source);
             anyhow::bail!("screen sharing is available only on Linux")
         }
     }
 
+    #[cfg(target_os = "linux")]
+    async fn run_tracks<V: std::future::Future>(
+        &self,
+        video: V,
+        audio_failed: impl AsyncFnOnce(String),
+    ) -> V::Output {
+        local_video::with_audio(video, self.system_audio, || async {
+            let result =
+                audio::publish(self.broadcast.clone(), self.catalog.clone(), self.clock).await;
+            let message = match result {
+                Err(error) => format!("{error:#}"),
+                Ok(()) => "System audio capture ended.".to_owned(),
+            };
+            tracing::warn!(stage = "audio", %message, "system audio stopped");
+            audio_failed(message).await;
+        })
+        .await
+    }
+
     /// Validate the selected source, open capture, and publish H.264.
-    pub(crate) async fn run(self, mut cancelled: watch::Receiver<bool>) -> anyhow::Result<()> {
+    pub(crate) async fn run(
+        self,
+        mut cancelled: watch::Receiver<bool>,
+        ready: Option<impl std::future::Future<Output = ()>>,
+        audio_failed: impl AsyncFnOnce(String),
+    ) -> anyhow::Result<()> {
         #[cfg(target_os = "linux")]
         {
             if *cancelled.borrow() {
@@ -109,7 +134,6 @@ impl Publication {
             encode.codec = moq_video::encode::Codec::H264;
             encode.kind = moq_video::encode::Kind::Auto;
             encode.max_size = Some(moq_video::Size::new(1920, 1080));
-            let clock = self.clock;
             let result = {
                 let media = async {
                     let mut options = moq_video::encode::Capture::default();
@@ -120,17 +144,10 @@ impl Publication {
                         self.catalog.clone(),
                         options,
                     );
-                    if self.system_audio {
-                        let audio =
-                            audio::publish(self.broadcast.clone(), self.catalog.clone(), clock);
-                        tokio::try_join!(
-                            async { video.await.map_err(anyhow::Error::from) },
-                            audio
-                        )?;
-                        Ok(())
-                    } else {
-                        video.await.map_err(anyhow::Error::from)
-                    }
+                    let video = local_video::run(video, &self.catalog, ready);
+                    self.run_tracks(video, audio_failed)
+                        .await
+                        .map_err(anyhow::Error::from)
                 };
                 let stopped = *cancelled.borrow();
                 if stopped {
@@ -155,7 +172,7 @@ impl Publication {
 
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = &mut cancelled;
+            let _ = (&mut cancelled, ready, audio_failed);
             unreachable!("non-Linux publication cannot be prepared")
         }
     }
@@ -184,3 +201,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "session_tests.rs"]
+mod audio_relay_tests;

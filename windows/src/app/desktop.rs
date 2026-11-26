@@ -26,15 +26,22 @@ impl MoqCastApp {
             .show(root, |ui| {
                 let source = self.watch_source();
                 let title = match self.page {
-                    Page::Nearby => None,
-                    Page::ScreenShare => Some(self.text("共享设置", "Sharing settings")),
+                    Page::Nearby | Page::Relay => None,
+                    Page::ScreenShare | Page::RelayShare => {
+                        Some(self.text("共享设置", "Sharing settings"))
+                    }
                     Page::Watch => Some(source.as_deref().unwrap_or(self.text("播放器", "Player"))),
                 };
                 let response = v2::header(
                     ui,
                     v2::Header {
                         title,
-                        back: if self.page == Page::Watch && ui.ctx().content_rect().width() < 680.0
+                        back: if self.page == Page::RelayShare
+                            || self.page == Page::Watch && self.snapshot.route.is_relay()
+                        {
+                            "Relay"
+                        } else if self.page == Page::Watch
+                            && ui.ctx().content_rect().width() < 680.0
                         {
                             self.text("返回", "Back")
                         } else {
@@ -44,12 +51,59 @@ impl MoqCastApp {
                     },
                 );
                 if response.back {
-                    self.page = Page::Nearby;
+                    self.page = if self.page == Page::RelayShare
+                        || self.page == Page::Watch && self.snapshot.route.is_relay()
+                    {
+                        Page::Relay
+                    } else {
+                        Page::Nearby
+                    };
                 }
                 if response.settings {
                     self.settings_open = !self.settings_open;
                 }
             });
+        let active = !self.snapshot.access().media_idle;
+        if self
+            .relay_ui
+            .reconcile(&self.snapshot.relay, &self.snapshot.route, active)
+        {
+            self.page = Page::Watch;
+        }
+        if matches!(self.page, Page::Nearby | Page::Relay) {
+            egui::Panel::top("transport-selector").show(root, |ui| {
+                ui.horizontal(|ui| {
+                    let nearby = self.text("附近设备", "Nearby");
+                    ui.selectable_value(&mut self.page, Page::Nearby, nearby);
+                    ui.selectable_value(&mut self.page, Page::Relay, "Relay");
+                    if active && self.snapshot.route.is_relay() {
+                        let watching = matches!(
+                            self.snapshot.route,
+                            crate::relay::MediaRoute::Watching(_, _)
+                        );
+                        if ui
+                            .button(if watching {
+                                self.text("返回播放器", "Return to player")
+                            } else {
+                                self.text("管理 Relay 共享", "Manage Relay share")
+                            })
+                            .clicked()
+                        {
+                            self.page = if watching {
+                                Page::Watch
+                            } else {
+                                Page::RelayShare
+                            };
+                        }
+                        if ui.button(self.text("停止", "Stop")).clicked() {
+                            self.send(RuntimeCommand::Relay(crate::relay::Command::Stop(
+                                self.snapshot.route.clone(),
+                            )));
+                        }
+                    }
+                });
+            });
+        }
         if self.page == Page::Nearby {
             egui::Panel::bottom("v2-nearby-footer")
                 .exact_size(metrics.footer)
@@ -87,7 +141,9 @@ impl MoqCastApp {
                             .clicked()
                             {
                                 if active {
-                                    if has_active_media(&self.snapshot) {
+                                    if !self.snapshot.route.is_relay()
+                                        && has_active_media(&self.snapshot)
+                                    {
                                         self.confirm_turn_off_nearby = true;
                                     } else {
                                         self.request_turn_off_nearby();
@@ -139,6 +195,33 @@ impl MoqCastApp {
                     self.watch(ui);
                     return;
                 }
+                if self.page == Page::Relay {
+                    use crate::relay::controls::ActionRequest;
+                    match self.relay_ui.page(
+                        ui,
+                        self.locale == Locale::Chinese,
+                        &self.snapshot.relay,
+                        &self.snapshot.route,
+                        active,
+                    ) {
+                        Some(ActionRequest::Command(command)) => {
+                            self.send(RuntimeCommand::Relay(command.clone()));
+                            if self.command_error.is_none() {
+                                self.relay_ui.queued(&command, &self.snapshot.relay);
+                            }
+                        }
+                        Some(ActionRequest::Player) => self.page = Page::Watch,
+                        Some(ActionRequest::Share) => {
+                            if !active {
+                                self.relay_audio_opt_in = None;
+                            }
+                            self.page = Page::RelayShare;
+                            self.send(RuntimeCommand::RefreshCaptureSources);
+                        }
+                        None => {}
+                    }
+                    return;
+                }
                 let width = ui.available_width().min(if self.page == Page::Nearby {
                     1240.0
                 } else {
@@ -186,7 +269,7 @@ impl MoqCastApp {
     fn nearby(&mut self, ui: &mut egui::Ui, metrics: Metrics) {
         let watching = matches!(
             self.snapshot.view.phase,
-            ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping
+            ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping | ViewPhase::Failed
         );
         let (tone, status) = local_media_status(self.locale, &self.snapshot);
         if v2::context_card(
@@ -209,6 +292,8 @@ impl MoqCastApp {
         {
             self.page = if watching {
                 Page::Watch
+            } else if !self.snapshot.access().media_idle && self.snapshot.route.is_relay() {
+                Page::RelayShare
             } else {
                 Page::ScreenShare
             };
@@ -283,6 +368,25 @@ impl MoqCastApp {
     }
     fn screen_share(&mut self, ui: &mut egui::Ui) {
         let p = Palette::for_ui(ui);
+        let relay = self.page == Page::RelayShare;
+        let active = !self.snapshot.access().media_idle;
+        let draft = (
+            self.snapshot.relay.lifecycle.generation(),
+            self.snapshot.relay.publish_request,
+        );
+        let opted_in = self.relay_audio_opt_in == Some(draft);
+        let prefix = if relay {
+            self.relay_ui
+                .prefix_input(ui, self.locale == Locale::Chinese, !active)
+        } else {
+            None
+        };
+        if relay && self.snapshot.media.phase == MediaPhase::Sharing {
+            ui.label(self.text(
+                "本机正在共享 · Relay 可见性未确认",
+                "Sharing locally · Relay visibility unconfirmed",
+            ));
+        }
         let outer = ui.available_rect_before_wrap();
         let action_rect = egui::Rect::from_min_max(
             egui::pos2(outer.left(), (outer.bottom() - 56.0).max(outer.top())),
@@ -308,10 +412,11 @@ impl MoqCastApp {
                     MediaPhase::Stopping => {
                         (self.text("正在停止", "Stopping"), false, ActionTone::Danger)
                     }
-                    _ if matches!(
-                        self.snapshot.discovery,
-                        DiscoveryState::Stopped | DiscoveryState::Failed
-                    ) =>
+                    _ if !relay
+                        && matches!(
+                            self.snapshot.discovery,
+                            DiscoveryState::Stopped | DiscoveryState::Failed
+                        ) =>
                     {
                         (
                             self.text("开启附近设备", "Turn on Nearby"),
@@ -321,25 +426,44 @@ impl MoqCastApp {
                     }
                     _ => (
                         self.text("开始共享", "Start sharing"),
-                        can_share(
-                            &self.snapshot,
-                            self.capture_kind,
-                            self.nearby_turn_off_pending,
-                        ),
+                        if relay {
+                            self.relay_ui.publish_pending.is_none()
+                                && self.snapshot.relay.lifecycle.phase()
+                                    == crate::relay::Phase::Connected
+                                && prefix.is_some()
+                                && !active
+                                && selected_source_ready(&self.snapshot, self.capture_kind)
+                        } else {
+                            can_share(
+                                &self.snapshot,
+                                self.capture_kind,
+                                self.nearby_turn_off_pending,
+                            )
+                        },
                         ActionTone::Accent,
                     ),
                 };
                 if (Action {
                     label,
                     size: vec2(164.0, 40.0),
-                    enabled,
+                    enabled: enabled && (!active || self.snapshot.route.is_relay() == relay),
                     tone,
                 })
                 .show(ui)
                 .clicked()
                 {
-                    self.send(if self.snapshot.media.phase == MediaPhase::Sharing {
-                        RuntimeCommand::StopSharing
+                    let command = if relay && self.snapshot.media.phase == MediaPhase::Sharing {
+                        RuntimeCommand::Relay(crate::relay::Command::Stop(
+                            self.snapshot.route.clone(),
+                        ))
+                    } else if relay {
+                        RuntimeCommand::StartRelayShare {
+                            connection: self.snapshot.relay.lifecycle.generation(),
+                            prefix: prefix.expect("enabled prefix"),
+                            system_audio: opted_in,
+                        }
+                    } else if self.snapshot.media.phase == MediaPhase::Sharing {
+                        RuntimeCommand::StopSharing(self.snapshot.media.generation)
                     } else if matches!(
                         self.snapshot.discovery,
                         DiscoveryState::Stopped | DiscoveryState::Failed
@@ -347,7 +471,14 @@ impl MoqCastApp {
                         RuntimeCommand::StartScan
                     } else {
                         RuntimeCommand::ShareScreen
-                    });
+                    };
+                    let publishing = matches!(command, RuntimeCommand::StartRelayShare { .. });
+                    if self.send(command) && publishing {
+                        self.relay_ui.publish_pending = Some((
+                            self.snapshot.relay.lifecycle.generation(),
+                            self.snapshot.relay.publish_request,
+                        ));
+                    }
                 }
             });
         });
@@ -494,9 +625,26 @@ impl MoqCastApp {
                             .color(p.muted),
                         );
                         ui.add_space(12.0);
+                        if relay {
+                            let label = self.text("共享系统声音", "Share system audio");
+                            let media = &self.snapshot.media;
+                            let managing = !editable
+                                && matches!(self.snapshot.route, crate::relay::MediaRoute::Publishing { .. });
+                            // Only a publication that requested audio starts its audio generation.
+                            let mut checked = if managing {
+                                media.audio.generation == media.generation
+                            } else {
+                                opted_in
+                            };
+                            let checkbox = egui::Checkbox::new(&mut checked, label);
+                            let enabled = !active && self.relay_ui.publish_pending.is_none();
+                            if ui.add_enabled(enabled, checkbox).changed() {
+                                self.relay_audio_opt_in = checked.then_some(draft);
+                            }
+                        }
                         ui.label(self.text(
-                            "系统声音随共享采集，不限于所选窗口。",
-                            "Sharing captures system sound, not only the selected window.",
+                            "系统声音来自整机默认输出，包含所选窗口以外的声音。",
+                            "System audio uses the computer’s default output, including sounds from other windows.",
                         ));
                         if self.capture_kind == CaptureSourceKind::Window {
                             ui.label(
@@ -508,10 +656,7 @@ impl MoqCastApp {
                                 .color(p.muted),
                             );
                         }
-                        if !matches!(
-                            self.snapshot.view.phase,
-                            ViewPhase::Idle | ViewPhase::Failed
-                        ) {
+                        if self.snapshot.view.phase != ViewPhase::Idle {
                             v2::notice(
                                 ui,
                                 StatusTone::Neutral,
@@ -568,12 +713,32 @@ impl MoqCastApp {
                 } else {
                     ""
                 },
-                action: self.text("返回附近设备", "Back to Nearby"),
+                action: if self.snapshot.view.path.is_some() {
+                    self.text("停止并返回", "Stop and return")
+                } else if self.snapshot.route.is_relay() {
+                    self.text("返回 Relay", "Back to Relay")
+                } else {
+                    self.text("返回附近设备", "Back to Nearby")
+                },
             },
         )
         .clicked()
         {
-            self.page = Page::Nearby;
+            if self.snapshot.view.path.is_some() {
+                let command = if self.snapshot.route.is_relay() {
+                    RuntimeCommand::Relay(crate::relay::Command::Stop(self.snapshot.route.clone()))
+                } else {
+                    RuntimeCommand::StopWatching(self.snapshot.view.generation)
+                };
+                if !self.send(command) {
+                    return;
+                }
+            }
+            self.page = if self.snapshot.route.is_relay() {
+                Page::Relay
+            } else {
+                Page::Nearby
+            };
         }
     }
     fn modals(&mut self, ctx: &egui::Context, p: Palette) {
@@ -741,15 +906,17 @@ fn owns_playback(s: &RuntimeSnapshot, p: &PeerView) -> bool {
     matches!(
         s.view.phase,
         ViewPhase::Preparing | ViewPhase::Viewing | ViewPhase::Stopping
-    ) && s.view.path.as_deref() == Some(crate::screen_path::for_peer(&p.id).as_str())
+    ) && !s.route.is_relay()
+        && s.view.path.as_deref() == Some(crate::screen_path::for_peer(&p.id).as_str())
 }
 fn can_watch(s: &RuntimeSnapshot, p: &PeerView, pending: bool) -> bool {
     !pending && s.can_watch(&crate::screen_path::for_peer(&p.id))
 }
 fn can_share(s: &RuntimeSnapshot, kind: CaptureSourceKind, pending: bool) -> bool {
-    !pending
-        && s.access().publish()
-        && s.media.capture_sources.phase == CaptureSourceCatalogPhase::Ready
+    !pending && s.access().publish() && selected_source_ready(s, kind)
+}
+fn selected_source_ready(s: &RuntimeSnapshot, kind: CaptureSourceKind) -> bool {
+    s.media.capture_sources.phase == CaptureSourceCatalogPhase::Ready
         && s.media
             .capture_sources
             .selected
@@ -811,6 +978,8 @@ mod tests {
         (
             MoqCastApp {
                 page: Page::Nearby,
+                relay_ui: Default::default(),
+                relay_audio_opt_in: None,
                 locale: Locale::English,
                 developer_mode: false,
                 settings_open: false,
@@ -946,6 +1115,211 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn terminal_action_retries_the_current_owner_and_returns_to_its_source() {
+        for relay in [false, true] {
+            let (mut app, mut commands) = fixture();
+            let ctx = egui::Context::default();
+            let size = vec2(1040.0, 700.0);
+            app.page = Page::Watch;
+            let generation = app.snapshot.view.begin("screen").unwrap();
+            app.snapshot
+                .view
+                .ended(generation, Err("fixture ended".into()));
+            if relay {
+                let connection = app
+                    .snapshot
+                    .relay
+                    .lifecycle
+                    .begin(crate::relay::Phase::Connected);
+                app.snapshot.route = crate::relay::MediaRoute::Watching(
+                    crate::relay::Selection {
+                        generation: connection,
+                        path: "screen".into(),
+                        revision: 2,
+                    },
+                    generation,
+                );
+            }
+            let output = render(&ctx, &mut app, size, vec![]);
+            let pos = painted(&output, "Stop and return").center();
+            while app
+                .runtime
+                .try_send(RuntimeCommand::RefreshCaptureSources)
+                .is_ok()
+            {}
+            click(&ctx, &mut app, size, pos);
+            assert_eq!(app.page, Page::Watch);
+            while commands.try_recv().is_ok() {}
+            click(&ctx, &mut app, size, pos);
+            let command = commands.try_recv().unwrap();
+            if relay {
+                assert_eq!(
+                    command,
+                    RuntimeCommand::Relay(crate::relay::Command::Stop(app.snapshot.route.clone()))
+                );
+                assert_eq!(app.page, Page::Relay);
+            } else {
+                assert_eq!(command, RuntimeCommand::StopWatching(generation));
+                assert_eq!(app.page, Page::Nearby);
+            }
+        }
+    }
+
+    fn relay_share_fixture() -> (MoqCastApp, tokio::sync::mpsc::Receiver<RuntimeCommand>) {
+        let (mut app, commands) = fixture();
+        app.page = Page::Relay;
+        app.snapshot
+            .relay
+            .lifecycle
+            .begin(crate::relay::Phase::Connected);
+        app.snapshot.relay.server = "moqt://a.example".into();
+        app.relay_ui.prefix = "fixture".into();
+        app.snapshot
+            .media
+            .capture_sources_refreshed(vec![CaptureSourceChoice {
+                kind: CaptureSourceKind::Display,
+                id: "fixture".into(),
+                name: "Fixture".into(),
+                application: None,
+                width: 640,
+                height: 360,
+            }]);
+        (app, commands)
+    }
+
+    fn click_share_control(ctx: &egui::Context, app: &mut MoqCastApp, label: &str) {
+        let size = vec2(1040.0, 700.0);
+        let output = render(ctx, app, size, vec![]);
+        click(ctx, app, size, painted(&output, label).center());
+    }
+
+    fn assert_share_audio_checkbox(
+        ctx: &egui::Context,
+        app: &mut MoqCastApp,
+        checked: bool,
+        enabled: bool,
+    ) {
+        let output = render(ctx, app, vec2(1040.0, 700.0), vec![]);
+        let tree = output.platform_output.accesskit_update.unwrap();
+        let checkbox = tree
+            .nodes
+            .iter()
+            .map(|(_, node)| node)
+            .find(|node| node.label() == Some("Share system audio"))
+            .expect("Relay system audio checkbox");
+        assert_eq!(
+            checkbox.toggled(),
+            Some(egui::accesskit::Toggled::from(checked))
+        );
+        assert_eq!(!checkbox.is_disabled(), enabled);
+    }
+
+    #[test]
+    fn leaving_an_unsent_relay_draft_discards_its_audio_choice() {
+        let (mut app, _commands) = relay_share_fixture();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        click_share_control(&ctx, &mut app, "Share to Relay…");
+        click_share_control(&ctx, &mut app, "Share system audio");
+        assert_share_audio_checkbox(&ctx, &mut app, true, true);
+        click_share_control(&ctx, &mut app, "Relay");
+        click_share_control(&ctx, &mut app, "Share to Relay…");
+        assert_share_audio_checkbox(&ctx, &mut app, false, true);
+    }
+
+    #[test]
+    fn new_relay_publication_requires_its_own_system_audio_choice() {
+        for reconnect in [true, false] {
+            let (mut app, mut commands) = relay_share_fixture();
+            let ctx = egui::Context::default();
+            let size = vec2(1040.0, 700.0);
+            ctx.enable_accesskit();
+            let first = app.snapshot.relay.lifecycle.generation();
+            click_share_control(&ctx, &mut app, "Share to Relay…");
+            assert_eq!(
+                commands.try_recv().unwrap(),
+                RuntimeCommand::RefreshCaptureSources
+            );
+            let output = render(&ctx, &mut app, size, vec![]);
+            assert!(painted(&output, "System audio uses the computer’s default output, including sounds from other windows.").is_positive());
+            assert_share_audio_checkbox(&ctx, &mut app, false, true);
+            click_share_control(&ctx, &mut app, "Share system audio");
+            assert_share_audio_checkbox(&ctx, &mut app, true, true);
+            click_share_control(&ctx, &mut app, "Start sharing");
+            click_share_control(&ctx, &mut app, "Share system audio");
+            assert_share_audio_checkbox(&ctx, &mut app, true, false);
+            assert!(
+                matches!(commands.try_recv(), Ok(RuntimeCommand::StartRelayShare { connection, system_audio: true, .. }) if connection == first)
+            );
+
+            app.snapshot.relay.publish_request += 1;
+            let path = String::from("fixture/first");
+            let generation = app.snapshot.media.begin_path(path.clone(), true).unwrap();
+            app.snapshot.media.started(
+                generation,
+                crate::media::PublicationInfo {
+                    width: 640,
+                    height: 360,
+                },
+            );
+            app.snapshot.route = crate::relay::MediaRoute::Publishing {
+                connection: first,
+                path,
+            };
+            click_share_control(&ctx, &mut app, "Relay");
+            click_share_control(&ctx, &mut app, "Share to Relay…");
+            assert_eq!(
+                commands.try_recv().unwrap(),
+                RuntimeCommand::RefreshCaptureSources
+            );
+            click_share_control(&ctx, &mut app, "Share system audio");
+            assert_share_audio_checkbox(&ctx, &mut app, true, false);
+            click_share_control(&ctx, &mut app, "Stop sharing");
+            assert_eq!(
+                commands.try_recv().unwrap(),
+                RuntimeCommand::Relay(crate::relay::Command::Stop(app.snapshot.route.clone()))
+            );
+            assert_eq!(app.snapshot.media.begin_stop(), Some(generation));
+            assert!(app.snapshot.media.stopped(generation));
+            app.snapshot.route = crate::relay::MediaRoute::Nearby;
+
+            if reconnect {
+                click_share_control(&ctx, &mut app, "Relay");
+                app.snapshot
+                    .relay
+                    .lifecycle
+                    .begin(crate::relay::Phase::Disconnected);
+                render(&ctx, &mut app, size, vec![]);
+                app.snapshot
+                    .relay
+                    .lifecycle
+                    .begin(crate::relay::Phase::Connecting);
+                render(&ctx, &mut app, size, vec![]);
+                app.snapshot
+                    .relay
+                    .lifecycle
+                    .begin(crate::relay::Phase::Connected);
+                app.snapshot.relay.server = "moqt://b.example".into();
+                click_share_control(&ctx, &mut app, "Share to Relay…");
+                assert_eq!(
+                    commands.try_recv().unwrap(),
+                    RuntimeCommand::RefreshCaptureSources
+                );
+            }
+            let second = app.snapshot.relay.lifecycle.generation();
+            assert_eq!(second != first, reconnect);
+            click_share_control(&ctx, &mut app, "Start sharing");
+            click_share_control(&ctx, &mut app, "Share system audio");
+            assert_share_audio_checkbox(&ctx, &mut app, false, false);
+            let request = commands.try_recv().unwrap();
+            assert!(
+                matches!(request, RuntimeCommand::StartRelayShare { connection, system_audio: false, .. } if connection == second),
+                "new publication inherited the previous audio choice: {request:?}"
+            );
+        }
+    }
+
     #[test]
     fn nearby_highlights_only_playing_not_preparing_or_stopping() {
         for phase in [
