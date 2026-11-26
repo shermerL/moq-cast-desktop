@@ -78,7 +78,20 @@ async fn roundtrip(config: Config) {
     broadcast.close();
     drop(track);
     drop(broadcast);
-    verify_video(&publish, &mut viewer, &mut snapshot).await;
+    let stats = moqcast_playback_stats::PlaybackStats::default();
+    let mut playback = crate::playback::Owner::with_stats(stats.clone());
+    for generation in [1, 2] {
+        verify_video(
+            &publish,
+            &mut viewer,
+            &mut snapshot,
+            &mut playback,
+            &stats,
+            generation,
+        )
+        .await;
+        assert!(stats.snapshot(generation).is_none());
+    }
     viewer.close().await.unwrap();
     connection.close().await.unwrap();
     client.close().await;
@@ -196,6 +209,9 @@ async fn verify_video(
     publish: &moq_net::origin::Producer,
     viewer: &mut Owner,
     snapshot: &mut Snapshot,
+    playback: &mut crate::playback::Owner,
+    stats: &moqcast_playback_stats::PlaybackStats,
+    generation: u64,
 ) {
     let name = format!(
         "video-{}",
@@ -237,15 +253,20 @@ async fn verify_video(
     let received = viewer.request(&selection).unwrap().await.unwrap();
     let (events, mut event_rx) = tokio::sync::mpsc::channel(8);
     let (frames, mut frame_rx) = tokio::sync::watch::channel(None);
-    let mut playback = crate::playback::Owner::default();
     playback.start(
-        1,
+        generation,
         name,
         received,
         events,
         frames,
         std::sync::Arc::new(|| {}),
     );
+    let initial = stats.snapshot(generation).unwrap();
+    assert!(!initial.enabled && initial.samples.is_empty() && initial.marks.is_empty());
+    stats.set_sampling(generation.saturating_sub(1), true);
+    assert!(!stats.snapshot(generation).unwrap().enabled);
+    stats.set_sampling(generation, true);
+    assert!(stats.snapshot(generation).unwrap().enabled);
     video.demand().used().await.unwrap();
     for index in 0..8u8 {
         let rgba: Vec<u8> = [40 + index * 8, 120, 200 - index * 8, 255]
@@ -265,6 +286,7 @@ async fn verify_video(
             result = frame_rx.changed() => {
                 result.unwrap();
                 if let Some(frame) = frame_rx.borrow_and_update().as_ref() {
+                    assert_eq!(frame.identity.view_generation, generation);
                     assert_eq!((frame.display_width,frame.display_height),(160,96));
                     eprintln!("H.264 catalog and production playback delivered {}x{} frame; generation={}", frame.display_width,frame.display_height,frame.identity.view_generation);
                     break;

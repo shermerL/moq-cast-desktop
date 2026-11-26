@@ -3,6 +3,8 @@
 mod capture_picker;
 mod desktop;
 mod diagnostics;
+#[path = "../../shared/diagnostics/native_ui.rs"]
+mod media_diagnostics;
 mod player;
 mod relay;
 mod system_lifecycle;
@@ -200,11 +202,17 @@ impl MoqCastApp {
         let Some(video) = self.video.as_mut() else {
             return;
         };
-        if let Err(error) = video.update(generation, frame.as_deref()) {
-            self.fail_video(
+        match video.update(generation, frame.as_deref()) {
+            Ok(Some(id)) => {
+                self.runtime
+                    .stats
+                    .accepted(id.view_generation, id.decoder_generation, id.sequence)
+            }
+            Ok(None) => {}
+            Err(error) => self.fail_video(
                 frame.as_deref().expect("presentation needs a frame"),
                 &error,
-            );
+            ),
         }
     }
 
@@ -285,6 +293,7 @@ impl MoqCastApp {
         match self.player.show(
             ui,
             player::PlayerView {
+                stats: &self.runtime.stats,
                 locale: self.locale,
                 generation: snapshot.media.generation().value(),
                 phase: snapshot.media.phase(),
@@ -379,7 +388,7 @@ impl eframe::App for MoqCastApp {
             self.confirm_turn_off_nearby = false;
         }
         self.update_playback_texture(&snapshot);
-        let player_active = Self::player_active(&snapshot);
+        let player_active = self.page == Page::Watch && Self::player_active(&snapshot);
         let fullscreen = self.player.reconcile_fullscreen(ui.ctx(), player_active);
         if fullscreen {
             egui::CentralPanel::default()

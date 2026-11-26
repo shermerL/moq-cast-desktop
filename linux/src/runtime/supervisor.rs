@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::watch_session::WatchSession;
 use moq_tokio::moq_net;
+use moqcast_playback_stats::PlaybackStats;
 use moqcast_ui::DEFAULT_PLAYER_VOLUME_PERCENT;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -353,21 +355,34 @@ struct PublishResources {
 }
 
 struct PublishCompletion {
-    generation: u64,
+    session: moqcast_diagnostics::media::Session,
     events: mpsc::Sender<OperationEvent>,
     cancelled: watch::Receiver<bool>,
 }
 
 impl PublishCompletion {
-    async fn report(mut self, result: Result<(), PublishFailure>) -> Result<(), String> {
-        // Stop joins this task while the operation queue is not being drained.
+    async fn run(
+        mut self,
+        publication: impl Future<Output = anyhow::Result<()>>,
+    ) -> Result<(), String> {
+        use tracing::Instrument;
+        let result = publication
+            .instrument(self.session.capture_span())
+            .await
+            .map_err(PublishFailure::from);
         let stopping = *self.cancelled.borrow();
+        if stopping && result.is_ok() {
+            self.session.stopped();
+        } else {
+            self.session.finish(result.is_err());
+        }
+        // Stop joins this task while the operation queue is not being drained.
         if !stopping {
             tokio::select! {
                 biased;
                 _ = self.cancelled.changed() => {},
                 _ = self.events.send(OperationEvent::PublishEnded {
-                    generation: self.generation,
+                    generation: self.session.generation(),
                     result: result.clone(),
                 }) => {},
             }
@@ -490,6 +505,7 @@ struct Supervisor {
     view: ViewResources,
     source_refresh: Option<JoinHandle<()>>,
     playback_tx: watch::Sender<Option<Arc<PlaybackFrame>>>,
+    stats: PlaybackStats,
     service_tx: mpsc::Sender<service::Event>,
     service_rx: mpsc::Receiver<service::Event>,
     operation_tx: mpsc::Sender<OperationEvent>,
@@ -497,7 +513,7 @@ struct Supervisor {
 }
 
 impl Supervisor {
-    fn new(playback_tx: watch::Sender<Option<Arc<PlaybackFrame>>>) -> Self {
+    fn new(playback_tx: watch::Sender<Option<Arc<PlaybackFrame>>>, stats: PlaybackStats) -> Self {
         let (service_tx, service_rx) = mpsc::channel(EVENT_CAPACITY);
         let (operation_tx, operation_rx) = mpsc::channel(EVENT_CAPACITY);
         Self {
@@ -512,6 +528,7 @@ impl Supervisor {
             view: ViewResources::default(),
             source_refresh: None,
             playback_tx,
+            stats,
             service_tx,
             service_rx,
             operation_tx,
@@ -979,7 +996,19 @@ impl Supervisor {
             self.state.last_error = Some(error.to_string());
             return LoopAction::Changed;
         }
+        use moqcast_diagnostics::media::{Session, Source};
+        let generation = self.publish.advance();
+        let category = if matches!(source, CaptureSource::PortalWindow) {
+            Source::Window
+        } else {
+            Source::Display
+        };
+        let session = Session::publish(generation, category, false);
+        if let CaptureSource::Display { width, height, .. } = &source {
+            session.format("avc1", Some((*width, *height)));
+        }
         let Some(local_peer_id) = self.state.local_peer_id.clone() else {
+            session.finish(true);
             self.state
                 .fail_publish("LAN services are not ready.")
                 .expect("publication preparation was active");
@@ -1000,6 +1029,7 @@ impl Supervisor {
         ) {
             Ok(publication) => publication,
             Err(error) => {
+                session.finish(true);
                 self.state
                     .fail_publish(error.to_string())
                     .expect("publication preparation was active");
@@ -1007,23 +1037,15 @@ impl Supervisor {
             }
         };
 
-        let generation = self.publish.advance();
-        let events = self.operation_tx.clone();
         let (cancel, cancelled) = watch::channel(false);
+        let capture = publication.run(cancelled.clone());
+        let completion = PublishCompletion {
+            session,
+            events: self.operation_tx.clone(),
+            cancelled,
+        };
         self.publish.cancel = Some(cancel);
-        self.publish.task = Some(tokio::spawn(async move {
-            let result = publication
-                .run(cancelled.clone())
-                .await
-                .map_err(PublishFailure::from);
-            PublishCompletion {
-                generation,
-                events,
-                cancelled,
-            }
-            .report(result)
-            .await
-        }));
+        self.publish.task = Some(tokio::spawn(completion.run(capture)));
         self.state
             .finish_publish()
             .expect("publication preparation was active");
@@ -1058,14 +1080,16 @@ impl Supervisor {
             self.state.last_error = Some(error.to_string());
             return LoopAction::Changed;
         }
+        let generation = self.view.advance();
+        let session = WatchSession::new(generation, &self.stats);
         let Some(broadcast) = self.remote_screens.get(&path).cloned() else {
+            session.media.finish(true);
             self.state
                 .fail_view("The selected screen is no longer available.")
                 .expect("remote playback preparation was active");
             return LoopAction::Changed;
         };
 
-        let generation = self.view.advance();
         self.state.view_generation = generation;
         let events = self.operation_tx.clone();
         let frames = self.playback_tx.clone();
@@ -1074,7 +1098,7 @@ impl Supervisor {
         self.view.cancel = Some(cancel);
         self.view.volume = Some(volume);
         self.view.task = Some(tokio::spawn(run_view(
-            generation, path, broadcast, cancelled, events, frames, volume_rx,
+            session, path, broadcast, cancelled, events, frames, volume_rx,
         )));
         LoopAction::Changed
     }
@@ -1692,8 +1716,11 @@ pub(super) async fn run(
     commands: mpsc::Receiver<UserCommand>,
     snapshots: watch::Sender<Arc<AppSnapshot>>,
     playback: watch::Sender<Option<Arc<PlaybackFrame>>>,
+    stats: PlaybackStats,
 ) {
-    Supervisor::new(playback).run(commands, snapshots).await;
+    Supervisor::new(playback, stats)
+        .run(commands, snapshots)
+        .await;
 }
 
 async fn watch_session(
@@ -1765,7 +1792,7 @@ fn watch_announcements(
 
 #[cfg(target_os = "linux")]
 async fn run_view(
-    generation: u64,
+    session: WatchSession,
     path: String,
     broadcast: moq_net::broadcast::Consumer,
     mut cancelled: watch::Receiver<bool>,
@@ -1773,95 +1800,98 @@ async fn run_view(
     frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
     volume: watch::Receiver<u8>,
 ) {
-    let (playback_tx, mut playback_rx) = mpsc::channel(8);
-    let playback = super::playback::run(
-        generation,
-        path.clone(),
-        broadcast,
-        cancelled.clone(),
-        playback_tx,
-        frames,
-        volume,
-    );
-    tokio::pin!(playback);
+    let generation = session.media.generation();
     let mut cancelling = *cancelled.borrow_and_update();
-    let result = loop {
-        tokio::select! {
-            biased;
-            result = &mut playback => break result,
-            changed = cancelled.changed(), if !cancelling => {
-                if changed.is_err() || *cancelled.borrow_and_update() {
-                    cancelling = true;
+    let result = {
+        let (playback_tx, mut playback_rx) = mpsc::channel(8);
+        let playback = super::playback::run(
+            &session,
+            path.clone(),
+            broadcast,
+            cancelled.clone(),
+            playback_tx,
+            frames,
+            volume,
+        );
+        tokio::pin!(playback);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut playback => break result,
+                changed = cancelled.changed(), if !cancelling => {
+                    if changed.is_err() || *cancelled.borrow_and_update() {
+                        cancelling = true;
+                    }
                 }
-            }
-            event = playback_rx.recv() => {
-                let Some(event) = event else {
-                    break playback.as_mut().await;
-                };
-                match event {
-                    super::playback::Event::Started { ack } => {
-                        if cancelling {
+                event = playback_rx.recv() => {
+                    let Some(event) = event else {
+                        break playback.as_mut().await;
+                    };
+                    match event {
+                        super::playback::Event::Started { ack } => {
+                            if cancelling {
+                                let _ = ack.send(());
+                                continue;
+                            }
+                            let operation = OperationEvent::ViewStarted {
+                                generation,
+                                path: path.clone(),
+                            };
+                            tokio::select! {
+                                result = events.send(operation) => {
+                                    if result.is_err() {
+                                        break Err(anyhow::anyhow!("runtime operation channel closed"));
+                                    }
+                                }
+                                changed = cancelled.changed() => {
+                                    if changed.is_err() || *cancelled.borrow_and_update() {
+                                        cancelling = true;
+                                    }
+                                }
+                            }
                             let _ = ack.send(());
-                            continue;
                         }
-                        let operation = OperationEvent::ViewStarted {
-                            generation,
-                            path: path.clone(),
-                        };
-                        tokio::select! {
-                            result = events.send(operation) => {
-                                if result.is_err() {
-                                    break Err(anyhow::anyhow!("runtime operation channel closed"));
-                                }
+                        super::playback::Event::Audio(audio) => {
+                            if cancelling {
+                                continue;
                             }
-                            changed = cancelled.changed() => {
-                                if changed.is_err() || *cancelled.borrow_and_update() {
-                                    cancelling = true;
+                            let operation = OperationEvent::ViewAudioChanged {
+                                generation,
+                                path: path.clone(),
+                                audio,
+                            };
+                            tokio::select! {
+                                result = events.send(operation) => {
+                                    if result.is_err() {
+                                        break Err(anyhow::anyhow!("runtime operation channel closed"));
+                                    }
                                 }
-                            }
-                        }
-                        let _ = ack.send(());
-                    }
-                    super::playback::Event::Audio(audio) => {
-                        if cancelling {
-                            continue;
-                        }
-                        let operation = OperationEvent::ViewAudioChanged {
-                            generation,
-                            path: path.clone(),
-                            audio,
-                        };
-                        tokio::select! {
-                            result = events.send(operation) => {
-                                if result.is_err() {
-                                    break Err(anyhow::anyhow!("runtime operation channel closed"));
-                                }
-                            }
-                            changed = cancelled.changed() => {
-                                if changed.is_err() || *cancelled.borrow_and_update() {
-                                    cancelling = true;
+                                changed = cancelled.changed() => {
+                                    if changed.is_err() || *cancelled.borrow_and_update() {
+                                        cancelling = true;
+                                    }
                                 }
                             }
                         }
-                    }
-                    super::playback::Event::Video(video) => {
-                        if cancelling {
-                            continue;
-                        }
-                        let operation = OperationEvent::ViewVideoChanged {
-                            generation,
-                            path: path.clone(),
-                            video,
-                        };
-                        tokio::select! {
-                            result = events.send(operation) => {
-                                if result.is_err() {
-                                    break Err(anyhow::anyhow!("runtime operation channel closed"));
-                                }
+                        super::playback::Event::Video(video) => {
+                            if cancelling {
+                                continue;
                             }
-                            changed = cancelled.changed() => {
-                                if changed.is_err() || *cancelled.borrow_and_update() {
-                                    cancelling = true;
+                            let operation = OperationEvent::ViewVideoChanged {
+                                generation,
+                                path: path.clone(),
+                                video,
+                            };
+                            tokio::select! {
+                                result = events.send(operation) => {
+                                    if result.is_err() {
+                                        break Err(anyhow::anyhow!("runtime operation channel closed"));
+                                    }
+                                }
+                                changed = cancelled.changed() => {
+                                    if changed.is_err() || *cancelled.borrow_and_update() {
+                                        cancelling = true;
+                                    }
                                 }
                             }
                         }
@@ -1872,7 +1902,9 @@ async fn run_view(
     }
     .map_err(|error| error.to_string());
 
-    if !cancelling && !*cancelled.borrow() {
+    let stopping = cancelling || *cancelled.borrow();
+    session.finish(&result, stopping);
+    if !stopping {
         tokio::select! {
             _ = events.send(OperationEvent::ViewEnded { generation, result }) => {}
             _ = cancelled.changed() => {}
@@ -1882,7 +1914,7 @@ async fn run_view(
 
 #[cfg(not(target_os = "linux"))]
 async fn run_view(
-    generation: u64,
+    session: WatchSession,
     _path: String,
     _broadcast: moq_net::broadcast::Consumer,
     _cancelled: watch::Receiver<bool>,
@@ -1890,11 +1922,11 @@ async fn run_view(
     _frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
     _volume: watch::Receiver<u8>,
 ) {
+    let generation = session.stats.generation();
+    let result = Err("remote screen playback is available only on Linux".into());
+    session.finish(&result, false);
     let _ = events
-        .send(OperationEvent::ViewEnded {
-            generation,
-            result: Err("remote screen playback is available only on Linux".into()),
-        })
+        .send(OperationEvent::ViewEnded { generation, result })
         .await;
 }
 
@@ -1910,8 +1942,12 @@ async fn reap_retired(tasks: &mut Vec<JoinHandle<()>>, errors: &mut crate::clean
 }
 
 #[cfg(test)]
+mod publication_diagnostics_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{PeerResources, PeerSession};
+    use moqcast_diagnostics::media::{Session, Source};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1934,7 +1970,7 @@ mod tests {
 
     fn supervisor() -> Supervisor {
         let (frames, _) = watch::channel(None);
-        let mut supervisor = Supervisor::new(frames);
+        let mut supervisor = Supervisor::new(frames, Default::default());
         supervisor.origins = Some(super::Origins::new(supervisor.operation_tx.clone()));
         supervisor
     }
@@ -2043,7 +2079,7 @@ mod tests {
     #[tokio::test]
     async fn removed_inbound_preserves_retired_cleanup_errors() {
         let (frames, _) = watch::channel(None);
-        let mut supervisor = Supervisor::new(frames);
+        let mut supervisor = Supervisor::new(frames, Default::default());
         let task = tokio::spawn(async {
             panic!("retired inbound panic");
         });
@@ -2070,7 +2106,7 @@ mod tests {
         let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
         for late in [false, true] {
             let (frames, _) = watch::channel(None);
-            let mut supervisor = Supervisor::new(frames);
+            let mut supervisor = Supervisor::new(frames, Default::default());
             let client = moq_tokio::connect::Config::default()
                 .init(Default::default())
                 .unwrap();
@@ -2108,7 +2144,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_reports_retired_task_failures() {
         let (frames, _) = watch::channel(None);
-        let mut supervisor = Supervisor::new(frames);
+        let mut supervisor = Supervisor::new(frames, Default::default());
         let task = tokio::spawn(async {
             panic!("retired dial panic");
         });
@@ -2164,7 +2200,7 @@ mod tests {
         }
         for discovery in [true, false] {
             let (frames, _) = watch::channel(None);
-            let mut supervisor = Supervisor::new(frames);
+            let mut supervisor = Supervisor::new(frames, Default::default());
             let released = Arc::new(AtomicBool::new(false));
             let guard = Released(released.clone());
             let (ready, started) = tokio::sync::oneshot::channel();
@@ -2326,11 +2362,11 @@ mod tests {
                 .unwrap();
         }
         let completion = PublishCompletion {
-            generation,
+            session: Session::publish(generation, Source::Display, false),
             events: supervisor.operation_tx.clone(),
             cancelled,
         };
-        supervisor.publish.task = Some(tokio::spawn(completion.report(Ok(()))));
+        supervisor.publish.task = Some(tokio::spawn(completion.run(std::future::ready(Ok(())))));
         // Virtual-time deadline detects a deadlock without sleeping or relaxing production timeouts.
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
@@ -2444,7 +2480,7 @@ mod tests {
     #[tokio::test]
     async fn source_refresh_is_rejected_while_media_is_active() {
         let (playback, _) = watch::channel(None);
-        let mut supervisor = Supervisor::new(playback);
+        let mut supervisor = Supervisor::new(playback, Default::default());
         supervisor.state.media = MediaState::Publishing;
         assert!(matches!(
             supervisor.refresh_sources(),
@@ -2464,7 +2500,7 @@ mod tests {
     #[tokio::test]
     async fn failed_source_refresh_cannot_leave_a_stale_catalog_usable() {
         let (playback, _) = watch::channel(None);
-        let mut supervisor = Supervisor::new(playback);
+        let mut supervisor = Supervisor::new(playback, Default::default());
         supervisor.state.sources = super::SourceCatalog::Loading;
         supervisor
             .handle_operation_event(OperationEvent::CaptureSourcesLoaded(Err(
@@ -2528,11 +2564,11 @@ mod tests {
         let (cancel, cancelled) = watch::channel(false);
         let task = tokio::spawn(
             PublishCompletion {
-                generation: 2,
+                session: Session::publish(2, Source::Display, false),
                 events,
                 cancelled,
             }
-            .report(Err(PublishFailure::Other("close failed".to_owned()))),
+            .run(std::future::ready(Err(anyhow::anyhow!("close failed")))),
         );
         tokio::task::yield_now().await;
         assert!(!task.is_finished());

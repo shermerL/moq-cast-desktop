@@ -12,6 +12,8 @@
 
 `mac/` 是 MoQCast macOS 桌面端的唯一产品代码目录。当前实现 Nearby direct-only session、ScreenCaptureKit 屏幕/窗口共享与原生音视频播放。
 
+观看工具栏的「播放统计」可显式开启最近 60 秒的采样。解码输出按 SDK 成功读出的帧计数，UI 新接收按成功更新的唯一纹理帧计数。返回附近设备后，已开启的采样随当前观看继续；结束观看会清空历史。
+
 ## 当前范围
 
 - Rust 1.95.0、eframe/egui 与独立 Tokio runtime owner。

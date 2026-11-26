@@ -12,6 +12,7 @@
 - `Metrics` 在窗口完整逻辑内容宽度上判断 920pt 断点，由页面传递，不在嵌套卡片重新计算。
 - `ContextCard`、`NearbyRow`、`action`、`icon_button` 负责测量和绘制，不持有连接或媒体对象。设备行分别返回详情、观看事件，由平台按最新 snapshot 判断可执行性。
 - 名称可截断并在详情显示全文；动作根据真实字体测量保留完整文字。名称文字不抢占详情点击区域；按钮命中区域至少 40pt。
+- 观看统计卡借用平台会话提供的 `PlaybackStats`。卡内可开始和停止采样、查看两条近 60 秒帧率曲线和添加本地标记。收起卡片会保留已打开的采样，切换观看会话会重置交互状态。
 - 常规页内列表隐藏滚动条但保留滚动和键盘焦点滚入；平台对极端缩放使用可达性滚动兜底。
 - 播放器复用既有音量状态与信息数据；`v2::player_rects` 统一完整工作区及全屏布局；`player_toolbar` 随主题显示，黑色视频舞台独立于主题，LIVE 与 `#D92D20` 保留。`canvas_message` 居中呈现失败及恢复动作，等待仅显示转圈。
 
@@ -58,7 +59,7 @@ Mac 页面组合的离线验收在 `mac/src/app/tests/layout.rs`，通过现有 
 
 `Action` / `ActionTone` 区分 Accent、Neutral 和 Danger；旧 `action` 保持 Accent 便捷入口。`dialog_header` 绘制标题并返回右侧关闭按钮的响应，调用者决定只关闭哪一个弹层。组件不直接停止媒体或网络。
 
-`assets/icons/tabler-x.svg` 来自 Frog S2 交付中的 Tabler Icons 3.49.0（MIT）；版权见同目录 `LICENSE.txt`。保留原始 SVG；运行时使用 `tabler-x.rgba` 的72×72白色RGBA像素，再按语义色着色，不引入 SVG 渲染依赖。重新生成时用 librsvg `rsvg-convert --stylesheet <含 svg { color: white; } 的 CSS> -w 72 -h 72 tabler-x.svg -o /tmp/tabler-x.png`，然后用 Pillow `Image.open(...).convert("RGBA").tobytes()` 写入RGBA文件。产物应为20736字节。
+桌面 v2 使用 Lucide 图标。原始 SVG 和 72×72 白色 RGBA 像素保存在 [assets/icons](assets/icons/README.md)，运行时按语义色着色。三端「设置 → 图标许可」可离线阅读 Lucide ISC 及 Feather 衍生图标的 MIT 声明。
 
 Mac 页面测试另外覆盖长播放错误时“停止并返回”可见，以及设置/详情/附近设备关闭确认中的 `×` 只关闭界面、不发送网络或媒体命令。实际网络、媒体与导出保存对话框仍需分别验证。
 

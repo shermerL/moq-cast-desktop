@@ -265,8 +265,8 @@ fn details_errors_and_player_navigation_preserve_reachable_actions() {
         render(&ctx, &mut app, &s, size, vec![]);
     }
     let output = render(&ctx, &mut app, &s, size, vec![]);
-    assert!(painted(&output, "LIVE").is_positive());
-    let point = painted(&output, "‹  Nearby").center();
+    assert!(painted(&output, "Waiting for video").is_positive());
+    let point = painted(&output, "Nearby").center();
     for pressed in [true, false] {
         render(
             &ctx,
@@ -354,6 +354,61 @@ fn long_playback_error_keeps_recovery_action_visible() {
     let button = painted(&output, "Stop and return");
     assert!(button.is_positive());
     assert!(egui::Rect::from_min_size(egui::Pos2::ZERO, size).contains_rect(button));
+}
+
+#[test]
+fn failed_watch_keeps_recovery_until_stop_is_accepted() {
+    let ctx = egui::Context::default();
+    moqcast_ui::v2::install(&ctx);
+    let (mut app, mut commands) = app();
+    app.page = Page::Watch;
+    let mut snapshot = snapshot(0);
+    snapshot.media_owner = Some(MediaOwner::Watch);
+    snapshot.media.begin(MediaPhase::Failed);
+    let size = egui::vec2(680.0, 520.0);
+    let mut queued = 0;
+    while app.runtime.set_playback_volume(1, 50) {
+        queued += 1;
+    }
+    assert!(queued > 0);
+    for _ in 0..3 {
+        render(&ctx, &mut app, &snapshot, size, vec![]);
+    }
+    for retry in [false, true] {
+        let output = render(&ctx, &mut app, &snapshot, size, vec![]);
+        if retry {
+            assert!(painted(&output, "The action could not be sent. Try again.").is_positive());
+            for _ in 0..queued {
+                assert!(commands());
+            }
+        }
+        let pos = painted(&output, "Stop and return").center();
+        for pressed in [true, false] {
+            render(
+                &ctx,
+                &mut app,
+                &snapshot,
+                size,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+        }
+        if retry {
+            assert_eq!(app.page, Page::Nearby);
+            assert!(commands());
+            assert!(!commands());
+        } else {
+            assert_eq!(app.page, Page::Watch);
+            assert!(app.command_error);
+        }
+    }
 }
 
 #[test]
@@ -463,7 +518,7 @@ fn player_is_a_dedicated_canvas_without_the_discovery_footer() {
         !labels.contains(&"Preparing video"),
         "waiting uses only a centered spinner"
     );
-    assert!(painted(&out, "‹  Nearby").is_positive());
+    assert!(painted(&out, "Nearby").is_positive());
 }
 
 #[test]
@@ -888,7 +943,7 @@ fn relay_navigation_preserves_media_and_nearby_off_does_not_confirm_relay_stop()
         render(&ctx, &mut app, &s, size, vec![]);
     }
     let out = render(&ctx, &mut app, &s, size, vec![]);
-    let point = painted(&out, "‹  Relay").center();
+    let point = painted(&out, "Relay").center();
     for pressed in [true, false] {
         render(
             &ctx,

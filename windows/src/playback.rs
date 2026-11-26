@@ -244,6 +244,7 @@ trait VideoReader: Send + 'static {
 impl VideoTask {
     fn spawn<R>(
         generation: u64,
+        counter: moqcast_playback_stats::DecoderCounter,
         mut reader: R,
         updates: &mpsc::Sender<VideoUpdate<VideoEvent<R::Frame>>>,
     ) -> Self
@@ -254,7 +255,10 @@ impl VideoTask {
         let handle = tokio::spawn(async move {
             loop {
                 let event = match reader.read().await {
-                    Ok(Some(frame)) => VideoEvent::Frame(frame),
+                    Ok(Some(frame)) => {
+                        counter.decoded();
+                        VideoEvent::Frame(frame)
+                    }
                     Ok(None) => VideoEvent::Ended,
                     Err(error) => VideoEvent::Failed(error),
                 };
@@ -474,15 +478,32 @@ impl Selection {
 
     async fn decoder(
         &self,
+        session: &moqcast_diagnostics::media::Session,
         broadcast: &moq_tokio::moq_net::broadcast::Consumer,
         max_age: std::time::Duration,
     ) -> anyhow::Result<moq_video::decode::Consumer> {
+        use tracing::Instrument;
         let mut options = moq_video::decode::Options::new();
         options.start = moq_video::decode::Start::Latest;
         options.max_delay = max_age;
-        moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), options)
-            .await
-            .map_err(Into::into)
+        if session.software() {
+            options.decoder.kind = moq_video::decode::Kind::Software;
+        }
+        session.format(
+            &self.config.codec.to_string(),
+            self.config.coded_width.zip(self.config.coded_height),
+        );
+        let decoder =
+            moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), options)
+                .instrument(session.decoder_span())
+                .await
+                .inspect_err(|error| {
+                    if matches!(error, moq_video::Error::NoDecoder(_)) {
+                        session.no_decoder();
+                    }
+                })?;
+        session.decoder(decoder.name());
+        Ok(decoder)
     }
 }
 
@@ -518,7 +539,7 @@ async fn send_unless_cancelled<T: Send>(
 
 #[cfg(target_os = "windows")]
 pub(crate) async fn run(
-    generation: u64,
+    watch: crate::watch_session::WatchSession,
     path: String,
     broadcast: moq_tokio::moq_net::broadcast::Consumer,
     events: mpsc::Sender<ViewEvent>,
@@ -528,7 +549,9 @@ pub(crate) async fn run(
 ) {
     use moq_mux::catalog::Stream;
 
+    let generation = watch.media.generation();
     let result = async {
+        let session = &watch.media;
         let mut catalog = tokio::select! {
             biased;
             _ = wait_for_cancel(&mut cancel) => return Ok(()),
@@ -549,7 +572,7 @@ pub(crate) async fn run(
         let decoder = tokio::select! {
             biased;
             _ = wait_for_cancel(&mut cancel) => return Ok(()),
-            decoder = selection.decoder(&broadcast, video_max_age) => decoder?,
+            decoder = selection.decoder(session, &broadcast, video_max_age) => decoder?,
         };
         let mut decoder_name = decoder.name().to_owned();
         let (video_updates_tx, mut video_updates_rx) = mpsc::channel(VIDEO_EVENT_CAPACITY);
@@ -570,6 +593,7 @@ pub(crate) async fn run(
         let mut decoder_generation = 1_u64;
         let mut video_task = Some(VideoTask::spawn(
             decoder_generation,
+            watch.stats.decoder(decoder_generation),
             decoder,
             &video_updates_tx,
         ));
@@ -603,6 +627,10 @@ pub(crate) async fn run(
             }
             if let Some(pending) = advance.frame {
                 last_delta_us = advance.delta_us;
+                if !decoder_ready {
+                    let size = pending.decoded.size();
+                    session.frame_size(size.width, size.height);
+                }
                 let frame = tokio::task::spawn_blocking(move || {
                     PlaybackFrame::from_video(
                         pending.decoded,
@@ -710,6 +738,7 @@ pub(crate) async fn run(
                         selection = next;
                         continue;
                     }
+                    watch.stats.clear_decoder();
                     if let Some(task) = &mut video_task {
                         task.stop().await;
                     }
@@ -717,7 +746,7 @@ pub(crate) async fn run(
                     let next_decoder = tokio::select! {
                         biased;
                         _ = wait_for_cancel(&mut cancel) => None,
-                        decoder = next.decoder(&broadcast, video_max_age) => Some(decoder?),
+                        decoder = next.decoder(session, &broadcast, video_max_age) => Some(decoder?),
                     };
                     let Some(next_decoder) = next_decoder else {
                         break Ok(());
@@ -739,6 +768,7 @@ pub(crate) async fn run(
                     );
                     video_task = Some(VideoTask::spawn(
                         decoder_generation,
+                        watch.stats.decoder(decoder_generation),
                         next_decoder,
                         &video_updates_tx,
                     ));
@@ -825,6 +855,7 @@ pub(crate) async fn run(
             }
         }
         .await;
+        watch.stats.clear_decoder();
         if let Some(mut task) = video_task.take() {
             task.stop().await;
         }
@@ -833,6 +864,7 @@ pub(crate) async fn run(
     .await
     .map_err(|error: anyhow::Error| error.to_string());
 
+    watch.finish(&result, *cancel.borrow());
     let _ = send_unless_cancelled(
         &mut cancel,
         &events,
@@ -843,7 +875,7 @@ pub(crate) async fn run(
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) async fn run(
-    generation: u64,
+    watch: crate::watch_session::WatchSession,
     _path: String,
     _broadcast: moq_tokio::moq_net::broadcast::Consumer,
     events: mpsc::Sender<ViewEvent>,
@@ -851,12 +883,10 @@ pub(crate) async fn run(
     _cancel: watch::Receiver<bool>,
     _volume: watch::Receiver<u8>,
 ) {
-    let _ = events
-        .send(ViewEvent::Ended {
-            generation,
-            result: Err("Windows playback is unavailable on this host".to_owned()),
-        })
-        .await;
+    let generation = watch.stats.generation();
+    let result = Err("Windows playback is unavailable on this host".to_owned());
+    watch.finish(&result, false);
+    let _ = events.send(ViewEvent::Ended { generation, result }).await;
 }
 
 #[cfg(target_os = "windows")]
@@ -1001,8 +1031,10 @@ mod tests {
         let (started_tx, mut started_rx) = mpsc::channel(1);
         let (release_tx, release_rx) = mpsc::channel(1);
         let (updates_tx, mut updates_rx) = mpsc::channel(1);
+        let session = moqcast_playback_stats::PlaybackStats::default().begin(1);
         let mut task = VideoTask::spawn(
             7,
+            session.decoder(7),
             ControlledReader {
                 next: 41,
                 last: 42,
@@ -1039,14 +1071,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn decoded_output_counts_successful_read_before_bounded_queue_delivery() {
+        let stats = moqcast_playback_stats::PlaybackStats::default();
+        let session = stats.begin(3);
+        let counter = session.decoder(7);
+        stats.set_sampling(3, true);
+        let (started, mut started_rx) = mpsc::channel(1);
+        let (release, release_rx) = mpsc::channel(1);
+        let (updates, mut updates_rx) = mpsc::channel(1);
+        updates
+            .try_send(VideoUpdate {
+                generation: 6,
+                event: VideoEvent::Ended,
+            })
+            .unwrap();
+        let mut reader = VideoTask::spawn(
+            7,
+            counter,
+            ControlledReader {
+                next: 1,
+                last: 1,
+                started,
+                release: release_rx,
+                canceled: Arc::default(),
+            },
+            &updates,
+        );
+        assert_eq!(started_rx.recv().await, Some(1));
+        release.send(()).await.unwrap();
+
+        // Keep the queue full until the sampler has seen the SDK output.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let snapshot = stats.snapshot(3).unwrap();
+                if let Some(sample) = snapshot
+                    .samples
+                    .iter()
+                    .find(|s| s.decoded_fps.is_some_and(|v| v > 0.0))
+                {
+                    let frames = sample.decoded_fps.unwrap() * (sample.at - sample.start);
+                    assert_eq!(frames.round(), 1.0);
+                    assert_eq!(sample.ui_fps, Some(0.0));
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("frame blocked at queue delivery was not counted");
+        assert_eq!(updates_rx.recv().await.unwrap().generation, 6);
+        assert!(matches!(
+            updates_rx.recv().await.unwrap().event,
+            VideoEvent::Frame(1)
+        ));
+        assert!(matches!(
+            updates_rx.recv().await.unwrap().event,
+            VideoEvent::Ended
+        ));
+        reader.stop().await;
+    }
+
+    #[tokio::test]
     async fn stopping_an_owned_read_awaits_teardown_and_replacement_is_generation_scoped() {
         let canceled = Arc::new(AtomicBool::new(false));
         let observed = canceled.clone();
         let (started_tx, mut started_rx) = mpsc::channel(1);
         let (_release_tx, release_rx) = mpsc::channel(1);
         let (old_updates_tx, _old_updates_rx) = mpsc::channel(1);
+        let session = moqcast_playback_stats::PlaybackStats::default().begin(1);
         let mut task = VideoTask::spawn(
             7,
+            session.decoder(7),
             ControlledReader {
                 next: 7,
                 last: 7,
@@ -1074,6 +1169,7 @@ mod tests {
         let replacement_canceled = Arc::new(AtomicBool::new(false));
         let mut replacement = VideoTask::spawn(
             8,
+            session.decoder(8),
             ControlledReader {
                 next: 8,
                 last: 8,

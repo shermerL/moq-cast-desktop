@@ -5,10 +5,12 @@ on:
     branches: [main, dev]
     paths:
       - "shared/ui/**"
+      - "shared/playback-stats/**"
       - ".github/workflows/shared-ui.yml"
   pull_request:
     paths:
       - "shared/ui/**"
+      - "shared/playback-stats/**"
       - ".github/workflows/shared-ui.yml"
   workflow_dispatch:
 
@@ -40,6 +42,12 @@ jobs:
           key: shared-ui-cargo-${{ runner.os }}-rust1.95.0-${{ hashFiles('shared/ui/Cargo.lock') }}
           restore-keys: |
             shared-ui-cargo-${{ runner.os }}-rust1.95.0-
+      - name: Verify frame sampler
+        working-directory: shared/playback-stats
+        run: |
+          cargo fmt --check
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
       - name: Check formatting
         run: cargo fmt --all --check --manifest-path shared/ui/Cargo.toml
       - name: Run tests

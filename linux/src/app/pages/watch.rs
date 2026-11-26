@@ -17,6 +17,7 @@ pub(in crate::app) fn show(
     snapshot: &AppSnapshot,
     frame: Option<PlayerFrameSample>,
     playback: Option<&egui::TextureHandle>,
+    stats: &moqcast_playback_stats::PlaybackStats,
     player: &mut LivePlayer,
 ) -> Option<WatchAction> {
     match &snapshot.media {
@@ -27,6 +28,7 @@ pub(in crate::app) fn show(
                 PlayerPlayback {
                     generation: snapshot.view_generation,
                     frame,
+                    stats,
                     video: &snapshot.remote_video,
                 },
                 PlayerMode::Preparing {
@@ -43,6 +45,7 @@ pub(in crate::app) fn show(
                 PlayerPlayback {
                     generation: snapshot.view_generation,
                     frame,
+                    stats,
                     video: &snapshot.remote_video,
                 },
                 PlayerMode::Viewing {
@@ -54,7 +57,7 @@ pub(in crate::app) fn show(
             )
             .map(player_action),
         _ => {
-            let failed = snapshot.last_error.is_some();
+            let failed = snapshot.watch_error.is_some();
             v2::canvas_message(
                 ui,
                 v2::CanvasMessage {
@@ -64,7 +67,12 @@ pub(in crate::app) fn show(
                         locale.text("播放已结束", "Playback ended")
                     },
                     detail: if failed {
-                        locale.operation_failed()
+                        crate::app::media_diagnostics::software_failure(
+                            snapshot.view_generation,
+                            locale == Locale::Chinese,
+                        )
+                        .or(snapshot.watch_error.as_deref())
+                        .unwrap_or(locale.operation_failed())
                     } else {
                         ""
                     },
@@ -90,7 +98,11 @@ fn player_action(action: PlayerAction) -> WatchAction {
     })
 }
 
-fn device_name<'a>(snapshot: &'a AppSnapshot, path: &str, locale: Locale) -> &'a str {
+pub(in crate::app) fn device_name<'a>(
+    snapshot: &'a AppSnapshot,
+    path: &str,
+    locale: Locale,
+) -> &'a str {
     snapshot
         .peers
         .iter()

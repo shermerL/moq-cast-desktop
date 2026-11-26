@@ -623,6 +623,7 @@ pub(crate) enum RuntimeStartError {
 }
 
 pub(crate) struct RuntimeOwner {
+    pub(crate) stats: moqcast_playback_stats::PlaybackStats,
     commands: mpsc::Sender<RuntimeCommand>,
     system_events: mpsc::UnboundedSender<SystemEvent>,
     snapshot: watch::Receiver<Arc<AppSnapshot>>,
@@ -636,6 +637,7 @@ impl RuntimeOwner {
         // Layout fixtures record commands without advertising or opening media sessions.
         let (commands, mut receiver) = mpsc::channel(COMMAND_CAPACITY);
         let owner = Self {
+            stats: Default::default(),
             commands,
             system_events: mpsc::unbounded_channel().0,
             snapshot: watch::channel(Arc::new(AppSnapshot::default())).1,
@@ -681,6 +683,8 @@ impl RuntimeOwner {
         let (frames_tx, frames) = watch::channel(None);
         let wake = Arc::new(wake);
         let start: NetworkStart = Arc::new(move || Box::pin(start()));
+        let stats = moqcast_playback_stats::PlaybackStats::default();
+        let playback = playback::Owner::with_stats(stats.clone());
         let owner = thread::Builder::new()
             .name("moqcast-macos-runtime".to_owned())
             .spawn(move || {
@@ -689,6 +693,7 @@ impl RuntimeOwner {
                     system_event_rx,
                     snapshot_tx,
                     frames_tx,
+                    playback,
                     start,
                     wake,
                 ))
@@ -696,6 +701,7 @@ impl RuntimeOwner {
             .map_err(RuntimeStartError::OwnerThread)?;
 
         Ok(Self {
+            stats,
             commands,
             system_events,
             snapshot,
@@ -809,6 +815,7 @@ async fn run(
     mut system_events: mpsc::UnboundedReceiver<SystemEvent>,
     snapshot_tx: watch::Sender<Arc<AppSnapshot>>,
     frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
+    mut playback: playback::Owner,
     start: NetworkStart,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) {
@@ -823,7 +830,6 @@ async fn run(
     tracing::info!(stage = "runtime", "macOS runtime owner ready");
 
     let (playback_events_tx, mut playback_events) = mpsc::channel(PLAYBACK_EVENT_CAPACITY);
-    let mut playback = playback::Owner::default();
     let mut publication = publication::Owner::default();
     let mut relay_owner: Option<relay::Owner> = None;
     let mut relay_request: Option<relay::Request> = None;
@@ -1169,7 +1175,19 @@ async fn run(
                 generation,
                 percent,
             })) => {
-                playback.set_volume(generation, percent);
+                if playback.set_volume(generation, percent) {
+                    tracing::debug!(
+                        view_generation = generation,
+                        volume_percent = percent.min(100),
+                        "remote playback volume changed"
+                    );
+                } else {
+                    tracing::debug!(
+                        view_generation = generation,
+                        volume_percent = percent.min(100),
+                        "ignored stale remote playback volume change"
+                    );
+                }
             }
             RuntimeInput::Command(Some(RuntimeCommand::SelectShareSource(selection))) => {
                 snapshot.select_share_source(selection);
@@ -1952,6 +1970,7 @@ mod tests {
                     system_event_rx,
                     snapshot_tx,
                     frames,
+                    playback::Owner::default(),
                     start,
                     Arc::new(|| {}),
                 );
@@ -2023,6 +2042,7 @@ mod tests {
                     system_event_rx,
                     snapshot_tx,
                     frames,
+                    playback::Owner::default(),
                     start,
                     Arc::new(|| {}),
                 );
@@ -3337,6 +3357,7 @@ mod suspended_nearby_tests {
                     event_rx,
                     snapshots,
                     frames,
+                    playback::Owner::default(),
                     start,
                     Arc::new(|| {}),
                 )),

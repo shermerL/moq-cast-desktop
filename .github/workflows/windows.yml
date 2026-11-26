@@ -4,20 +4,26 @@ on:
   push:
     branches: [main, dev]
     paths:
+      - ".github/scripts/prepare-ci-moq-source.py"
       - "windows/**"
       - "shared/build-provenance/**"
       - "shared/diagnostics/**"
       - "shared/ui/**"
+      - "shared/playback-stats/**"
+      - "shared/watch-session.rs"
       - "shared/lan-state/**"
       - "shared/task-cleanup.rs"
       - "shared/connection-bandwidth.rs"
       - ".github/workflows/windows.yml"
   pull_request:
     paths:
+      - ".github/scripts/prepare-ci-moq-source.py"
       - "windows/**"
       - "shared/build-provenance/**"
       - "shared/diagnostics/**"
       - "shared/ui/**"
+      - "shared/playback-stats/**"
+      - "shared/watch-session.rs"
       - "shared/lan-state/**"
       - "shared/task-cleanup.rs"
       - "shared/connection-bandwidth.rs"
@@ -66,6 +72,10 @@ jobs:
             windows-cargo-${{ runner.os }}-rust1.95.0-
       - name: Check formatting
         run: cargo fmt --all --check
+      - name: Prepare locked MoQ sources
+        working-directory: .
+        run: python .github/scripts/prepare-ci-moq-source.py windows/Cargo.lock
+
       - name: Run tests
         run: cargo test --locked --all-targets
       - name: Run shared diagnostics tests

@@ -5,6 +5,7 @@
 mod config;
 mod export;
 mod filter;
+pub mod media;
 mod output;
 mod quic_context;
 mod ring;
@@ -14,7 +15,7 @@ use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::fs;
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -109,6 +110,16 @@ impl Handle {
     /// Return the recommended timestamped ZIP filename for a local export.
     pub fn recommended_export_name(&self) -> String {
         export::recommended_name(OffsetDateTime::now_utc())
+    }
+
+    /// Capture the media summary at destination confirmation and return the work for the export thread.
+    pub fn prepare_export(
+        &self,
+        destination: PathBuf,
+    ) -> impl FnOnce() -> Result<ExportResult, ExportError> + Send + 'static {
+        let handle = self.clone();
+        let request = ExportRequest::new(destination);
+        move || handle.export(request)
     }
 
     /// Flush logs and write them with environment metadata to a local ZIP.
@@ -267,6 +278,13 @@ where
         id: &tracing::span::Id,
         context: Context<'_, S>,
     ) {
+        if attributes.metadata().target() == "moqcast_diagnostics::media"
+            && let Some(span) = context.span(id)
+        {
+            let mut media_id = media::MediaId::default();
+            attributes.record(&mut media_id);
+            span.extensions_mut().insert(media_id);
+        }
         if self.filter.detailed()
             && filter::quic_detail_target(attributes.metadata().target())
             && let Some(span) = context.span(id)
@@ -291,6 +309,36 @@ where
     }
 
     fn on_event(&self, event: &Event<'_>, context: Context<'_, S>) {
+        // The locked capture driver reports the opened Sink name as a typed field
+        // after demand opens the encoder. Do not collect the device label or probe events.
+        let metadata = event.metadata();
+        let fields = metadata.fields();
+        let opened = metadata.target() == "moq_video::encode::producer"
+            && fields.field("device").is_some()
+            && fields.field("encoder").is_some();
+        let fallback = metadata.target() == "moq_video::decode::backend"
+            && fields.field("decoder").is_some()
+            && fields.field("refused").is_some();
+        if (opened || fallback)
+            && let Some(scope) = context.event_scope(event)
+            && let Some(id) = scope
+                .filter(|span| {
+                    span.name()
+                        == if opened {
+                            "publication"
+                        } else {
+                            "decoder_open"
+                        }
+                })
+                .filter_map(|s| s.extensions().get::<media::MediaId>().map(|id| id.0))
+                .next()
+        {
+            if opened {
+                event.record(&mut media::MediaEncoder(id));
+            } else {
+                media::decoder_fallback(id);
+            }
+        }
         // The log bridge stores the original target in fields; static metadata
         // only says "log". Apply the same policy to the recovered source target.
         let normalized = event.normalized_metadata();
@@ -582,7 +630,8 @@ impl PendingSecret {
     fn skips(self, token: &str) -> bool {
         matches!(token, "=" | ":")
             || sensitive_value_qualifier(token)
-            || matches!(self, Self::Authorization) && authorization_scheme(token)
+            || matches!(self, Self::Authorization)
+                && authorization_scheme(token.strip_prefix(['=', ':']).unwrap_or(token))
     }
 }
 
@@ -595,10 +644,13 @@ fn sanitize_free_text(value: &str) -> String {
     let mut sanitized = Vec::new();
     let mut pending: Option<PendingSecret> = None;
     for token in value.split_whitespace() {
-        // A new assignment owns its value, even after an empty previous assignment.
+        // A new field (with or without a delimiter) owns the next value.
         if let Some((replacement, next)) = redact_assignment(token) {
             sanitized.push(replacement);
             pending = next;
+        } else if let Some(key) = bare_sensitive_key(token) {
+            sanitized.push(format!("{key}=[REDACTED]"));
+            pending = Some(PendingSecret::for_key(&key));
         } else if let Some(secret) = pending {
             if secret.skips(token) {
                 sanitized.push(token.to_owned());
@@ -606,9 +658,6 @@ fn sanitize_free_text(value: &str) -> String {
                 sanitized.push("[REDACTED]".to_owned());
                 pending = None;
             }
-        } else if let Some(key) = bare_sensitive_key(token) {
-            sanitized.push(format!("{key}=[REDACTED]"));
-            pending = Some(PendingSecret::for_key(&key));
         } else if contains_location(token) {
             sanitized.push("[LOCATION OMITTED]".to_owned());
         } else {
@@ -1386,8 +1435,18 @@ mod spaced_secret_tests {
                 .with_stderr(false)
                 .with_private_location_redaction(),
         );
+        let inputs = [
+            "authorization: Bearer SAFE_FAKE_TOKEN",
+            "authorization =Bearer SAFE_FAKE_SCHEME",
+            "Authorization :bAsIc SAFE_FAKE_BASIC",
+            "token= password SAFE_FAKE_PASSWORD",
+            "token= authorization :Bearer SAFE_FAKE_CHAIN",
+        ];
         tracing::subscriber::with_default(Registry::default().with(layer), || {
-            tracing::warn!(target: "moqcast_macos::network", error = "authorization: Bearer SAFE_FAKE_TOKEN", "handshake failed");
+            for input in inputs {
+                let error = format!("{input} after retry");
+                tracing::warn!(target: "moqcast_macos::network", error, "handshake failed");
+            }
             tracing::warn!(target: "moqcast_macos::network", error = "connection reset by peer", "connection ended");
         });
         let memory = handle
@@ -1411,12 +1470,17 @@ mod spaced_secret_tests {
         let leaks = [("ring", memory), ("disk", disk), ("export", exported)]
             .into_iter()
             .filter_map(|(name, text)| {
-                assert!(text.contains("handshake failed"), "missing event in {name}");
+                assert_eq!(
+                    text.matches("handshake failed").count(),
+                    inputs.len(),
+                    "{name}"
+                );
+                assert_eq!(text.matches("after retry").count(), inputs.len(), "{name}");
                 assert!(
                     text.contains("connection reset by peer"),
                     "normal error changed in {name}"
                 );
-                text.contains("SAFE_FAKE_TOKEN").then_some(name)
+                text.contains("SAFE_FAKE_").then_some(name)
             })
             .collect::<Vec<_>>();
         assert!(leaks.is_empty(), "fake credential survives in: {leaks:?}");
@@ -1449,6 +1513,10 @@ mod spaced_secret_tests {
             "token=FAKE_SECRET password: FAKE_OTHER",
             "token= password: FAKE_OTHER",
             "Authorization: bEaReR FAKE_SECRET",
+            "authorization =Bearer FAKE_SECRET",
+            "authorization :Basic FAKE_SECRET",
+            "token= password FAKE_SECRET",
+            "token= authorization :Bearer FAKE_SECRET",
         ] {
             assert!(!sanitize_free_text(input).contains("FAKE_"), "{input}");
         }

@@ -20,6 +20,7 @@ eframe = { version = "0.36.1", default-features = false, features = ["accesskit"
 gethostname = "1.1.0"
 moq-tokio = { git = "https://github.com/moq-dev/moq.git", rev = "f8215bc47199b48512d805ae9fc710cc6586de51", default-features = false, features = ["aws-lc-rs", "mdns", "noq"] }
 moqcast-diagnostics = { path = "../shared/diagnostics" }
+moqcast-playback-stats = { path = "../shared/playback-stats" }
 moqcast-ui = { path = "../shared/ui" }
 rfd = "0.17.2"
 thiserror = "2"
@@ -35,7 +36,10 @@ moq-video = { path = "vendor/moq-video", default-features = false, features = ["
 pipewire = "0.10"
 
 [dev-dependencies]
+serde_json = "1.0.151"
+tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["macros", "test-util"] }
+zip = { version = "8.6.0", default-features = false }
 
 [build-dependencies]
 moqcast-build-provenance = { path = "../shared/build-provenance" }

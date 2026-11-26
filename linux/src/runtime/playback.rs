@@ -5,8 +5,10 @@ mod audio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::watch_session::WatchSession;
 use moq_mux::catalog::Stream;
 use moq_tokio::moq_net;
+use moqcast_playback_stats::DecoderCounter;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
@@ -87,16 +89,33 @@ impl VideoSelection {
 
     async fn decoder(
         &self,
+        session: &moqcast_diagnostics::media::Session,
         broadcast: &moq_net::broadcast::Consumer,
         max_age: Duration,
     ) -> anyhow::Result<moq_video::decode::Consumer> {
+        use tracing::Instrument;
         let mut options = moq_video::decode::Options::new();
         options.max_delay = max_age;
         options.decoder.output = moq_video::Output::Cpu;
         options.start = moq_video::decode::Start::Latest;
-        moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), options)
-            .await
-            .map_err(Into::into)
+        if session.software() {
+            options.decoder.kind = moq_video::decode::Kind::Software;
+        }
+        session.format(
+            &self.config.codec.to_string(),
+            self.config.coded_width.zip(self.config.coded_height),
+        );
+        let decoder =
+            moq_video::decode::Consumer::new(broadcast, &self.config, self.name.clone(), options)
+                .instrument(session.decoder_span())
+                .await
+                .inspect_err(|error| {
+                    if matches!(error, moq_video::Error::NoDecoder(_)) {
+                        session.no_decoder();
+                    }
+                })?;
+        session.decoder(decoder.name());
+        Ok(decoder)
     }
 }
 
@@ -228,13 +247,17 @@ impl VideoTask {
     fn spawn(
         generation: u64,
         mut decoder: moq_video::decode::Consumer,
+        counter: DecoderCounter,
         updates: &mpsc::Sender<VideoUpdate>,
     ) -> Self {
         let updates = updates.clone();
         let handle = tokio::spawn(async move {
             loop {
                 let event = match decoder.read().await {
-                    Ok(Some(frame)) => VideoEvent::Frame(frame),
+                    Ok(Some(frame)) => {
+                        counter.decoded();
+                        VideoEvent::Frame(frame)
+                    }
                     Ok(None) => VideoEvent::Ended,
                     Err(error) => VideoEvent::Failed(error.to_string()),
                 };
@@ -290,7 +313,7 @@ async fn wait_for_deadline(deadline: Option<Instant>) {
 
 /// Consume one screen broadcast until its catalog or video track ends.
 pub(super) async fn run(
-    view_generation: u64,
+    watch: &WatchSession,
     path: String,
     broadcast: moq_net::broadcast::Consumer,
     mut cancel: watch::Receiver<bool>,
@@ -298,6 +321,8 @@ pub(super) async fn run(
     frames: watch::Sender<Option<Arc<PlaybackFrame>>>,
     volume: watch::Receiver<u8>,
 ) -> anyhow::Result<()> {
+    let session = &watch.media;
+    let view_generation = session.generation();
     let mut catalog = tokio::select! {
         biased;
         _ = wait_for_cancel(&mut cancel) => return Ok(()),
@@ -315,7 +340,7 @@ pub(super) async fn run(
     let mut selection = Selection::from_catalog(first, None);
     let video_max_age = selection.video_max_age();
     let mut frames_sequence = FrameSequence::new(view_generation);
-    let mut video_scheduler = sync::VideoScheduler::default();
+    let mut video_scheduler = sync::VideoScheduler::<moq_video::Frame>::default();
     let (video_updates_tx, mut video_updates_rx) = mpsc::channel(VIDEO_EVENT_CAPACITY);
     let mut video_task = None;
     if let Some(video) = &selection.video {
@@ -323,7 +348,7 @@ pub(super) async fn run(
         let decoder = tokio::select! {
             biased;
             _ = wait_for_cancel(&mut cancel) => return Ok(()),
-            result = video.decoder(&broadcast, video_max_age) => result?,
+            result = video.decoder(session, &broadcast, video_max_age) => result?,
         };
         tracing::info!(
             view_generation,
@@ -332,6 +357,7 @@ pub(super) async fn run(
             track = %video.name,
             "remote video decoder opened"
         );
+        let counter = watch.stats.decoder(frames_sequence.decoder_generation);
         events
             .send(Event::Video(RemoteVideoSnapshot {
                 codec: Some(video.config.codec.to_string()),
@@ -342,6 +368,7 @@ pub(super) async fn run(
         video_task = Some(VideoTask::spawn(
             frames_sequence.decoder_generation,
             decoder,
+            counter,
             &video_updates_tx,
         ));
     } else {
@@ -370,6 +397,10 @@ pub(super) async fn run(
             let advance = video_scheduler.advance(media_clock.audio_anchor(), Instant::now());
             if let Some(decoded) = advance.due {
                 let (identity, first_view_frame) = frames_sequence.next();
+                if identity.sequence == 1 {
+                    let size = decoded.size();
+                    session.frame_size(size.width, size.height);
+                }
                 let frame = tokio::task::spawn_blocking(move || {
                     PlaybackFrame::from_video(decoded, identity)
                 })
@@ -442,8 +473,10 @@ pub(super) async fn run(
                         );
                     }
                     if changes.video {
+                        session.format("", None);
                         // The reader owns the non-cancel-safe read future and its
                         // decoder. Await its teardown before opening a replacement.
+                        watch.stats.clear_decoder();
                         if let Some(mut task) = video_task.take() {
                             task.stop().await;
                         }
@@ -453,7 +486,7 @@ pub(super) async fn run(
                             let decoder = tokio::select! {
                                 biased;
                                 _ = wait_for_cancel(&mut cancel) => break Ok(()),
-                                result = video.decoder(&broadcast, video_max_age) => result?,
+                                result = video.decoder(session, &broadcast, video_max_age) => result?,
                             };
                             tracing::info!(
                                 view_generation,
@@ -462,6 +495,7 @@ pub(super) async fn run(
                                 track = %video.name,
                                 "remote video decoder rebuilt after catalog change"
                             );
+                            let counter = watch.stats.decoder(frames_sequence.decoder_generation);
                             events
                                 .send(Event::Video(RemoteVideoSnapshot {
                                     codec: Some(video.config.codec.to_string()),
@@ -472,6 +506,7 @@ pub(super) async fn run(
                             video_task = Some(VideoTask::spawn(
                                 frames_sequence.decoder_generation,
                                 decoder,
+                                counter,
                                 &video_updates_tx,
                             ));
                         } else {
@@ -518,6 +553,7 @@ pub(super) async fn run(
                                 video_scheduler.push(sync::timestamp(decoded.timestamp), decoded);
                         }
                         VideoEventDisposition::WaitForCatalog => {
+                            watch.stats.clear_decoder();
                             if let Some(mut task) = video_task.take() {
                                 task.stop().await;
                             }
@@ -546,6 +582,7 @@ pub(super) async fn run(
     }
     .await;
 
+    watch.stats.clear_decoder();
     if let Some(mut task) = video_task {
         task.stop().await;
     }
@@ -557,6 +594,82 @@ pub(super) async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn decoded_frames_are_measured_before_the_ui_accepts_a_texture() {
+        use moq_video::encode::{Config, Encoder, Kind, Producer};
+        use moqcast_playback_stats::PlaybackStats;
+
+        let mut broadcast = moq_net::broadcast::Info::new().produce();
+        let subscriber = broadcast.consume();
+        let catalog =
+            moq_mux::catalog::Producer::<()>::new(&mut broadcast, Default::default()).unwrap();
+        let mut config = Config::new(160, 96, moq_video::Rate::new(10, 1).unwrap());
+        config.kind = Kind::Software;
+        let rendition = config.probe().await.unwrap();
+        let mut producer = Producer::new(broadcast, catalog, rendition).unwrap();
+        let mut encoder = Encoder::new(&config).unwrap();
+        let stats = PlaybackStats::default();
+        let session = WatchSession::new(3, &stats);
+        stats.set_sampling(3, true);
+        let (cancel, cancelled) = watch::channel(false);
+        let (events, mut received) = mpsc::channel(8);
+        let (frames, latest) = watch::channel(None);
+        let (_volume, volume) = watch::channel(100);
+        let owner = tokio::spawn(async move {
+            run(
+                &session,
+                "source".into(),
+                subscriber,
+                cancelled,
+                events,
+                frames,
+                volume,
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut tick = tokio::time::interval(Duration::from_millis(100));
+            let mut index = 0;
+            let mut started = false;
+            loop {
+                tokio::select! {
+                    event = received.recv() => {
+                        if let Event::Started { ack } = event.expect("playback owner stopped early") {
+                            ack.send(()).unwrap();
+                            started = true;
+                        }
+                    }
+                    _ = tick.tick() => {
+                        let pixels = vec![(index % 255) as u8; 160 * 96 * 4];
+                        let surface = moq_video::Surface::rgba(
+                            &pixels, moq_video::Size::new(160, 96),
+                        ).unwrap();
+                        let at = moq_net::Timestamp::from_micros(index * 100_000).unwrap();
+                        let frame = moq_video::Frame::new(surface, at);
+                        producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+                        index += 1;
+                    }
+                }
+                if started && let Some(frame) = latest.borrow().as_ref() {
+                    assert_eq!((frame.width, frame.height), (160, 96));
+                    let snapshot = stats.snapshot(3).unwrap();
+                    if snapshot.samples.iter().any(|sample| {
+                        sample.codec_generation == Some(frame.identity.decoder_generation)
+                            && sample.decoded_fps.is_some_and(|rate| rate > 0.0)
+                            && sample.ui_fps == Some(0.0)
+                    }) {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("independent session sampling observed the SDK output");
+        cancel.send_replace(true);
+        owner.await.unwrap().unwrap();
+        assert!(stats.snapshot(3).is_none());
+    }
 
     fn selection() -> Selection {
         let mut catalog = moq_mux::catalog::hang::Catalog::<()>::default();

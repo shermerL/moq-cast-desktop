@@ -1,53 +1,19 @@
 //! Shared-system remote screen player surface and controls.
 
-use eframe::egui::{self, Align, Color32, Layout, Rect, Sense, ViewportCommand};
-use moqcast_ui::v2::PLAYER_VOLUME_CONTROL_WIDTH;
-use moqcast_ui::{
-    COLORS, PlayerAudioState, PlayerFrameSample, PlayerInfoLocale, PlayerInfoSnapshot,
-    PlayerInfoState, PlayerVolumeState, Size, TypographyRole, typography,
-};
+use eframe::egui::{self, Color32, Rect, Sense, ViewportCommand};
+use moqcast_ui::{PlayerAudioState, PlayerFrameSample, PlayerInfoLocale, PlayerInfoSnapshot};
 
 use super::{Locale, video::Texture};
 use crate::playback::{AudioPhase, AudioSnapshot};
 use crate::runtime::MediaPhase;
+use moqcast_ui::v2;
 
 const FALLBACK_ASPECT: egui::Vec2 = egui::vec2(16.0, 9.0);
-const CONTROL_BUTTON_WIDTH: f32 = 156.0;
-const COMPACT_CONTROL_BUTTON_WIDTH: f32 = 92.0;
-const CONTROL_GAP: f32 = Size::PLAYER_TOOLBAR_ITEM_SPACING;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PlayerLayout {
     surface: egui::Vec2,
     image: egui::Vec2,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct ControlLayout {
-    info_width: f32,
-    actions_width: f32,
-    button_width: f32,
-}
-
-fn control_layout(available_width: f32) -> ControlLayout {
-    let available_width = valid_extent(available_width);
-    let button_width = if available_width < 520.0 {
-        COMPACT_CONTROL_BUTTON_WIDTH
-    } else {
-        CONTROL_BUTTON_WIDTH
-    };
-    let actions_width = button_width
-        + CONTROL_GAP
-        + Size::CONTROL
-        + CONTROL_GAP
-        + Size::CONTROL
-        + CONTROL_GAP
-        + PLAYER_VOLUME_CONTROL_WIDTH;
-    ControlLayout {
-        info_width: (available_width - actions_width - CONTROL_GAP).max(0.0),
-        actions_width: actions_width.min(available_width),
-        button_width,
-    }
 }
 
 fn player_layout(
@@ -88,6 +54,7 @@ pub(super) enum PlayerAction {
 }
 
 pub(super) struct PlayerView<'a> {
+    pub(super) stats: &'a moqcast_playback_stats::PlaybackStats,
     pub(super) locale: Locale,
     pub(super) generation: u64,
     pub(super) phase: MediaPhase,
@@ -102,8 +69,7 @@ pub(super) struct PlayerView<'a> {
 #[derive(Default)]
 pub(super) struct Player {
     fullscreen: bool,
-    info: PlayerInfoState,
-    volume: PlayerVolumeState,
+    chrome: v2::WatchChrome,
 }
 
 impl Player {
@@ -113,18 +79,13 @@ impl Player {
             self.fullscreen = false;
             context.send_viewport_cmd(ViewportCommand::Fullscreen(false));
         }
+        if !self.fullscreen {
+            self.chrome.leave_fullscreen();
+        }
         self.fullscreen
     }
 
     pub(super) fn show(&mut self, ui: &mut egui::Ui, view: PlayerView<'_>) -> Option<PlayerAction> {
-        self.info.sync_generation(view.generation);
-        self.volume.sync_generation(view.generation);
-        let now = ui.input(|input| input.time);
-        if self.fullscreen && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
-            ui.ctx()
-                .send_viewport_cmd(ViewportCommand::Fullscreen(false));
-            self.fullscreen = false;
-        }
         let source = view
             .texture
             .map(|texture| egui::vec2(texture.display.0 as f32, texture.display.1 as f32));
@@ -146,18 +107,40 @@ impl Player {
         ui.allocate_rect(occupied, Sense::hover());
         ui.painter().rect_filled(rects.stage, 0, Color32::BLACK);
         paint_surface(ui, rects.stage, layout.image, view.texture);
-        paint_status(ui, rects.stage, view.locale, view.phase);
-        show_toolbar(
+        paint_status(
             ui,
-            rects.toolbar,
-            &view,
-            self.fullscreen,
-            now,
-            ToolbarState {
-                info: &mut self.info,
-                volume: &mut self.volume,
+            rects.stage,
+            view.locale,
+            if view.phase == MediaPhase::Watching && view.texture.is_none() {
+                MediaPhase::PreparingWatch
+            } else {
+                view.phase
             },
-        )
+        );
+        let phase = match view.phase {
+            MediaPhase::Stopping => v2::WatchPhase::Stopping,
+            MediaPhase::Watching if view.texture.is_some() => v2::WatchPhase::Live,
+            _ => v2::WatchPhase::Waiting,
+        };
+        self.chrome
+            .show(
+                ui,
+                available,
+                self.fullscreen,
+                phase,
+                player_info_locale(view.locale),
+                player_info_snapshot(&view, false),
+            )
+            .map(|cmd| match cmd {
+                v2::WatchCommand::Stop => PlayerAction::Stop,
+                v2::WatchCommand::Volume {
+                    generation,
+                    percent,
+                } => PlayerAction::SetVolume {
+                    generation,
+                    percent,
+                },
+            })
     }
 }
 
@@ -210,124 +193,26 @@ fn paint_status(ui: &mut egui::Ui, surface: Rect, locale: Locale, phase: MediaPh
     }
 }
 
-fn show_toolbar(
-    ui: &mut egui::Ui,
-    toolbar: Rect,
-    view: &PlayerView<'_>,
-    fullscreen: bool,
-    now: f64,
-    state: ToolbarState<'_>,
-) -> Option<PlayerAction> {
-    let ToolbarState { info, volume } = state;
-    let mut action = None;
-    moqcast_ui::v2::player_toolbar(ui, toolbar, |ui| {
-        let row_layout = control_layout(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if view.phase == MediaPhase::Watching {
-                live_badge(ui);
-            }
-            let enabled = view.phase != MediaPhase::Stopping;
-            let percent = moqcast_ui::v2::volume_control(
-                ui,
-                volume,
-                moqcast_ui::v2::VolumeLabels {
-                    mute: match view.locale {
-                        Locale::Chinese => "静音",
-                        Locale::English => "Mute",
-                    },
-                    unmute: match view.locale {
-                        Locale::Chinese => "取消静音",
-                        Locale::English => "Unmute",
-                    },
-                    volume: match view.locale {
-                        Locale::Chinese => "播放音量",
-                        Locale::English => "Playback volume",
-                    },
-                    unavailable: match view.locale {
-                        Locale::Chinese => "当前没有可播放音频",
-                        Locale::English => "No playable audio",
-                    },
-                    enabled: audio_playable(view.audio.phase) && enabled,
-                },
-            );
-            if let Some(percent) = percent {
-                action = Some(PlayerAction::SetVolume {
-                    generation: view.generation,
-                    percent,
-                });
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if (moqcast_ui::v2::Action {
-                    label: match view.locale {
-                        Locale::Chinese => "停止观看",
-                        Locale::English
-                            if row_layout.button_width == COMPACT_CONTROL_BUTTON_WIDTH =>
-                        {
-                            "Stop"
-                        }
-                        Locale::English => "Stop watching",
-                    },
-                    size: egui::vec2(108.0, 40.0),
-                    enabled,
-                    tone: moqcast_ui::v2::ActionTone::Danger,
-                })
-                .show(ui)
-                .clicked()
-                {
-                    if fullscreen {
-                        ui.ctx()
-                            .send_viewport_cmd(ViewportCommand::Fullscreen(false));
-                    }
-                    action = Some(PlayerAction::Stop);
-                }
-                let fullscreen_label = match (view.locale, fullscreen) {
-                    (Locale::Chinese, true) => "退出全屏",
-                    (Locale::Chinese, false) => "全屏",
-                    (Locale::English, true) => "Exit fullscreen",
-                    (Locale::English, false) => "Fullscreen",
-                };
-                if ui
-                    .add_enabled_ui(enabled, |ui| {
-                        moqcast_ui::v2::icon_button(
-                            ui,
-                            moqcast_ui::v2::Icon::Fullscreen,
-                            fullscreen_label,
-                        )
-                    })
-                    .inner
-                    .clicked()
-                {
-                    ui.ctx()
-                        .send_viewport_cmd(ViewportCommand::Fullscreen(!fullscreen));
-                }
-                let _ = moqcast_ui::v2::player_info_control(
-                    ui,
-                    info,
-                    player_info_locale(view.locale),
-                    now,
-                    player_info_snapshot(view, volume.muted()),
-                    enabled,
-                );
-            });
-        });
-    });
-    action
-}
-
-struct ToolbarState<'a> {
-    info: &'a mut PlayerInfoState,
-    volume: &'a mut PlayerVolumeState,
-}
-
 fn player_info_snapshot<'a>(view: &'a PlayerView<'a>, muted: bool) -> PlayerInfoSnapshot<'a> {
+    let observed = moqcast_diagnostics::media::watch_record(view.generation);
     PlayerInfoSnapshot {
+        presentation: (view.texture.is_some()).then_some("wgpu"),
+        requested_policy: observed.as_ref().map(|r| r.policy),
+        execution: observed.as_ref().and_then(|r| r.execution()),
+        hardware_refused: observed.as_ref().is_some_and(|r| r.hardware_refused),
+        awaiting_backend: observed.as_ref().is_some_and(|r| r.awaiting_backend()),
+        stats: Some(view.stats),
         generation: view.generation,
         source: Some(view.device_name),
         frame: view.frame,
-        resolution: view.texture.map(|texture| texture.display),
-        video_codec: view.video_codec,
-        decoder: view.decoder,
+        resolution: view
+            .texture
+            .map(|texture| texture.display)
+            .or_else(|| observed.as_ref().and_then(|r| r.dimensions)),
+        video_codec: view
+            .video_codec
+            .or_else(|| observed.as_ref().and_then(|r| r.codec)),
+        decoder: observed.as_ref().map_or(view.decoder, |r| r.backend),
         audio_state: player_audio_state(view.audio.phase, muted),
         audio_codec: view.audio.codec.as_deref(),
         audio_sample_rate: view.audio.sample_rate,
@@ -355,19 +240,6 @@ fn player_audio_state(phase: AudioPhase, muted: bool) -> PlayerAudioState {
             }
         }
     }
-}
-
-fn audio_playable(phase: AudioPhase) -> bool {
-    matches!(
-        phase,
-        AudioPhase::TrackSelected | AudioPhase::PcmDecoded | AudioPhase::PcmSubmitted
-    )
-}
-
-fn live_badge(ui: &mut egui::Ui) {
-    let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
-    ui.painter().circle_filled(dot.center(), 4.0, COLORS.live);
-    ui.label(typography("LIVE", TypographyRole::Meta, COLORS.live.into()));
 }
 
 #[cfg(test)]
@@ -421,7 +293,7 @@ mod tests {
     #[test]
     fn windowed_surface_reserves_the_attached_toolbar() {
         let layout = player_layout(None, egui::vec2(900.0, 700.0), false);
-        assert_size(layout.surface, egui::vec2(900.0, 636.0));
+        assert_size(layout.surface, egui::vec2(900.0, 648.0));
     }
 
     #[test]
@@ -431,14 +303,14 @@ mod tests {
             egui::vec2(900.0, 700.0),
             false,
         );
-        assert_size(layout.surface, egui::vec2(900.0, 636.0));
-        assert_size(layout.image, egui::vec2(357.75, 636.0));
+        assert_size(layout.surface, egui::vec2(900.0, 648.0));
+        assert_size(layout.image, egui::vec2(364.5, 648.0));
     }
 
     #[test]
     fn constrained_height_keeps_stage_and_toolbar_inside_the_page() {
         let layout = player_layout(None, egui::vec2(632.0, 356.0), false);
-        assert_size(layout.surface, egui::vec2(632.0, 292.0));
+        assert_size(layout.surface, egui::vec2(632.0, 304.0));
         assert_eq!(
             layout.surface.y + moqcast_ui::v2::PLAYER_TOOLBAR_HEIGHT,
             356.0
@@ -460,7 +332,7 @@ mod tests {
         assert_eq!(fullscreen_preparing, fullscreen_watching);
         assert_eq!(
             fullscreen_preparing.toolbar.bottom(),
-            fullscreen_preparing.stage.bottom()
+            fullscreen_preparing.stage.bottom() - 16.0
         );
     }
 
@@ -471,22 +343,35 @@ mod tests {
     }
 
     #[test]
-    fn compact_toolbar_reserves_volume_and_actions() {
-        let layout = control_layout(360.0);
-        assert_eq!(layout.actions_width, 344.0);
-        assert_eq!(layout.info_width, 8.0);
-        assert_eq!(layout.button_width, COMPACT_CONTROL_BUTTON_WIDTH);
-    }
-
-    #[test]
     fn volume_is_available_only_after_selecting_a_playable_audio_track() {
-        assert!(!audio_playable(AudioPhase::Idle));
-        assert!(!audio_playable(AudioPhase::Pending));
-        assert!(!audio_playable(AudioPhase::NoAudio));
-        assert!(audio_playable(AudioPhase::TrackSelected));
-        assert!(audio_playable(AudioPhase::PcmDecoded));
-        assert!(audio_playable(AudioPhase::PcmSubmitted));
-        assert!(!audio_playable(AudioPhase::Failed));
+        assert_ne!(
+            player_audio_state(AudioPhase::Idle, false),
+            PlayerAudioState::Ready
+        );
+        assert_ne!(
+            player_audio_state(AudioPhase::Pending, false),
+            PlayerAudioState::Ready
+        );
+        assert_ne!(
+            player_audio_state(AudioPhase::NoAudio, false),
+            PlayerAudioState::Ready
+        );
+        assert_eq!(
+            player_audio_state(AudioPhase::TrackSelected, false),
+            PlayerAudioState::Ready
+        );
+        assert_eq!(
+            player_audio_state(AudioPhase::PcmDecoded, false),
+            PlayerAudioState::Ready
+        );
+        assert_eq!(
+            player_audio_state(AudioPhase::PcmSubmitted, false),
+            PlayerAudioState::Ready
+        );
+        assert_ne!(
+            player_audio_state(AudioPhase::Failed, false),
+            PlayerAudioState::Ready
+        );
     }
 
     #[test]

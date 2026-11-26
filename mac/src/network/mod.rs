@@ -495,3 +495,6 @@ mod tests {
         second.shutdown().await.unwrap();
     }
 }
+
+#[cfg(all(test, feature = "publish"))]
+mod watch_fixture;

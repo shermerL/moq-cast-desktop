@@ -1,4 +1,6 @@
 mod desktop;
+#[path = "../../shared/diagnostics/native_ui.rs"]
+mod media_diagnostics;
 // Native state and platform commands; visual composition lives in desktop.
 
 #[cfg(test)]
@@ -181,6 +183,33 @@ impl MoqCastApp {
         }
     }
 
+    fn watch_source(&self) -> Option<String> {
+        let path = self.snapshot.view.path.as_deref()?;
+        self.snapshot
+            .peers
+            .values()
+            .position(|p| crate::screen_path::for_peer(&p.id) == path)
+            .map(|index| peer_display_name(self.locale, index + 1))
+    }
+
+    fn show_player(&mut self, ui: &mut egui::Ui) {
+        let source = self.watch_source();
+        let info = crate::player::player_info_snapshot(
+            &self.snapshot.view,
+            self.playback_identity,
+            source.as_deref(),
+            &self.runtime.playback_stats,
+        );
+        let action = self.player.show(
+            ui,
+            self.locale,
+            &self.snapshot.view,
+            self.playback_texture.as_ref(),
+            info,
+        );
+        self.handle_player_action(action);
+    }
+
     fn handle_player_action(&mut self, action: Option<PlayerAction>) {
         match action {
             Some(PlayerAction::Stop) => {
@@ -262,6 +291,11 @@ impl MoqCastApp {
                     ));
                 }
                 self.playback_identity = Some(frame.identity);
+                self.runtime.playback_stats.accepted(
+                    frame.identity.view_generation,
+                    frame.identity.decoder_generation,
+                    frame.identity.sequence,
+                );
                 self.playback_timestamp_us = Some(frame.timestamp_us);
                 self.playback_high_water_timestamp_us = Some(
                     high_water_timestamp_us.map_or(frame.timestamp_us, |high_water| {
@@ -293,7 +327,10 @@ impl MoqCastApp {
         if matches!(
             self.snapshot.view.phase,
             ViewPhase::Idle | ViewPhase::Failed
-        ) {
+        ) || self
+            .playback_identity
+            .is_some_and(|id| id.view_generation != self.snapshot.view.generation)
+        {
             self.playback_texture = None;
             self.playback_identity = None;
             self.playback_timestamp_us = None;
@@ -338,7 +375,7 @@ impl eframe::App for MoqCastApp {
         );
         let viewport_fullscreen = self
             .player
-            .reconcile_fullscreen(&context, self.snapshot.view.phase == ViewPhase::Viewing);
+            .reconcile_fullscreen(&context, viewing && self.page == Page::Watch);
         if viewport_fullscreen != self.viewport_fullscreen {
             tracing::info!(
                 fullscreen = viewport_fullscreen,
@@ -351,20 +388,13 @@ impl eframe::App for MoqCastApp {
             );
             self.viewport_fullscreen = viewport_fullscreen;
         }
-        let fullscreen = self.snapshot.view.phase == ViewPhase::Viewing && viewport_fullscreen;
+        let fullscreen = viewing && self.page == Page::Watch && viewport_fullscreen;
 
         if fullscreen {
             egui::CentralPanel::default()
                 .frame(Frame::new().fill(Color32::BLACK))
                 .show(ui, |ui| {
-                    let action = self.player.show(
-                        ui,
-                        self.locale,
-                        &self.snapshot.view,
-                        self.playback_texture.as_ref(),
-                        self.playback_identity,
-                    );
-                    self.handle_player_action(action);
+                    self.show_player(ui);
                 });
             self.diagnostics.show_window(&context, self.locale);
             context.request_repaint_after(std::time::Duration::from_millis(33));

@@ -57,6 +57,8 @@ impl PlayerFrameSample {
 /// Truthful playback fields available to the shared information panel.
 #[derive(Clone, Copy, Debug)]
 pub struct PlayerInfoSnapshot<'a> {
+    /// Statistics owned by the current playback session.
+    pub stats: Option<&'a moqcast_playback_stats::PlaybackStats>,
     /// Playback generation used to reset panel-local state.
     pub generation: u64,
     /// User-facing name of the selected playback source, when available.
@@ -69,6 +71,16 @@ pub struct PlayerInfoSnapshot<'a> {
     pub video_codec: Option<&'a str>,
     /// Backend that decoded the current video frame.
     pub decoder: Option<&'a str>,
+    /// Requested strategy latched when this watch started.
+    pub requested_policy: Option<&'a str>,
+    /// Execution class established by the opened backend.
+    pub execution: Option<&'a str>,
+    /// The active watch has not opened a decoder yet.
+    pub awaiting_backend: bool,
+    /// Texture path observed after this viewer accepted a frame.
+    pub presentation: Option<&'static str>,
+    /// Hardware candidates explicitly refused this decoder open.
+    pub hardware_refused: bool,
     /// Current remote-audio availability.
     pub audio_state: PlayerAudioState,
     /// Codec of the currently selected audio track.
@@ -167,7 +179,7 @@ impl PlayerInfoState {
         }
     }
 
-    fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         self.open = false;
         self.meter.reset();
     }
@@ -257,7 +269,11 @@ pub(crate) fn player_info_from_button(
                 Some(palette.map_or(COLORS.player_text.into(), |p| p.text));
             ui.visuals_mut().weak_text_color =
                 Some(palette.map_or(COLORS.player_muted.into(), |p| p.muted));
-            show_player_info(ui, locale, snapshot, state.meter.updates_per_second);
+            egui::ScrollArea::vertical()
+                .max_height((ui.ctx().content_rect().height() - 100.0).max(80.0))
+                .show(ui, |ui| {
+                    show_player_info(ui, locale, snapshot, state.meter.updates_per_second);
+                });
         });
     if was_open && !state.open {
         state.meter.reset();
@@ -276,6 +292,8 @@ fn show_player_info(
     snapshot: PlayerInfoSnapshot<'_>,
     updates_per_second: Option<f64>,
 ) {
+    ui.spacing_mut().interact_size.y = 20.0;
+    ui.spacing_mut().item_spacing.y = 3.0;
     ui.label(typography(
         panel_title(locale),
         TypographyRole::Section,
@@ -305,14 +323,54 @@ fn show_player_info(
             .unwrap_or_else(|| unavailable_label(locale))
             .to_owned(),
     );
+    let chinese = locale == PlayerInfoLocale::Chinese;
+    let text = |zh, en| if chinese { zh } else { en };
+    let missing = if snapshot.awaiting_backend {
+        text("等待中", "Waiting")
+    } else {
+        text("未提供", "Unavailable")
+    };
+    info_row(ui, text("角色", "Role"), text("观看", "Viewer").to_owned());
+    info_row(
+        ui,
+        text("请求策略", "Requested policy"),
+        match snapshot.requested_policy {
+            Some("auto") => text("自动", "Auto"),
+            Some("software") => text("仅软件", "Software only"),
+            _ => text("未提供", "Unavailable"),
+        }
+        .to_owned(),
+    );
+    info_row(
+        ui,
+        text("执行方式", "Decode execution"),
+        match snapshot.execution {
+            Some("hardware") => text("硬件解码", "Hardware decoding"),
+            Some("software") => text("软件解码", "Software decoding"),
+            _ => missing,
+        }
+        .to_owned(),
+    );
     info_row(
         ui,
         decoder_label(locale),
+        snapshot.decoder.unwrap_or(missing).to_owned(),
+    );
+    info_row(
+        ui,
+        text("呈现路径", "Presentation"),
         snapshot
-            .decoder
-            .unwrap_or_else(|| unavailable_label(locale))
+            .presentation
+            .unwrap_or(text("未提供", "Unavailable"))
             .to_owned(),
     );
+    if snapshot.hardware_refused {
+        info_row(
+            ui,
+            text("回退原因", "Fallback reason"),
+            text("硬件候选不可用", "Hardware candidates refused").to_owned(),
+        );
+    }
     let update_rate = updates_per_second
         .map(|rate| frame_rate_value(locale, rate))
         .unwrap_or_else(|| {
@@ -358,28 +416,49 @@ fn info_section(ui: &mut Ui, label: &str) {
 }
 
 fn info_row(ui: &mut Ui, label: &str, value: String) {
-    let response = ui
-        .horizontal(|ui| {
-            let label_width = (ui.available_width() * 0.38).min(104.0);
-            ui.add_sized(
-                vec2(label_width, 0.0),
+    let (row, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), 22.0), egui::Sense::hover());
+    let label_width = (row.width() * 0.38).min(104.0);
+    let label_rect = egui::Rect::from_min_max(
+        row.min,
+        egui::pos2((row.left() + label_width).min(row.right()), row.bottom()),
+    );
+    let value_rect = egui::Rect::from_min_max(
+        egui::pos2((label_rect.right() + 8.0).min(row.right()), row.top()),
+        row.max,
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(label_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.add(
                 Label::new(typography(
                     label,
                     TypographyRole::Meta,
                     ui.visuals().weak_text_color(),
-                )),
-            );
-            ui.add_sized(
-                ui.available_size(),
-                Label::new(typography(
-                    value.as_str(),
-                    TypographyRole::Meta,
-                    ui.visuals().text_color(),
                 ))
+                .halign(egui::Align::Min)
                 .truncate(),
             );
-        })
-        .response;
+        },
+    );
+    let mut text = typography(
+        value.as_str(),
+        TypographyRole::Meta,
+        ui.visuals().text_color(),
+    );
+    if matches!(value.as_bytes().first(), Some(b'0'..=b'9')) {
+        text = text.monospace();
+    }
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(value_rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        |ui| {
+            ui.add(Label::new(text).halign(egui::Align::Max).truncate());
+        },
+    );
     response.on_hover_text(value);
 }
 
@@ -502,7 +581,7 @@ fn measuring_label(locale: PlayerInfoLocale) -> &'static str {
     }
 }
 
-fn audio_state_label(locale: PlayerInfoLocale, state: PlayerAudioState) -> &'static str {
+pub(crate) fn audio_state_label(locale: PlayerInfoLocale, state: PlayerAudioState) -> &'static str {
     match (locale, state) {
         (PlayerInfoLocale::Chinese, PlayerAudioState::Pending) => "正在准备",
         (PlayerInfoLocale::Chinese, PlayerAudioState::NoAudio) => "无音轨",
@@ -568,12 +647,18 @@ mod tests {
         decoder: Option<&'a str>,
     ) -> PlayerInfoSnapshot<'a> {
         PlayerInfoSnapshot {
+            stats: None,
             generation: 1,
             source: Some("Studio Mac"),
             frame,
             resolution: Some((1920, 1080)),
             video_codec: Some("avc1.640028"),
             decoder,
+            requested_policy: None,
+            execution: None,
+            awaiting_backend: false,
+            presentation: None,
+            hardware_refused: false,
             audio_state: PlayerAudioState::Ready,
             audio_codec: Some("opus"),
             audio_sample_rate: Some(48_000),
@@ -737,5 +822,56 @@ mod tests {
     fn playback_source_label_is_localized() {
         assert_eq!(source_label(PlayerInfoLocale::Chinese), "来源");
         assert_eq!(source_label(PlayerInfoLocale::English), "Source");
+    }
+
+    #[test]
+    fn playback_info_rows_align_labels_left_and_values_right() {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    vec2(300.0, 400.0),
+                )),
+                ..Default::default()
+            },
+            |root| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(root, |ui| {
+                        ui.set_width(300.0);
+                        show_player_info(
+                            ui,
+                            PlayerInfoLocale::English,
+                            snapshot(None, Some("videotoolbox")),
+                            Some(30.0),
+                        );
+                    });
+            },
+        );
+        let find = |text: &str| {
+            out.shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.job.text == text => {
+                        Some(t.galley.rect.translate(t.pos.to_vec2()))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing {text}"))
+        };
+        let label = find("Resolution");
+        let value = find("1920 × 1080");
+        assert!(
+            label.left() < 2.0,
+            "label should align to left edge, got {}",
+            label.left()
+        );
+        assert!(
+            (300.0 - value.right()).abs() < 4.0,
+            "value should align to right edge, got right={}",
+            value.right()
+        );
+        out.textures_delta.clear();
     }
 }

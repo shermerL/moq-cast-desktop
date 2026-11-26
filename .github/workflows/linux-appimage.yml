@@ -6,20 +6,26 @@ on:
       - main
       - dev
     paths:
+      - ".github/scripts/prepare-ci-moq-source.py"
       - "linux/**"
       - "shared/build-provenance/**"
       - "shared/diagnostics/**"
       - "shared/ui/**"
+      - "shared/playback-stats/**"
+      - "shared/watch-session.rs"
       - "shared/lan-state/**"
       - "shared/task-cleanup.rs"
       - "shared/connection-bandwidth.rs"
       - ".github/workflows/linux-appimage.yml"
   pull_request:
     paths:
+      - ".github/scripts/prepare-ci-moq-source.py"
       - "linux/**"
       - "shared/build-provenance/**"
       - "shared/diagnostics/**"
       - "shared/ui/**"
+      - "shared/playback-stats/**"
+      - "shared/watch-session.rs"
       - "shared/lan-state/**"
       - "shared/task-cleanup.rs"
       - "shared/connection-bandwidth.rs"
@@ -132,7 +138,8 @@ jobs:
             linux-cargo-${{ matrix.variant }}-rust1.95.0-
 
       - name: Prepare locked MoQ sources
-        run: python3 linux/scripts/prepare-ci-moq-source.py
+        working-directory: .
+        run: python3 .github/scripts/prepare-ci-moq-source.py linux/Cargo.lock
 
       - name: Download AppImage tooling
         run: |
