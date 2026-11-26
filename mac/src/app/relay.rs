@@ -7,6 +7,8 @@ use moqcast_ui::v2::{Action, ActionTone, Palette, StatusTone, notice};
 #[derive(Default)]
 pub(super) struct Ui {
     address: String,
+    pub(super) prefix: String,
+    pub(super) publish_pending: Option<(Generation, u64)>,
     fingerprint: String,
     error: Option<ConfigError>,
     pending: Option<Generation>,
@@ -42,11 +44,14 @@ impl Ui {
         false
     }
 
-    fn affects_watch(&self, snapshot: &AppSnapshot) -> bool {
+    fn affects_media(&self, snapshot: &AppSnapshot) -> bool {
         let generation = snapshot.relay.lifecycle.generation();
         snapshot.relay.lifecycle.phase() == Phase::Connected
             && ((snapshot.media_owner == Some(MediaOwner::Watch)
                 && matches!(&snapshot.media_source, MediaSource::Relay(s) if s.generation == generation))
+                || (snapshot.media_owner == Some(MediaOwner::Share)
+                    && snapshot.media_source == MediaSource::RelayShare(generation))
+                || self.publish_pending.is_some_and(|(g, _)| g == generation)
                 || self
                     .watch_pending
                     .as_ref()
@@ -59,6 +64,11 @@ impl Ui {
                 || snapshot.runtime.phase() != RuntimePhase::Ready
         }) {
             self.pending = None;
+        }
+        if self.publish_pending.is_some_and(|(g, n)| {
+            g != snapshot.relay.lifecycle.generation() || n != snapshot.relay.publish_request
+        }) {
+            self.publish_pending = None;
         }
         let mut navigate = false;
         if let Some((request, selection)) = &self.watch_pending
@@ -73,7 +83,7 @@ impl Ui {
             navigate = accepted && self.confirm_disconnect.is_none();
         }
         if self.confirm_disconnect != Some(snapshot.relay.lifecycle.generation())
-            || !self.affects_watch(snapshot)
+            || !self.affects_media(snapshot)
         {
             self.confirm_disconnect = None;
         }
@@ -81,9 +91,21 @@ impl Ui {
     }
 }
 
+fn source_badge(ui: &mut egui::Ui, label: &str) {
+    let p = Palette::for_ui(ui);
+    StatusTone::Active.indicator(ui);
+    egui::Frame::new()
+        .fill(p.soft)
+        .corner_radius(8)
+        .inner_margin(5)
+        .show(ui, |ui| ui.colored_label(p.accent, label));
+}
+
 impl MoqCastApp {
     pub(super) fn watch_return_page(&self, snapshot: &AppSnapshot) -> Page {
-        if self.page == Page::Watch && matches!(snapshot.media_source, MediaSource::Relay(_)) {
+        if self.page == Page::RelayShare
+            || (self.page == Page::Watch && matches!(snapshot.media_source, MediaSource::Relay(_)))
+        {
             Page::Relay
         } else {
             Page::Nearby
@@ -96,7 +118,7 @@ impl MoqCastApp {
         snapshot: &AppSnapshot,
         metrics: moqcast_ui::v2::Metrics,
     ) {
-        if self.page == Page::Watch {
+        if matches!(self.page, Page::Watch | Page::RelayShare) {
             return;
         }
         let palette = Palette::for_ui(root);
@@ -131,25 +153,25 @@ impl MoqCastApp {
                 });
                 if snapshot.media_owner.is_some() {
                     ui.horizontal(|ui| {
-                        let relay = matches!(snapshot.media_source, MediaSource::Relay(_));
+                        let relay = snapshot.relay_media();
                         let source = if relay {
                             "Relay"
                         } else {
                             self.text("附近设备", "Nearby")
                         };
+                        source_badge(ui, source);
                         let label_width =
                             (ui.available_width() - 176.0 - 2.0 * ui.spacing().item_spacing.x)
                                 .max(0.0);
                         ui.add_sized(
                             egui::vec2(label_width, 40.0),
-                            egui::Label::new(format!(
-                                "{} · {}",
-                                source,
+                            egui::Label::new(
                                 snapshot
                                     .media_path
                                     .as_deref()
-                                    .unwrap_or(self.text("屏幕共享", "Screen share"))
-                            ))
+                                    .unwrap_or(self.text("屏幕共享", "Screen share")),
+                            )
+                            .halign(egui::Align::Min)
                             .truncate(),
                         );
                         if (Action {
@@ -163,6 +185,8 @@ impl MoqCastApp {
                         {
                             self.page = if snapshot.media_owner == Some(MediaOwner::Watch) {
                                 Page::Watch
+                            } else if relay {
+                                Page::RelayShare
                             } else {
                                 Page::ScreenShare
                             };
@@ -180,7 +204,7 @@ impl MoqCastApp {
                             {
                                 self.runtime.stop_watching(snapshot.media.generation())
                             } else {
-                                self.runtime.stop_sharing()
+                                self.runtime.stop_sharing(snapshot.media.generation())
                             };
                         }
                     });
@@ -226,6 +250,47 @@ impl MoqCastApp {
                         notice(ui, StatusTone::Error, error);
                     }
                     if snapshot.relay.lifecycle.phase() == Phase::Connected {
+                        ui.add_space(12.0);
+                        let owns = snapshot.media_owner == Some(MediaOwner::Share)
+                            && snapshot.relay_media();
+                        if moqcast_ui::v2::context_card_with_action(
+                            ui,
+                            moqcast_ui::v2::ContextCard {
+                                heading: self.text("本机", "This device"),
+                                name: snapshot
+                                    .local_device_name
+                                    .as_deref()
+                                    .unwrap_or(self.text("这台 Mac", "This Mac")),
+                                identity: "Relay",
+                                status: match snapshot.media.phase() {
+                                    MediaPhase::Idle => self.text("空闲", "Idle"),
+                                    MediaPhase::PreparingShare | MediaPhase::PreparingWatch => {
+                                        self.text("准备中", "Preparing")
+                                    }
+                                    MediaPhase::Sharing => self.text("正在共享", "Sharing"),
+                                    MediaPhase::Watching => self.text("正在观看", "Watching"),
+                                    MediaPhase::Stopping => self.text("正在停止", "Stopping"),
+                                    MediaPhase::Failed => {
+                                        self.text("媒体任务需要处理", "Media needs attention")
+                                    }
+                                },
+                                tone: super::desktop::media_tone(snapshot.media.phase()),
+                                action: if owns {
+                                    self.text("管理共享", "Manage sharing")
+                                } else {
+                                    self.text("共享到 Relay…", "Share to Relay…")
+                                },
+                            },
+                            moqcast_ui::v2::Metrics::for_width(ui.available_width()),
+                            owns || (snapshot.media.phase() == MediaPhase::Idle
+                                && self.relay_ui.watch_pending.is_none()
+                                && self.relay_ui.publish_pending.is_none()
+                                && !self.picker_pending),
+                        )
+                        .clicked()
+                        {
+                            self.page = Page::RelayShare;
+                        }
                         ui.add_space(12.0);
                         Palette::for_ui(ui).card().inner_margin(20).show(ui, |ui| {
                             ui.set_width(ui.available_width());
@@ -297,10 +362,12 @@ impl MoqCastApp {
             self.text("证书校验", "Certificate verification")
         };
         ui.add_enabled_ui(editable, |ui| {
-            egui::CollapsingHeader::new(title)
-                .id_salt("relay-pin-section")
-                .open((self.relay_ui.error == Some(ConfigError::Fingerprint)).then_some(true))
-                .show(ui, |ui| {
+            moqcast_ui::v2::disclosure(
+                ui,
+                egui::Id::new("relay-pin-section"),
+                title,
+                self.relay_ui.error == Some(ConfigError::Fingerprint),
+                |ui| {
                     let label = self.text(
                         "SHA-256 证书指纹（留空使用系统信任）",
                         "SHA-256 certificate pin (empty for system trust)",
@@ -326,14 +393,22 @@ impl MoqCastApp {
                             .map(|c| c.endpoint());
                     }
                     if !self.relay_ui.fingerprint.is_empty()
-                        && ui.button(self.text("清空指纹", "Clear pin")).clicked()
+                        && (Action {
+                            label: self.text("清空指纹", "Clear pin"),
+                            size: egui::vec2(118.0, 40.0),
+                            enabled: editable,
+                            tone: ActionTone::Neutral,
+                        })
+                        .show(ui)
+                        .clicked()
                     {
                         self.relay_ui.fingerprint.clear();
                         self.relay_ui.pin_endpoint = None;
                         self.relay_ui.error = None;
                         self.relay_ui.pin_cleared = false;
                     }
-                });
+                },
+            );
         });
         if self.relay_ui.pin_cleared {
             notice(ui, StatusTone::Warning, self.text("服务器已更改，旧指纹已清除。请确认新服务器的证书设置后再连接。", "Server changed. The previous pin was cleared. Check certificate settings before connecting."));
@@ -392,7 +467,7 @@ impl MoqCastApp {
                         }
                     }
                 }
-            } else if self.relay_ui.affects_watch(snapshot) {
+            } else if self.relay_ui.affects_media(snapshot) {
                 self.relay_ui.confirm_disconnect = Some(snapshot.relay.lifecycle.generation());
             } else {
                 self.disconnect_relay(snapshot);
@@ -402,7 +477,7 @@ impl MoqCastApp {
 
     fn disconnect_confirmation(&mut self, ui: &mut egui::Ui, snapshot: &AppSnapshot) {
         if self.relay_ui.confirm_disconnect == Some(snapshot.relay.lifecycle.generation())
-            && self.relay_ui.affects_watch(snapshot)
+            && self.relay_ui.affects_media(snapshot)
         {
             let response = egui::Modal::new(egui::Id::new("disconnect-relay"))
                 .frame(Palette::for_ui(ui).dialog())
@@ -416,22 +491,48 @@ impl MoqCastApp {
                     {
                         self.relay_ui.confirm_disconnect = None;
                     }
-                    ui.label(self.text(
-                        "这会停止当前 Relay 观看。附近设备设置保持不变。",
-                        "This stops Relay playback. Your Nearby setting stays the same.",
-                    ));
-                    if (Action {
-                        label: self.text("断开 Relay", "Disconnect Relay"),
-                        size: egui::vec2(180.0, 44.0),
-                        enabled: true,
-                        tone: ActionTone::Danger,
-                    })
-                    .show(ui)
-                    .clicked()
-                    {
-                        self.relay_ui.confirm_disconnect = None;
-                        self.disconnect_relay(snapshot);
-                    }
+                    let sharing = matches!(snapshot.media_source, MediaSource::RelayShare(_))
+                        || self.relay_ui.publish_pending.is_some();
+                    ui.label(if sharing {
+                        self.text(
+                            "将停止当前共享并从 Relay 撤回广播。",
+                            "Sharing will stop and the broadcast will be withdrawn.",
+                        )
+                    } else {
+                        self.text(
+                            "这会停止当前 Relay 观看。附近设备设置保持不变。",
+                            "This stops Relay playback. Your Nearby setting stays the same.",
+                        )
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if (Action {
+                            label: if sharing {
+                                self.text("停止并断开", "Stop and disconnect")
+                            } else {
+                                self.text("断开 Relay", "Disconnect Relay")
+                            },
+                            size: egui::vec2(180.0, 44.0),
+                            enabled: true,
+                            tone: ActionTone::Danger,
+                        })
+                        .show(ui)
+                        .clicked()
+                        {
+                            self.relay_ui.confirm_disconnect = None;
+                            self.disconnect_relay(snapshot);
+                        }
+                        if (Action {
+                            label: self.text("取消", "Cancel"),
+                            size: egui::vec2(96.0, 44.0),
+                            enabled: true,
+                            tone: ActionTone::Neutral,
+                        })
+                        .show(ui)
+                        .clicked()
+                        {
+                            self.relay_ui.confirm_disconnect = None;
+                        }
+                    });
                 });
             if response.should_close() {
                 self.relay_ui.confirm_disconnect = None;
@@ -447,7 +548,7 @@ impl MoqCastApp {
         }
         egui::ScrollArea::vertical()
             .id_salt("relay-broadcasts")
-            .auto_shrink([false, false])
+            .auto_shrink([false, true])
             .show(ui, |ui| {
                 for (path, revision) in &snapshot.relay.entries {
                     let selection = Selection {
@@ -469,6 +570,7 @@ impl MoqCastApp {
                                 enabled: current
                                     || (self.relay_ui.pending.is_none()
                                         && self.relay_ui.watch_pending.is_none()
+                                        && self.relay_ui.publish_pending.is_none()
                                         && !self.picker_pending
                                         && snapshot.can_watch_relay(&selection)),
                                 tone: ActionTone::Primary,
@@ -549,7 +651,7 @@ mod tests {
             watch_pending: Some((0, selection.clone())),
             ..Default::default()
         };
-        assert!(ui.affects_watch(&snapshot));
+        assert!(ui.affects_media(&snapshot));
         ui.confirm_disconnect = Some(generation);
         snapshot.media_source = MediaSource::Relay(selection);
         snapshot.media_owner = Some(MediaOwner::Watch);
@@ -560,7 +662,7 @@ mod tests {
         assert!(!ui.reconcile(&snapshot));
         assert!(ui.confirm_disconnect.is_none());
         snapshot.media_source = MediaSource::Nearby;
-        assert!(!ui.affects_watch(&snapshot));
+        assert!(!ui.affects_media(&snapshot));
     }
 
     #[test]
@@ -572,7 +674,7 @@ mod tests {
         while app.runtime.stop_watching(snapshot.media.generation()) {}
         let ctx = egui::Context::default();
         let render = |app: &mut MoqCastApp, events| {
-            ctx.run_ui(
+            let mut output = ctx.run_ui(
                 egui::RawInput {
                     events,
                     ..Default::default()
@@ -581,7 +683,9 @@ mod tests {
                     egui::CentralPanel::default()
                         .show(root, |ui| app.connection_action(ui, &snapshot, true));
                 },
-            )
+            );
+            output.textures_delta.clear();
+            output
         };
         let output = render(&mut app, vec![]);
         let point = output
@@ -674,5 +778,30 @@ mod tests {
         snapshot.relay.lifecycle.begin(Phase::Disconnected);
         assert!(!ui.reconcile(&snapshot));
         assert!(ui.watch_pending.is_none());
+    }
+}
+
+#[cfg(test)]
+mod publish_confirmation_tests {
+    use super::*;
+
+    #[test]
+    fn queued_and_running_publication_require_confirmation_only_for_their_connection() {
+        let mut state = Ui::default();
+        let mut s = AppSnapshot::default();
+        let connection = s.relay.lifecycle.begin(Phase::Connected);
+        state.publish_pending = Some((connection, s.relay.publish_request));
+        assert!(state.affects_media(&s));
+        state.confirm_disconnect = Some(connection);
+        s.relay.publish_request += 1;
+        s.media_source = MediaSource::RelayShare(connection);
+        s.media_owner = Some(MediaOwner::Share);
+        state.reconcile(&s);
+        assert!(state.publish_pending.is_none());
+        assert_eq!(state.confirm_disconnect, Some(connection));
+        s.relay.lifecycle.begin(Phase::Connected);
+        state.reconcile(&s);
+        assert!(state.confirm_disconnect.is_none());
+        assert!(!state.affects_media(&s));
     }
 }

@@ -32,6 +32,7 @@ enum Page {
     Nearby,
     Relay,
     ScreenShare,
+    RelayShare,
     Watch,
 }
 
@@ -396,8 +397,20 @@ impl eframe::App for MoqCastApp {
                 .show(ui, |ui| self.watch_player(ui, &snapshot));
             return;
         }
+        let before = self.page;
         self.handle_shortcuts(ui.ctx());
         self.desktop_shell(ui, &snapshot);
+        // Leaving a source form abandons its outstanding system chooser. A late selection
+        // from that form must not lock or change the other sharing destination.
+        if self.picker_pending
+            && (before != self.page
+                || !matches!(self.page, Page::RelayShare | Page::ScreenShare)
+                || (self.page == Page::RelayShare
+                    && snapshot.relay.lifecycle.phase() != crate::relay::Phase::Connected))
+        {
+            self.capture_picker.take();
+            self.picker_pending = false;
+        }
         self.show_turn_off_nearby_confirmation(ui.ctx());
         if self.diagnostics.show_window(ui.ctx(), self.locale) {
             self.settings_open = true;

@@ -29,7 +29,7 @@
     <key>LSMinimumSystemVersion</key>
     <string>14.2</string>
     <key>NSAudioCaptureUsageDescription</key>
-    <string>MoQCast captures system audio only when you choose to share it with a nearby device.</string>
+    <string>MoQCast captures system audio only when you choose to share it over Nearby or a connected relay.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_moq._udp</string>
@@ -39,6 +39,6 @@
     <key>NSLocalNetworkUsageDescription</key>
     <string>MoQCast discovers and connects directly to devices on your local network.</string>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>MoQCast captures the screen only when you choose to share it with a nearby device.</string>
+    <string>MoQCast captures the screen only when you choose to share it over Nearby or a connected relay.</string>
 </dict>
 </plist>

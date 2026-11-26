@@ -38,7 +38,7 @@ pub(crate) fn sharing(ui: &mut egui::Ui, chinese: bool) {
         return;
     };
     let text = |zh, en| if chinese { zh } else { en };
-    ui.collapsing(text("共享信息", "Sharing information"), |ui| {
+    let render = |ui: &mut egui::Ui| {
         let unavailable = text("未提供", "Unavailable");
         let source = if record.source() == "window" {
             text("窗口", "Window")
@@ -85,7 +85,18 @@ pub(crate) fn sharing(ui: &mut egui::Ui, chinese: bool) {
                 ui.end_row();
             }
         });
-    });
+    };
+    let label = text("共享信息", "Sharing information");
+    #[cfg(target_os = "macos")]
+    moqcast_ui::v2::disclosure(
+        ui,
+        egui::Id::new("publication-information"),
+        label,
+        false,
+        render,
+    );
+    #[cfg(not(target_os = "macos"))]
+    ui.collapsing(label, render);
 }
 
 pub(crate) fn software_failure(generation: u64, chinese: bool) -> Option<&'static str> {

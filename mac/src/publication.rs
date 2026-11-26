@@ -115,6 +115,20 @@ enum Stage {
     },
 }
 
+pub(crate) enum Destination {
+    Nearby(String),
+    Relay(crate::relay::PublishPrefix),
+}
+
+impl Destination {
+    fn path(self) -> Result<String, Failure> {
+        match self {
+            Self::Nearby(peer) => canonical_path(&peer),
+            Self::Relay(prefix) => Ok(prefix.broadcast_path()),
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Owner {
     stage: Stage,
@@ -126,7 +140,7 @@ impl Owner {
         &mut self,
         generation: u64,
         origin: moq_net::origin::Producer,
-        local_peer_id: String,
+        destination: Destination,
         selection: Selection,
         system_audio: bool,
     ) {
@@ -139,7 +153,7 @@ impl Owner {
         self.observation = Some(Session::publish(generation, source, false));
         self.stage = Stage::Preparing {
             generation,
-            operation: Box::pin(prepare(origin, local_peer_id, selection, system_audio)),
+            operation: Box::pin(prepare(origin, destination, selection, system_audio)),
         };
     }
 
@@ -147,6 +161,13 @@ impl Owner {
         self.stage = Stage::Idle;
         if let Some(session) = self.observation.take() {
             session.stopped();
+        }
+    }
+
+    pub(crate) fn connection_lost(&mut self) {
+        self.stage = Stage::Idle;
+        if let Some(session) = self.observation.take() {
+            session.finish(true);
         }
     }
 
@@ -346,7 +367,7 @@ impl Drop for Publication {
 
 async fn prepare(
     origin: moq_net::origin::Producer,
-    local_peer_id: String,
+    destination: Destination,
     selection: Selection,
     system_audio: bool,
 ) -> Result<Publication, Failure> {
@@ -354,7 +375,7 @@ async fn prepare(
     let supports_system_audio = selection.supports_system_audio();
     let (source, source_size) = resolve(selection).await?;
     let audio = audio_plan(system_audio, supports_system_audio, &source);
-    let path = canonical_path(&local_peer_id)?;
+    let path = destination.path()?;
     let mut broadcast = origin.create_broadcast(&path).map_err(|error| {
         tracing::warn!(%error, "could not create screen broadcast");
         Failure::pipeline("Screen sharing could not create its local broadcast.")
@@ -484,7 +505,7 @@ mod tests {
         owner.start(
             1,
             origin,
-            "native-fixture".into(),
+            Destination::Nearby("native-fixture".into()),
             Selection::Window {
                 window_id,
                 label: "designated test window".into(),

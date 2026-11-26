@@ -132,6 +132,7 @@ pub(crate) enum MediaSource {
     #[default]
     Nearby,
     Relay(relay::Selection),
+    RelayShare(Generation),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -237,7 +238,7 @@ impl AppSnapshot {
     }
 
     pub(crate) fn relay_media(&self) -> bool {
-        self.media_owner.is_some() && matches!(self.media_source, MediaSource::Relay(_))
+        self.media_owner.is_some() && !matches!(self.media_source, MediaSource::Nearby)
     }
 
     pub(crate) fn access(&self) -> moqcast_lan_state::Access {
@@ -577,13 +578,23 @@ pub(crate) enum RuntimeCommand {
     ConnectRelay(relay::Config),
     DisconnectRelay(Generation),
     WatchRelay(relay::Selection),
-    WatchScreen { peer: String, path: String },
-    SetPlaybackVolume { generation: u64, percent: u8 },
+    WatchScreen {
+        peer: String,
+        path: String,
+    },
+    SetPlaybackVolume {
+        generation: u64,
+        percent: u8,
+    },
     StopWatching(Generation),
     SelectShareSource(ShareSelection),
     SetShareSystemAudio(bool),
     StartSharing,
-    StopSharing,
+    StartRelayShare {
+        connection: Generation,
+        prefix: relay::PublishPrefix,
+    },
+    StopSharing(Generation),
     StopNetwork,
     RestartNetwork,
     Shutdown,
@@ -773,8 +784,20 @@ impl RuntimeOwner {
         self.commands.try_send(RuntimeCommand::StartSharing).is_ok()
     }
 
-    pub(crate) fn stop_sharing(&self) -> bool {
-        self.commands.try_send(RuntimeCommand::StopSharing).is_ok()
+    pub(crate) fn start_relay_share(
+        &self,
+        connection: Generation,
+        prefix: relay::PublishPrefix,
+    ) -> bool {
+        self.commands
+            .try_send(RuntimeCommand::StartRelayShare { connection, prefix })
+            .is_ok()
+    }
+
+    pub(crate) fn stop_sharing(&self, generation: Generation) -> bool {
+        self.commands
+            .try_send(RuntimeCommand::StopSharing(generation))
+            .is_ok()
     }
 
     pub(crate) fn stop_network(&self) -> bool {
@@ -845,7 +868,7 @@ async fn run(
         let input = tokio::select! {
             command = commands.recv() => RuntimeInput::Command(command),
             Some(event) = system_events.recv() => RuntimeInput::System(event),
-            result = async { starting.as_mut().unwrap().await }, if starting.is_some() => RuntimeInput::Started(result),
+            result = async { starting.as_mut().unwrap().await }, if starting.is_some() => RuntimeInput::Started(result.map(Box::new)),
             event = async { services.as_mut().unwrap().recv().await }, if services.is_some() => RuntimeInput::Network(event),
             event = async { relay_owner.as_mut().unwrap().recv().await }, if relay_owner.is_some() => RuntimeInput::Relay(event),
             result = async { relay_request.as_mut().unwrap().await }, if relay_request.is_some() => RuntimeInput::RelayBroadcast(result),
@@ -866,7 +889,7 @@ async fn run(
                             .session
                             .apply(generations.session, SessionPhase::Listening);
                         snapshot.nearby_issue = None;
-                        services = Some(service);
+                        services = Some(*service);
                         scan = Some(Box::pin(tokio::time::sleep(Duration::from_secs(3))));
                         scan_finished = false;
                     }
@@ -881,6 +904,7 @@ async fn run(
                 close_relay(
                     &mut snapshot,
                     &mut relay_owner,
+                    &mut publication,
                     &mut playback,
                     &frames,
                     &snapshot_tx,
@@ -934,6 +958,7 @@ async fn run(
                 close_relay(
                     &mut snapshot,
                     &mut relay_owner,
+                    &mut publication,
                     &mut playback,
                     &frames,
                     &snapshot_tx,
@@ -1033,6 +1058,7 @@ async fn run(
                 close_relay(
                     &mut snapshot,
                     &mut relay_owner,
+                    &mut publication,
                     &mut playback,
                     &frames,
                     &snapshot_tx,
@@ -1070,10 +1096,16 @@ async fn run(
                 }
             }
             RuntimeInput::Relay(relay::Event::Closed(error)) => {
+                if matches!(snapshot.media_source, MediaSource::RelayShare(_))
+                    && snapshot.media_owner == Some(MediaOwner::Share)
+                {
+                    publication.connection_lost();
+                }
                 drop(relay_request.take());
                 close_relay(
                     &mut snapshot,
                     &mut relay_owner,
+                    &mut publication,
                     &mut playback,
                     &frames,
                     &snapshot_tx,
@@ -1200,8 +1232,31 @@ async fn run(
                     start_share(&mut snapshot, services, &mut publication);
                 }
             }
-            RuntimeInput::Command(Some(RuntimeCommand::StopSharing)) => {
-                stop_share(&mut snapshot, &mut publication)
+            RuntimeInput::Command(Some(RuntimeCommand::StartRelayShare { connection, prefix })) => {
+                snapshot.relay.publish_request = snapshot
+                    .relay
+                    .publish_request
+                    .checked_add(1)
+                    .expect("relay request sequence exhausted");
+                if snapshot.relay.lifecycle.generation() == connection
+                    && snapshot.relay.lifecycle.phase() == relay::Phase::Connected
+                    && let Some(owner) = &relay_owner
+                    && let Some(start) = snapshot.begin_share()
+                {
+                    snapshot.media_source = MediaSource::RelayShare(connection);
+                    publication.start(
+                        start.generation.value(),
+                        owner.publish_origin(),
+                        publication::Destination::Relay(prefix),
+                        start.selection,
+                        start.system_audio,
+                    );
+                }
+            }
+            RuntimeInput::Command(Some(RuntimeCommand::StopSharing(generation))) => {
+                if snapshot.media.generation() == generation {
+                    stop_share(&mut snapshot, &mut publication);
+                }
             }
             RuntimeInput::Playback(Some(event)) => {
                 apply_playback_event(&mut snapshot, &frames, event)
@@ -1237,6 +1292,7 @@ async fn end_relay_watch(
 async fn close_relay(
     snapshot: &mut AppSnapshot,
     owner: &mut Option<relay::Owner>,
+    publication: &mut publication::Owner,
     playback: &mut playback::Owner,
     frames: &watch::Sender<Option<Arc<PlaybackFrame>>>,
     snapshots: &watch::Sender<Arc<AppSnapshot>>,
@@ -1252,8 +1308,14 @@ async fn close_relay(
     publish_snapshot(snapshots, snapshot, wake);
     let mut errors = crate::cleanup::Errors::default();
     if snapshot.relay_media() {
-        errors.result("playback", playback.stop().await);
-        frames.send_replace(None);
+        match snapshot.media_owner {
+            Some(MediaOwner::Share) => publication.stop(),
+            Some(MediaOwner::Watch) => {
+                errors.result("playback", playback.stop().await);
+                frames.send_replace(None);
+            }
+            None => unreachable!("relay media owns a task"),
+        }
         snapshot.clear_media(MediaPhase::Idle, None);
     }
     errors.result("connection", owner.take().unwrap().close().await);
@@ -1425,7 +1487,7 @@ async fn complete_network_turn_off<F, Fut>(
 }
 
 enum RuntimeInput {
-    Started(Result<network::Services, NearbyIssue>),
+    Started(Result<Box<network::Services>, NearbyIssue>),
     Relay(relay::Event),
     RelayBroadcast(Result<moq_tokio::moq_net::broadcast::Consumer, moq_tokio::moq_net::Error>),
     Command(Option<RuntimeCommand>),
@@ -1508,7 +1570,7 @@ fn start_share(
     publication.start(
         start.generation.value(),
         services.publish_origin(),
-        services.local_peer_id().to_owned(),
+        publication::Destination::Nearby(services.local_peer_id().to_owned()),
         start.selection,
         start.system_audio,
     );
@@ -3753,3 +3815,7 @@ mod relay_lifecycle_tests {
         assert!(!snapshot.can_watch_relay(&selection));
     }
 }
+
+#[cfg(test)]
+#[path = "runtime/relay_publish_tests.rs"]
+mod relay_publish_tests;

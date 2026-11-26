@@ -21,6 +21,31 @@ pub(crate) struct Selection {
     pub(crate) revision: u64,
 }
 
+/// A visible broadcast prefix relative to the scope of the connected relay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PublishPrefix(String);
+
+impl PublishPrefix {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        let prefix = value.strip_suffix('/').unwrap_or(value);
+        if prefix.split('/').any(|segment| {
+            segment.is_empty()
+                || segment.starts_with('.')
+                || segment.chars().any(|c| {
+                    c.is_control() || c.is_whitespace() || matches!(c, '?' | '#' | '\\' | '%')
+                })
+        }) {
+            return None;
+        }
+        Some(Self(prefix.to_owned()))
+    }
+
+    pub(crate) fn broadcast_path(&self) -> String {
+        let id = objc2_foundation::NSUUID::UUID().UUIDString().to_string();
+        format!("{}/{}", self.0, id.to_ascii_lowercase())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Snapshot {
     pub(crate) lifecycle: Lifecycle<Phase>,
@@ -29,6 +54,7 @@ pub(crate) struct Snapshot {
     pub(crate) error: Option<String>,
     pub(crate) version: Option<String>,
     pub(crate) watch_request: u64,
+    pub(crate) publish_request: u64,
 }
 
 impl Default for Snapshot {
@@ -40,6 +66,7 @@ impl Default for Snapshot {
             error: None,
             version: None,
             watch_request: 0,
+            publish_request: 0,
         }
     }
 }
@@ -154,6 +181,7 @@ pub(crate) struct Owner {
     client: Client,
     connection: Connection,
     origin: moq_net::origin::Producer,
+    publish: moq_net::origin::Producer,
     announcements: moq_net::announce::Consumer,
     connected: bool,
     routes: BTreeMap<String, (u64, moq_net::origin::Route)>,
@@ -164,9 +192,16 @@ impl Owner {
     pub(crate) fn start(config: Config) -> Result<Self, String> {
         let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
         let announcements = origin.consume().announced();
-        let client = config.client(origin.clone())?;
+        // Only this origin is exported. Remote announcements never flow back to the relay.
+        let (publish, publish_driver) = moq_net::origin::Producer::new(Default::default());
+        let client = config
+            .client(origin.clone())?
+            .with_publisher(publish.consume());
         let driver = tokio::spawn(async move {
-            let _ = moq_net::time::run(driver).await;
+            let _ = tokio::join!(
+                moq_net::time::run(driver),
+                moq_net::time::run(publish_driver)
+            );
         });
         let connection = client.connect(config.url);
         Ok(Self {
@@ -174,6 +209,7 @@ impl Owner {
             client,
             connection,
             origin,
+            publish,
             announcements,
             connected: false,
             routes: BTreeMap::new(),
@@ -201,6 +237,10 @@ impl Owner {
                 None => Event::Closed("Relay announcement stream ended".into()),
             }
         }
+    }
+
+    pub(crate) fn publish_origin(&self) -> moq_net::origin::Producer {
+        self.publish.clone()
     }
 
     pub(crate) fn version(&self) -> Option<String> {
@@ -258,6 +298,7 @@ impl Owner {
             client,
             connection,
             origin,
+            publish,
             announcements,
             ..
         } = self;
@@ -268,6 +309,7 @@ impl Owner {
             .map_err(|_| "Relay connection cleanup failed".to_owned());
         client.close().await;
         drop(origin);
+        drop(publish);
         let mut errors = crate::cleanup::Errors::default();
         errors.result("connection", result);
         errors.join("relay origin", driver.await, false);

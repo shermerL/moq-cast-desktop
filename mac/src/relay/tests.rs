@@ -2,21 +2,14 @@ use super::*;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 async fn roundtrip(config: Config) {
-    let publish = moq_tokio::origin::spawn();
-    let client = config
-        .client(moq_tokio::origin::spawn())
-        .unwrap()
-        .with_publisher(publish.consume());
-    let connection = client
-        .connect(config.url.clone())
-        .established()
-        .await
-        .unwrap();
+    let mut publisher = Owner::start(config.clone()).unwrap();
+    assert!(matches!(publisher.recv().await, Event::Connected));
+    let publish = publisher.publish_origin();
     let mut viewer = Owner::start(config).unwrap();
     assert!(matches!(viewer.recv().await, Event::Connected));
     eprintln!(
         "publisher version={} viewer version={}",
-        connection.version().unwrap(),
+        publisher.version().unwrap(),
         viewer.version().unwrap()
     );
     let name = format!(
@@ -93,8 +86,8 @@ async fn roundtrip(config: Config) {
         assert!(stats.snapshot(generation).is_none());
     }
     viewer.close().await.unwrap();
-    connection.close().await.unwrap();
-    client.close().await;
+    drop(publish);
+    publisher.close().await.unwrap();
     eprintln!("announcement, exact request, payload, withdrawal and close passed");
 }
 
@@ -224,7 +217,7 @@ async fn verify_video(
     let clock = moq_mux::Clock::new();
     let catalog = moq_mux::catalog::Producer::<()>::new(
         &mut broadcast,
-        moq_mux::catalog::Config::default().with_clock(clock.clone()),
+        moq_mux::catalog::Config::default().with_clock(clock),
     )
     .unwrap();
     let size = moq_video::Size::new(160, 96);
@@ -329,7 +322,7 @@ async fn manual_gui_video_fixture() {
     let clock = moq_mux::Clock::new();
     let catalog = moq_mux::catalog::Producer::<()>::new(
         &mut broadcast,
-        moq_mux::catalog::Config::default().with_clock(clock.clone()),
+        moq_mux::catalog::Config::default().with_clock(clock),
     )
     .unwrap();
     let size = moq_video::Size::new(640, 360);
@@ -376,4 +369,67 @@ async fn manual_gui_video_fixture() {
     drop(broadcast);
     connection.close().await.unwrap();
     client.close().await;
+}
+
+#[tokio::test]
+async fn filtered_publish_prefix_keeps_connection_and_only_accepted_routes_are_visible() {
+    let _ = moq_tokio::rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let mut cfg = moq_tokio::listen::Config::default();
+    cfg.bind = Some(moq_tokio::listen::Bind::Addr(
+        "127.0.0.1:0".parse().unwrap(),
+    ));
+    cfg.tls.generate = vec!["localhost".into()];
+    let server = cfg.init(Default::default()).unwrap();
+    let config = Config::parse(
+        &format!("moqt://{}/", server.local_addr().unwrap()),
+        &server.certificates().fingerprints()[0],
+    )
+    .unwrap();
+    let mut listener = server.listen().await.unwrap();
+    let origin = moq_tokio::origin::spawn();
+    let writable = origin
+        .scope(
+            "",
+            &moq_net::Patterns::from("test/allowed/**".parse::<moq_net::Pattern>().unwrap()),
+        )
+        .unwrap();
+    let sessions = tokio::spawn(async move {
+        let mut tasks = tokio::task::JoinSet::new();
+        while let Some(request) = listener.accept().await {
+            let request = request
+                .with_publisher(&origin)
+                .with_subscriber(writable.clone());
+            tasks.spawn(async move {
+                if let Ok(s) = request.ok().await {
+                    let _ = s.closed().await;
+                }
+            });
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut publisher = Owner::start(config.clone()).unwrap();
+        let mut viewer = Owner::start(config).unwrap();
+        assert!(matches!(publisher.recv().await, Event::Connected));
+        assert!(matches!(viewer.recv().await, Event::Connected));
+        let publish = publisher.publish_origin();
+        // A local announcement is accepted even for the remote's excluded path.
+        let excluded = publish.create_broadcast("test/denied/card").unwrap();
+        excluded.announce(Default::default()).unwrap();
+        let accepted = publish.create_broadcast("test/allowed/card").unwrap();
+        accepted.announce(Default::default()).unwrap();
+        let mut directory = Snapshot::default();
+        loop {
+            let Event::Announcement(event) = viewer.recv().await else { panic!("connection ended before allowed route"); };
+            viewer.apply(&mut directory, event);
+            assert!(!directory.entries.contains_key("test/denied/card"));
+            if directory.entries.contains_key("test/allowed/card") { break; }
+        }
+        assert!(publisher.connection.connected());
+        eprintln!("excluded path accepted locally; viewer received allowed sibling; publisher connection remains established");
+        drop((accepted, excluded, publish));
+        viewer.close().await.unwrap();
+        publisher.close().await.unwrap();
+    }).await.unwrap();
+    sessions.abort();
+    assert!(sessions.await.unwrap_err().is_cancelled());
 }

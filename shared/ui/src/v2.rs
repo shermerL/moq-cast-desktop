@@ -3,7 +3,7 @@
 use egui::{Color32, Context, Frame, Margin, Response, RichText, Stroke, Ui, Vec2};
 
 mod form;
-pub use form::{TextField, select};
+pub use form::{TextField, disclosure, segmented, select, switch};
 
 /// Semantic colors for the S2 desktop shell.
 #[derive(Clone, Copy)]
