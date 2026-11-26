@@ -15,6 +15,10 @@ Native screen sharing and playback for Windows, macOS, and Linux, built on MoQ.
 - Reject unsupported or malformed input with an actionable error. Do not silently continue with an invalid media or connection state.
 - Keep changes focused on one independently reviewable concern. Avoid unrelated refactors and formatting churn; update affected docs with the change.
 - Make resource ownership and shutdown responsibilities explicit. Keep temporary state local and internal APIs private until a consumer needs them.
+- Keep presentation separate from session ownership. Navigation and layout changes must not implicitly restart or stop media or connections; explicit commands and lifecycle policies own those transitions.
+- Share user-visible state and action contracts across platforms, while keeping OS permissions and resource mechanisms in platform adapters. Keep shared state logic independent of UI and platform runtimes.
+- Make backend and recovery choices explicit and observable. Automatic retries, reconfiguration, or fallback need defined triggers and cleanup; do not hide errors by silently changing paths.
+- Separate portable configuration, machine-local state, and credentials. Export only the fields intended for that artifact; never embed credentials or machine-specific grants in portable configuration.
 - Prefer existing conventions and small, clear abstractions. Comments explain non-obvious reasons, not the history of a change.
 - Reproduce defects when feasible and add a regression test when practical. Use controlled time for timing tests and wire new tests into CI.
 - Explain public API, protocol, and interoperability impacts. Changes to upstream MoQ require separate authorization.
